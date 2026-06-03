@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibeBoard Linux MVP</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Sidebar: Conversation List -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <div class="mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <span class="brand-name">VibeBoard</span>
+        </div>
+        <button class="ghost-btn" id="newConversationBtn" type="button">+ 新建</button>
+      </div>
+      <div class="conversation-list" id="conversationList">
+        <!-- Conversations will be loaded here -->
+      </div>
+      <div class="sidebar-footer">
+        <a href="/market.html" class="market-link">
+          <span>🏪</span> 应用市场
+        </a>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="shell">
+      <header class="topbar">
+        <div class="top-left">
+          <button class="icon-btn" id="sidebarToggle" type="button" aria-label="Toggle sidebar">☰</button>
+          <div class="brand">
+            <div>
+              <p>VibeBoard Linux</p>
+              <h1 id="currentConversationTitle">Hardware Vibe Coding MVP</h1>
+            </div>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button class="icon-btn" id="codeToggle" type="button" aria-label="Open generated code">&lt;/&gt;</button>
+          <button class="ghost-btn" id="refreshBoardBtn" type="button">Status</button>
+          <button class="ghost-btn model-btn" id="modelConfigBtn" type="button"><span id="modelDot"></span><span id="modelButtonLabel">Model</span></button>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <section class="agent-panel">
+          <div class="panel-head">
+            <div>
+              <p class="kicker">Agent Chat</p>
+              <h2>和 Agent 对话</h2>
+            </div>
+            <span class="pill" id="agentState">idle</span>
+          </div>
+
+          <div class="chat-log" id="chatLog" aria-live="polite">
+            <article class="msg agent">
+              <div class="avatar">VB</div>
+              <p>告诉我你想在硬件上做什么。我会把需求拆成文件、做最小编译校验，然后通过 SSH 写入右侧连接的泰山派小屏。</p>
+            </article>
+          </div>
+
+          <div class="prompt-row">
+            <button type="button" data-prompt="做一个显示时间、天气、设备状态和一句 AI 摘要的小屏助手">AI 状态屏</button>
+            <button type="button" data-prompt="做一个按键录音，并把 AI 回复显示在小屏上的语音助手。">语音助手</button>
+            <button type="button" data-prompt="做一个家庭服务器状态面板，显示网络、温度、内存和服务状态。">控制面板</button>
+          </div>
+
+          <form class="composer" id="composer">
+            <label for="promptInput">输入想做的硬件应用</label>
+            <textarea id="promptInput" rows="3">做一个显示时间、天气、设备状态和一句 AI 摘要的小屏助手</textarea>
+            <button class="primary-btn wide" id="generateBtn" type="submit">生成 / 编译 / 写入硬件</button>
+          </form>
+        </section>
+
+        <section class="hardware-panel">
+          <section class="device-area">
+            <div class="device-card">
+              <div class="device-toolbar">
+                <div>
+                  <p class="kicker">Live Hardware Preview</p>
+                  <h2>小屏效果</h2>
+                </div>
+                <span class="pill" id="deployState">not deployed</span>
+              </div>
+              <div class="device-stage">
+                <div class="mac">
+                  <div class="display-frame">
+                    <div class="screen-viewport" id="screenViewport">
+                      <div class="device-screen" id="deviceScreen">
+                        <iframe id="deviceFrame" title="Generated 480x360 screen preview" src="/generated/current/index.html"></iframe>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="mac-slot"></div>
+                  <div class="mac-foot"></div>
+                </div>
+              </div>
+              <!-- Deploy to Market Button -->
+              <button class="deploy-market-btn" id="deployMarketBtn" type="button" title="部署到应用市场">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                  <path d="M12 15V3m0 0L8 7m4-4l4 4M2 17l.621 2.485A2 2 0 004.561 21h14.878a2 2 0 001.94-1.515L22 17"/>
+                </svg>
+              </button>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <aside class="drawer" id="codeDrawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <p class="kicker">Generated Files</p>
+        <h2>应用代码</h2>
+      </div>
+      <button class="icon-btn" id="closeDrawer" type="button" aria-label="Close generated code">x</button>
+    </div>
+    <div class="tabs" id="fileTabs"></div>
+    <pre id="codePreview"># waiting for generated files</pre>
+  </aside>
+
+  <aside class="drawer status-drawer" id="statusDrawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <p class="kicker">Board Runtime</p>
+        <h2 id="boardName">Taishan Gray <span>RK3566</span></h2>
+      </div>
+      <button class="icon-btn" id="closeStatusDrawer" type="button" aria-label="Close board status">x</button>
+    </div>
+    <div class="board-facts">
+      <div><span>OS</span><strong id="boardOs">Debian 10 / Linux 4.19</strong></div>
+      <div><span>Display</span><strong>480 x 360 DSI</strong></div>
+      <div><span>Wi-Fi</span><strong id="boardWifi">checking</strong></div>
+      <div><span>IP</span><strong id="boardIp">checking</strong></div>
+    </div>
+    <div class="cap-list" aria-label="Board capabilities">
+      <span class="cap ok">screen</span>
+      <span class="cap ok">wifi</span>
+      <span class="cap ok" id="sshState">ssh checking</span>
+      <span class="cap ok">audio</span>
+      <span class="cap ok">gpio</span>
+      <span class="cap warn">no camera</span>
+    </div>
+    <div class="runtime-grid">
+      <div><span>Service</span><strong id="serviceState">checking</strong></div>
+      <div><span>Temp</span><strong id="tempState">--</strong></div>
+      <div><span>Memory</span><strong id="memoryState">--</strong></div>
+      <div><span>Last build</span><strong id="lastBuildState">none</strong></div>
+      <div><span>Compile</span><strong id="compileState">not run</strong></div>
+      <div><span>Program</span><strong id="programState">not run</strong></div>
+      <div><span>Golden loop</span><strong id="goldenLoopState">not verified</strong></div>
+    </div>
+    <div class="verify-list" id="verifyList" aria-label="Golden loop verification"></div>
+    <pre class="deploy-log" id="hardwareResult">waiting for hardware run</pre>
+  </aside>
+
+  <section class="modal" id="modelModal" aria-hidden="true" role="dialog" aria-labelledby="modelModalTitle">
+    <div class="modal-panel">
+      <div class="drawer-head">
+        <div>
+          <p class="kicker">Model Settings</p>
+          <h2 id="modelModalTitle">配置大模型</h2>
+        </div>
+        <button class="icon-btn" id="closeModelModal" type="button" aria-label="Close model settings">x</button>
+      </div>
+      <form class="model-form" id="modelForm">
+        <label>
+          <span>Provider</span>
+          <select id="modelProvider">
+            <option value="deepseek">DeepSeek</option>
+            <option value="minimax">MiniMax</option>
+            <option value="custom">Custom OpenAI-compatible</option>
+          </select>
+        </label>
+        <label>
+          <span>Base URL</span>
+          <input id="modelBaseUrl" type="url" autocomplete="off" spellcheck="false">
+        </label>
+        <label>
+          <span>Model</span>
+          <input id="modelName" type="text" autocomplete="off" spellcheck="false">
+        </label>
+        <label>
+          <span>API Key</span>
+          <input id="modelApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...">
+        </label>
+        <div class="model-help">
+          <span id="modelHelpText">API Key 只保存在当前浏览器本地。未配置时会使用本地模板兜底。</span>
+        </div>
+        <div class="modal-actions">
+          <button class="ghost-btn" id="clearModelSettings" type="button">清空</button>
+          <button class="primary-btn" type="submit">保存配置</button>
+        </div>
+      </form>
+    </div>
+  </section>
+  <div class="scrim" id="scrim" hidden></div>
+
+  <!-- Deploy to Market Modal -->
+  <section class="modal" id="deployMarketModal" aria-hidden="true" role="dialog">
+    <div class="modal-panel">
+      <div class="drawer-head">
+        <div>
+          <p class="kicker">Publish to Market</p>
+          <h2>部署到应用市场</h2>
+        </div>
+        <button class="icon-btn" id="closeDeployModal" type="button">x</button>
+      </div>
+      <form id="deployMarketForm">
+        <label>
+          <span>应用名称</span>
+          <input id="appName" type="text" required placeholder="给你的应用起个名字">
+        </label>
+        <label>
+          <span>应用简介</span>
+          <textarea id="appDescription" rows="3" placeholder="描述你的应用功能..."></textarea>
+        </label>
+        <div class="modal-actions">
+          <button class="ghost-btn" type="button" id="cancelDeploy">取消</button>
+          <button class="primary-btn" type="submit">发布</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <script src="./app.js"></script>
+</body>
+</html>

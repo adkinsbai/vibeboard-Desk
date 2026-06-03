@@ -1,0 +1,4 @@
+interface:
+  display_name: "VibeBoard Gray Deploy"
+  short_description: "Deploy, verify, and debug the Taishan gray RK3566 VibeBoard MVP."
+  default_prompt: "Use this skill for VibeBoard gray-board deployment, 480x360 kiosk display, SSH/FRP access, and PC preview consistency work."

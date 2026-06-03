@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Database (runtime data)
+vibeboard.db
+
+# Logs
+*.log
+error.log
+output.log
+server.log
+
+# Test scripts (temporary)
+test-api.ps1
+test-ssh.py
+deploy-test.ps1
+verify-ui-click.mjs
+
+# Generated output (recreated by build)
+generated/
+runtime/
+
+# Debug screenshots
+*.png
+ui-previews/
+
+# OS files
+.DS_Store
+Thumbs.db

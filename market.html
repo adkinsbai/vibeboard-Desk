@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VibeBoard 应用市场</title>
+  <link rel="stylesheet" href="./styles.css">
+  <style>
+    .market-layout {
+      min-height: 100vh;
+      background: var(--bg);
+      padding: 24px;
+    }
+
+    .market-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 32px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .market-header .brand {
+      gap: 12px;
+    }
+
+    .market-title {
+      font-family: var(--mono);
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .market-subtitle {
+      font-size: 14px;
+      color: var(--subtle);
+      margin-top: 4px;
+    }
+
+    .market-stats {
+      display: flex;
+      gap: 24px;
+    }
+
+    .stat-item {
+      text-align: center;
+    }
+
+    .stat-value {
+      font-family: var(--mono);
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--amber);
+    }
+
+    .stat-label {
+      font-size: 11px;
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .search-bar {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .search-input {
+      flex: 1;
+      padding: 14px 18px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+    }
+
+    .search-input:focus {
+      border-color: var(--blue);
+    }
+
+    .search-input::placeholder {
+      color: var(--dim);
+    }
+
+    .filter-btn {
+      padding: 0 20px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      color: var(--muted);
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .filter-btn:hover, .filter-btn.active {
+      background: var(--panel-3);
+      border-color: var(--blue);
+      color: var(--text);
+    }
+
+    .app-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 20px;
+    }
+
+    .app-card {
+      background: var(--panel);
+      border: 1px solid var(--line-soft);
+      border-radius: 12px;
+      overflow: hidden;
+      transition: all 0.2s ease;
+      cursor: pointer;
+    }
+
+    .app-card:hover {
+      border-color: var(--line);
+      transform: translateY(-4px);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
+    }
+
+    .app-preview {
+      width: 100%;
+      height: 180px;
+      background: var(--panel-2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .app-preview-img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .app-preview-placeholder {
+      font-size: 48px;
+      opacity: 0.5;
+    }
+
+    .app-info {
+      padding: 16px;
+    }
+
+    .app-name {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 8px;
+      display: -webkit-box;
+      -webkit-line-clamp: 1;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .app-desc {
+      font-size: 13px;
+      color: var(--subtle);
+      line-height: 1.5;
+      margin-bottom: 12px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .app-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .app-author {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--dim);
+    }
+
+    .app-author-avatar {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--panel-3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .app-downloads {
+      font-size: 11px;
+      color: var(--dim);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .btn-deploy-app {
+      width: 100%;
+      padding: 10px;
+      margin-top: 12px;
+      background: var(--green);
+      border: none;
+      border-radius: var(--radius);
+      color: #04130a;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn-deploy-app:hover {
+      background: #16a34a;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 80px 20px;
+      color: var(--dim);
+    }
+
+    .empty-state .icon {
+      font-size: 64px;
+      margin-bottom: 20px;
+    }
+
+    .empty-state h3 {
+      font-size: 18px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .empty-state p {
+      font-size: 14px;
+      max-width: 400px;
+      margin: 0 auto;
+    }
+
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--blue);
+      text-decoration: none;
+      font-size: 14px;
+      margin-bottom: 20px;
+    }
+
+    .back-link:hover {
+      text-decoration: underline;
+    }
+
+    @media (max-width: 768px) {
+      .market-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 16px;
+      }
+
+      .app-grid {
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      }
+    }
+
+    /* Deploy progress overlay */
+    .deploy-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(4px);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    .deploy-overlay.visible {
+      display: flex;
+    }
+    .deploy-modal {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 32px;
+      width: 420px;
+      max-width: 90vw;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.4);
+    }
+    .deploy-modal h3 {
+      margin: 0 0 24px;
+      font-size: 18px;
+      color: var(--text);
+      text-align: center;
+    }
+    .deploy-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+    .deploy-step {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 0;
+      border-left: 2px solid var(--line-soft);
+      margin-left: 11px;
+      padding-left: 24px;
+      position: relative;
+      color: var(--dim);
+      font-size: 14px;
+      transition: color 0.3s;
+    }
+    .deploy-step:first-child {
+      padding-top: 0;
+    }
+    .deploy-step:last-child {
+      border-left-color: transparent;
+    }
+    .deploy-step .step-dot {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--panel-2);
+      border: 2px solid var(--line-soft);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      position: absolute;
+      left: -13px;
+      transition: all 0.3s;
+      flex-shrink: 0;
+    }
+    .deploy-step.active {
+      color: var(--text);
+    }
+    .deploy-step.active .step-dot {
+      background: var(--blue);
+      border-color: var(--blue);
+      box-shadow: 0 0 12px rgba(59,130,246,0.4);
+    }
+    .deploy-step.active .step-dot::after {
+      content: '';
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: white;
+      animation: pulse-dot 1.2s infinite;
+    }
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.7); }
+    }
+    .deploy-step.done {
+      color: var(--green);
+    }
+    .deploy-step.done .step-dot {
+      background: var(--green);
+      border-color: var(--green);
+    }
+    .deploy-step.done .step-dot::after {
+      content: '✓';
+      color: white;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .deploy-step.fail {
+      color: #ef4444;
+    }
+    .deploy-step.fail .step-dot {
+      background: #ef4444;
+      border-color: #ef4444;
+    }
+    .deploy-step.fail .step-dot::after {
+      content: '✕';
+      color: white;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .deploy-result {
+      margin-top: 20px;
+      text-align: center;
+      font-size: 14px;
+      display: none;
+    }
+    .deploy-result.visible { display: block; }
+    .deploy-result.success { color: var(--green); }
+    .deploy-result.error { color: #ef4444; }
+    .deploy-result button {
+      margin-top: 12px;
+      padding: 8px 24px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .deploy-result button:hover {
+      background: var(--panel-3);
+    }
+  </style>
+</head>
+<body>
+  <div class="market-layout">
+    <a href="/" class="back-link">← 返回 VibeBoard</a>
+
+    <div class="market-header">
+      <div>
+        <div class="brand">
+          <div class="mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <div class="market-title">VibeBoard 应用市场</div>
+            <div class="market-subtitle">发现和部署社区创建的硬件应用</div>
+          </div>
+        </div>
+      </div>
+      <div class="market-stats">
+        <div class="stat-item">
+          <div class="stat-value" id="totalApps">0</div>
+          <div class="stat-label">应用总数</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value" id="totalDownloads">0</div>
+          <div class="stat-label">总下载量</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="search-bar">
+      <input type="text" class="search-input" id="searchInput" placeholder="搜索应用...">
+      <button class="filter-btn active" data-filter="all">全部</button>
+      <button class="filter-btn" data-filter="popular">热门</button>
+      <button class="filter-btn" data-filter="newest">最新</button>
+    </div>
+
+    <div class="app-grid" id="appGrid">
+      <!-- Apps will be loaded here -->
+    </div>
+
+    <div class="empty-state" id="emptyState" style="display: none;">
+      <div class="icon">📦</div>
+      <h3>暂无应用</h3>
+      <p>还没有应用发布到市场。在 VibeBoard 中创建应用并点击黄色部署按钮发布第一个应用！</p>
+    </div>
+  </div>
+
+  <!-- Deploy Progress Overlay -->
+  <div class="deploy-overlay" id="deployOverlay">
+    <div class="deploy-modal">
+      <h3 id="deployTitle">正在部署应用...</h3>
+      <div class="deploy-steps">
+        <div class="deploy-step" data-step="write">
+          <span class="step-dot"></span>
+          <span>写入代码文件</span>
+        </div>
+        <div class="deploy-step" data-step="build">
+          <span class="step-dot"></span>
+          <span>编译构建</span>
+        </div>
+        <div class="deploy-step" data-step="upload">
+          <span class="step-dot"></span>
+          <span>上传到设备</span>
+        </div>
+        <div class="deploy-step" data-step="deploy">
+          <span class="step-dot"></span>
+          <span>部署并重启服务</span>
+        </div>
+      </div>
+      <div class="deploy-result" id="deployResult"></div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = '';
+
+    // Load apps from market
+    async function loadMarketApps() {
+      try {
+        const res = await fetch(`${API_BASE}/api/market`);
+        const data = await res.json();
+
+        if (data.ok && data.apps.length > 0) {
+          renderApps(data.apps);
+          document.getElementById('totalApps').textContent = data.apps.length;
+          document.getElementById('totalDownloads').textContent = data.apps.reduce((sum, app) => sum + (app.downloads || 0), 0);
+        } else {
+          showEmptyState();
+        }
+      } catch (err) {
+        console.error('Failed to load market apps:', err);
+        showEmptyState();
+      }
+    }
+
+    // Render apps grid
+    function renderApps(apps) {
+      const grid = document.getElementById('appGrid');
+      const emptyState = document.getElementById('emptyState');
+
+      grid.innerHTML = apps.map(app => `
+        <div class="app-card" data-id="${app.id}">
+          <div class="app-preview">
+            ${app.preview_url
+              ? `<img class="app-preview-img" src="${app.preview_url}" alt="${escapeHtml(app.name)}">`
+              : `<div class="app-preview-placeholder">🌤️</div>`
+            }
+          </div>
+          <div class="app-info">
+            <div class="app-name">${escapeHtml(app.name)}</div>
+            <div class="app-desc">${escapeHtml(app.description || '暂无描述')}</div>
+            <div class="app-meta">
+              <div class="app-author">
+                <div class="app-author-avatar">${(app.author || 'A')[0].toUpperCase()}</div>
+                <span>${escapeHtml(app.author || 'anonymous')}</span>
+              </div>
+              <div class="app-downloads">⬇ ${app.downloads || 0}</div>
+            </div>
+            <button class="btn-deploy-app" onclick="deployApp('${app.id}')">
+              部署到我的设备
+            </button>
+          </div>
+        </div>
+      `).join('');
+
+      grid.style.display = 'grid';
+      emptyState.style.display = 'none';
+    }
+
+    // Show empty state
+    function showEmptyState() {
+      document.getElementById('appGrid').style.display = 'none';
+      document.getElementById('emptyState').style.display = 'block';
+    }
+
+    // Deploy progress helpers
+    const deploySteps = ['write', 'build', 'upload', 'deploy'];
+    let deployTimer = null;
+
+    function setDeployStep(stepId, state) {
+      const step = document.querySelector(`.deploy-step[data-step="${stepId}"]`);
+      if (!step) return;
+      step.classList.remove('active', 'done', 'fail');
+      if (state) step.classList.add(state);
+    }
+
+    function resetDeployOverlay() {
+      deploySteps.forEach(s => {
+        const el = document.querySelector(`.deploy-step[data-step="${s}"]`);
+        if (el) el.classList.remove('active', 'done', 'fail');
+      });
+      const result = document.getElementById('deployResult');
+      result.className = 'deploy-result';
+      result.innerHTML = '';
+      document.getElementById('deployTitle').textContent = '正在部署应用...';
+    }
+
+    function showDeployOverlay() {
+      resetDeployOverlay();
+      document.getElementById('deployOverlay').classList.add('visible');
+    }
+
+    function hideDeployOverlay() {
+      document.getElementById('deployOverlay').classList.remove('visible');
+      if (deployTimer) { clearInterval(deployTimer); deployTimer = null; }
+    }
+
+    // Simulate step progression based on elapsed time
+    // write(0-3s) -> build(3-8s) -> upload(8-15s) -> deploy(15s+)
+    function startDeployProgress() {
+      const startTime = Date.now();
+      setDeployStep('write', 'active');
+
+      deployTimer = setInterval(() => {
+        const elapsed = (Date.now() - startTime) / 1000;
+        if (elapsed >= 2) { setDeployStep('write', 'done'); setDeployStep('build', 'active'); }
+        if (elapsed >= 6) { setDeployStep('build', 'done'); setDeployStep('upload', 'active'); }
+        if (elapsed >= 12) { setDeployStep('upload', 'done'); setDeployStep('deploy', 'active'); }
+      }, 500);
+    }
+
+    function finishDeployProgress(success, message) {
+      if (deployTimer) { clearInterval(deployTimer); deployTimer = null; }
+
+      if (success) {
+        deploySteps.forEach(s => setDeployStep(s, 'done'));
+        document.getElementById('deployTitle').textContent = '部署完成';
+        const result = document.getElementById('deployResult');
+        result.className = 'deploy-result visible success';
+        result.innerHTML = `<p>✅ ${message}</p><button onclick="hideDeployOverlay()">关闭</button>`;
+      } else {
+        // Mark the current active step as failed
+        const activeStep = document.querySelector('.deploy-step.active');
+        if (activeStep) activeStep.classList.add('fail');
+        document.getElementById('deployTitle').textContent = '部署失败';
+        const result = document.getElementById('deployResult');
+        result.className = 'deploy-result visible error';
+        result.innerHTML = `<p>❌ ${message}</p><button onclick="hideDeployOverlay()">关闭</button>`;
+      }
+    }
+
+    // Deploy app to device
+    async function deployApp(appId) {
+      showDeployOverlay();
+      startDeployProgress();
+
+      try {
+        const res = await fetch(`${API_BASE}/api/market/${appId}/deploy`, {
+          method: 'POST'
+        });
+        const data = await res.json();
+
+        if (data.ok) {
+          finishDeployProgress(true, '应用已成功部署到泰山派设备！');
+        } else {
+          finishDeployProgress(false, data.error || '未知错误');
+        }
+      } catch (err) {
+        finishDeployProgress(false, err.message);
+      }
+    }
+
+    // Search functionality
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput) {
+      searchInput.addEventListener('input', (e) => {
+        const query = e.target.value.toLowerCase();
+        const cards = document.querySelectorAll('.app-card');
+
+        cards.forEach(card => {
+          const name = card.querySelector('.app-name')?.textContent.toLowerCase() || '';
+          const desc = card.querySelector('.app-desc')?.textContent.toLowerCase() || '';
+          const visible = name.includes(query) || desc.includes(query);
+          card.style.display = visible ? 'block' : 'none';
+        });
+      });
+    }
+
+    // Filter buttons
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        // TODO: Implement filtering logic
+      });
+    });
+
+    // Helper function
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Load on startup
+    loadMarketApps();
+  </script>
+</body>
+</html>
