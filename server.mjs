@@ -2571,6 +2571,19 @@ async function route(req, res) {
       json(res, 200, { ok: true, id, title });
       return;
     }
+    // Delete conversation and its messages
+    if (req.method === "DELETE" && url.pathname.startsWith("/api/conversations/")) {
+      const parts = url.pathname.split("/");
+      const convId = parts[3];
+      if (convId && !parts[4]) {
+        run("DELETE FROM messages WHERE conversation_id = ?", [convId]);
+        run("DELETE FROM conversations WHERE id = ?", [convId]);
+        json(res, 200, { ok: true });
+      } else {
+        json(res, 400, { ok: false, error: "Invalid conversation ID" });
+      }
+      return;
+    }
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/messages")) {
       const convId = url.pathname.split("/")[3];
       const messages = query("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC", [convId]);

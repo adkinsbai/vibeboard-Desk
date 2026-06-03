@@ -633,13 +633,40 @@ function renderConversationList(conversations) {
     <div class="conv-item ${conv.id === currentConversationId ? 'active' : ''}" data-id="${conv.id}">
       <div class="conv-title">${escapeHtml(conv.title)}</div>
       <div class="conv-time">${formatTime(conv.updated_at)}</div>
+      <button class="conv-delete" data-id="${conv.id}" title="删除对话">×</button>
     </div>
   `).join("");
 
-  // Add click handlers
+  // Add click handlers for conversation selection
   list.querySelectorAll(".conv-item").forEach(item => {
-    item.addEventListener("click", () => {
+    item.addEventListener("click", (e) => {
+      // Don't select if clicking delete button
+      if (e.target.closest(".conv-delete")) return;
       selectConversation(item.dataset.id);
+    });
+  });
+
+  // Add click handlers for delete buttons
+  list.querySelectorAll(".conv-delete").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const convId = btn.dataset.id;
+      if (!confirm("确定删除这个对话吗？")) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/conversations/${convId}`, { method: "DELETE" });
+        const data = await res.json();
+        if (data.ok) {
+          // If deleted the current conversation, clear selection
+          if (convId === currentConversationId) {
+            currentConversationId = null;
+            const chatLog = document.getElementById("chatLog");
+            if (chatLog) chatLog.innerHTML = '<div class="msg"><p style="color:var(--text-2)">选择或新建一个对话开始</p></div>';
+          }
+          loadConversations();
+        }
+      } catch (err) {
+        console.error("Failed to delete conversation:", err);
+      }
     });
   });
 }
