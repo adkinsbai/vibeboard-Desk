@@ -18,11 +18,19 @@ verify-ui-click.mjs
 
 # Generated output (recreated by build)
 generated/
-runtime/
+runtime/*
+!runtime/start-kiosk.sh
+
+# Previews (generated at runtime)
+previews/
 
 # Debug screenshots
 *.png
 ui-previews/
+
+# Test scripts
+test-*.ps1
+test-*.cjs
 
 # OS files
 .DS_Store

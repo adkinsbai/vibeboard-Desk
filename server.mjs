@@ -3,7 +3,7 @@ import { createReadStream } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import initSqlJs from "sql.js";
 import crypto from "node:crypto";
@@ -11,6 +11,7 @@ import crypto from "node:crypto";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
 const GENERATED_DIR = path.join(ROOT, "generated", "current");
+const PREVIEWS_DIR = path.join(ROOT, "previews");
 const RUNTIME_DIR = path.join(ROOT, "runtime");
 const PORT = Number(process.env.VIBEBOARD_PORT || 8789);
 const DB_PATH = path.join(ROOT, "vibeboard.db");
@@ -2182,6 +2183,44 @@ async function buildCurrent() {
   return manifest;
 }
 
+// Capture preview screenshot of the generated app
+async function capturePreview() {
+  if (!currentBuild) return null;
+  try {
+    await fs.mkdir(PREVIEWS_DIR, { recursive: true });
+    const previewPath = path.join(PREVIEWS_DIR, `${currentBuild.id}.png`);
+    const scriptPath = path.join(ROOT, "screenshot.cjs");
+    const url = `http://127.0.0.1:${PORT}/generated/current/index.html`;
+
+    // Run screenshot via child_process (Windows Playwright)
+    await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [scriptPath, url, previewPath], {
+        timeout: 20000,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      let stdout = "", stderr = "";
+      child.stdout.on("data", d => stdout += d);
+      child.stderr.on("data", d => stderr += d);
+      child.on("close", code => {
+        if (code === 0) resolve(stdout);
+        else reject(new Error(stderr || `screenshot exit code ${code}`));
+      });
+      child.on("error", reject);
+    });
+
+    // Verify the file was created
+    const stat = await fs.stat(previewPath);
+    if (stat.size > 0) {
+      currentBuild.previewPath = previewPath;
+      console.log("[capturePreview] Saved:", previewPath);
+      return previewPath;
+    }
+  } catch (err) {
+    console.error("[capturePreview] Failed:", err.message);
+  }
+  return null;
+}
+
 function parseFirstBuildId(text) {
   const match = String(text || "").match(/vb-[a-z0-9]+-[a-f0-9]{6}/i);
   return match ? match[0] : "";
@@ -2493,6 +2532,8 @@ async function route(req, res) {
     }
     if (req.method === "POST" && url.pathname === "/api/build") {
       const manifest = await buildCurrent();
+      // Capture preview screenshot after successful build
+      capturePreview().catch(err => console.error("[build] preview capture failed:", err.message));
       json(res, 200, { ok: true, summary: `${manifest.files.length} files`, manifest });
       return;
     }
@@ -2591,8 +2632,18 @@ async function route(req, res) {
         } catch {}
       }
 
-      // Generate preview placeholder (AI generation TODO)
-      const preview_url = "";
+      // Get preview image if available
+      let preview_url = "";
+      if (currentBuild && currentBuild.previewPath) {
+        preview_url = `/api/previews/${currentBuild.id}.png`;
+      } else {
+        // Check if preview file exists on disk
+        const previewFile = path.join(PREVIEWS_DIR, `${currentBuild?.id || "unknown"}.png`);
+        try {
+          await fs.access(previewFile);
+          preview_url = `/api/previews/${currentBuild.id}.png`;
+        } catch {}
+      }
       const id = crypto.randomUUID();
       const author = "user";
 
@@ -2656,6 +2707,25 @@ async function route(req, res) {
         });
       } catch (deployErr) {
         json(res, 500, { ok: false, error: "Deploy failed: " + deployErr.message });
+      }
+      return;
+    }
+
+    // Serve preview images
+    if (req.method === "GET" && url.pathname.startsWith("/api/previews/")) {
+      const filename = url.pathname.split("/").pop();
+      const previewFile = path.join(PREVIEWS_DIR, filename);
+      try {
+        const stat = await fs.stat(previewFile);
+        res.writeHead(200, {
+          "Content-Type": "image/png",
+          "Content-Length": stat.size,
+          "Cache-Control": "public, max-age=86400"
+        });
+        createReadStream(previewFile).pipe(res);
+      } catch {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("Preview not found");
       }
       return;
     }
