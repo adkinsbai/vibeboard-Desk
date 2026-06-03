@@ -719,7 +719,7 @@ textarea:focus {
 /* Real photo Mac frame */
 .mac-photo {
   position: relative;
-  width: min(500px, 100%);
+  width: min(750px, 100%);
 }
 
 .mac-photo-img {
@@ -739,13 +739,18 @@ textarea:focus {
   overflow: hidden;
   border-radius: 2px;
   background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .mac-screen-overlay iframe {
-  width: 100%;
-  height: 100%;
+  /* Scale 480x360 to fit the CRT screen area */
+  width: 480px;
+  height: 360px;
   border: none;
-  display: block;
+  transform-origin: center center;
+  transform: scale(var(--screen-scale, 0.7));
 }
 
 .mac {
