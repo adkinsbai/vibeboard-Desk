@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=480, initial-scale=1.0">
+<title>城市天气屏</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div id="app">
+  <div id="weather-scene">
+    <div id="sky"></div>
+    <div id="moon" class="hidden"></div>
+    <div id="rain-layer" class="hidden"></div>
+    <div id="snow-layer" class="hidden"></div>
+    <div id="hail-layer" class="hidden"></div>
+    <div id="clouds">
+      <div class="cloud cloud1"></div>
+      <div class="cloud cloud2"></div>
+      <div class="cloud cloud3"></div>
+    </div>
+    <div id="cityscape">
+      <div class="building b1"></div>
+      <div class="building b2"></div>
+      <div class="building b3"></div>
+      <div class="building b4"></div>
+      <div class="building b5"></div>
+      <div class="tree t1"></div>
+      <div class="tree t2"></div>
+      <div class="tree t3"></div>
+    </div>
+    <div id="ground"></div>
+  </div>
+  <div id="info-panel">
+    <div id="weather-label">多云</div>
+    <div id="city-name">加载中...</div>
+    <div id="temp-display">--°C</div>
+    <div id="status-bar">
+      <span id="time-display">--:--</span>
+      <span id="device-name">RK3566</span>
+    </div>
+  </div>
+  <div id="hint">按 空格键 切换天气</div>
+</div>
+<script src="./app.js"></script>
+</body>
+</html>

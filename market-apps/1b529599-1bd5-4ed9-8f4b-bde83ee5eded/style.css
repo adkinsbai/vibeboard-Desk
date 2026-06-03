@@ -1,0 +1,46 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+html, body {
+  width: 480px;
+  height: 360px;
+  overflow: hidden;
+  background: #0a1a2e;
+  font-family: 'Segoe UI', Arial, sans-serif;
+}
+#app {
+  position: relative;
+  width: 480px;
+  height: 360px;
+}
+#tankCanvas {
+  display: block;
+  width: 480px;
+  height: 360px;
+}
+#info-overlay {
+  position: absolute;
+  bottom: 6px;
+  left: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0,0,0,0.55);
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  color: #b0d4f0;
+  pointer-events: none;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4caf50;
+  display: inline-block;
+}
+.dot.offline {
+  background: #f44336;
+}

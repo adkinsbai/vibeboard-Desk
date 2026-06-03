@@ -1,0 +1,30 @@
+{
+  "id": "vb-mpy89n16-6787ab",
+  "prompt": "帮我做一个像素化背景的庄园，里面有两个小人在到处乱走，还有一头牛",
+  "generator": "vibeboard-llm-webcoding-v1",
+  "mode": "custom",
+  "title": "Pixel Manor",
+  "target": "/home/linaro/workspace/taishan-screen/static",
+  "hardwareApi": [
+    "/api/status",
+    "./hardware-result.json"
+  ],
+  "files": [
+    "index.html",
+    "style.css",
+    "app.js",
+    "hardware_app.py",
+    "manifest.json"
+  ],
+  "createdAt": "2026-06-03T15:35:24.216Z",
+  "source": "llm",
+  "model": "deepseek-v4-flash",
+  "provider": "deepseek",
+  "notes": "Canvas-based pixel manor with two wandering people and a cow, plus hardware status polling. All drawing is pixel-art style, no external assets.",
+  "compile": {
+    "web": "node --check app.js",
+    "hardware": "python -m py_compile hardware_app.py",
+    "hardwareLog": "local py_compile ok"
+  },
+  "builtAt": "2026-06-03T15:35:24.385Z"
+}

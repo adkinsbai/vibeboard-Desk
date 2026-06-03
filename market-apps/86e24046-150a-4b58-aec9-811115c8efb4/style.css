@@ -1,0 +1,78 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+html, body {
+  width: 480px;
+  height: 360px;
+  overflow: hidden;
+  background: #0b0e14;
+  font-family: 'Segoe UI', 'Roboto', system-ui, sans-serif;
+  color: #e0e4ea;
+}
+#app {
+  width: 480px;
+  height: 360px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  padding: 16px;
+  position: relative;
+}
+#circle-container {
+  width: 140px;
+  height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+#spinner {
+  width: 120px;
+  height: 120px;
+  border: 6px solid #2a3040;
+  border-top: 6px solid #4fc3f7;
+  border-radius: 50%;
+  animation: spin 1.2s linear infinite;
+  box-shadow: 0 0 20px rgba(79, 195, 247, 0.15);
+}
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+#info-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 180px;
+}
+#info-panel > div {
+  display: flex;
+  justify-content: space-between;
+  background: #141a24;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.4;
+  border-left: 3px solid #4fc3f7;
+}
+#info-panel span:first-child {
+  color: #8892a8;
+  font-weight: 500;
+}
+#info-panel span:last-child {
+  color: #c8d0dc;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+#build-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 12px;
+  font-size: 10px;
+  color: #4a5568;
+  letter-spacing: 0.3px;
+}

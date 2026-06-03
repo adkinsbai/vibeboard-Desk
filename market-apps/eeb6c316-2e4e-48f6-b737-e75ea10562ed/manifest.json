@@ -1,0 +1,30 @@
+{
+  "id": "vb-mpyaxk4g-3b5b50",
+  "prompt": "我想做一个天气屏，它会随着我今天所在城市的天气发生变化。 比如说： 多云的天气、下雨的天气、下雪的天气、下冰雹的天气，还有夜晚和月亮。\n背景中会有一些城市的楼房和小树。\n我可以通过空格键切换天气",
+  "generator": "vibeboard-llm-webcoding-v1",
+  "mode": "weather",
+  "title": "城市天气屏",
+  "target": "/home/linaro/workspace/taishan-screen/static",
+  "hardwareApi": [
+    "/api/status",
+    "./hardware-result.json"
+  ],
+  "files": [
+    "index.html",
+    "style.css",
+    "app.js",
+    "hardware_app.py",
+    "manifest.json"
+  ],
+  "createdAt": "2026-06-03T16:50:06.897Z",
+  "source": "llm",
+  "model": "deepseek-v4-flash",
+  "provider": "deepseek",
+  "notes": "六种天气场景（晴/多云/雨/雪/冰雹/夜晚），背景含楼房和小树，空格键切换，适配480x360显示",
+  "compile": {
+    "web": "node --check app.js",
+    "hardware": "python -m py_compile hardware_app.py",
+    "hardwareLog": "local py_compile ok"
+  },
+  "builtAt": "2026-06-03T16:50:07.092Z"
+}

@@ -1,0 +1,47 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+html, body {
+  width: 480px;
+  height: 360px;
+  overflow: hidden;
+  background: #2d4a2d;
+  font-family: 'Courier New', monospace;
+}
+#app {
+  position: relative;
+  width: 480px;
+  height: 360px;
+}
+#canvas {
+  display: block;
+  width: 480px;
+  height: 360px;
+  image-rendering: pixelated;
+  background: #3a5f3a;
+}
+#info {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  right: 4px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: #b8d4b8;
+  background: rgba(20,30,20,0.6);
+  padding: 2px 6px;
+  border-radius: 2px;
+  pointer-events: none;
+}
+#status-indicator {
+  color: #7f7;
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0% { opacity: 0.4; }
+  50% { opacity: 1; }
+  100% { opacity: 0.4; }
+}

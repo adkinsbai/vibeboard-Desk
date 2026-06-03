@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibeBoard App</title>
+  <link rel="stylesheet" href="./style.css?v=vb-mpy6k44x-e85c2d">
+</head>
+<body>
+  <main class="screen" data-mode="assistant">
+    <header class="top">
+      <div>
+        <span id="date">--</span>
+        <strong id="time">--:--</strong>
+      </div>
+      <b>assistant</b>
+    </header>
+    <section class="hero">
+      <span>Generated Linux web app</span>
+      <h1>AI Screen Assistant</h1>
+      <p>hello world test</p>
+    </section>
+    <section class="widgets">
+      <article class="widget" data-widget="wifi"><span>Wi-Fi</span><strong id="wifi">--</strong><small>live network</small></article>
+      <article class="widget" data-widget="ip"><span>IP</span><strong id="ip">--</strong><small>board address</small></article>
+      <article class="widget" data-widget="temp"><span>Temp</span><strong id="temp">--</strong><small>thermal zone</small></article>
+      <article class="widget" data-widget="runtime"><span>Runtime</span><strong id="runtime">--</strong><small>python result</small></article>
+    </section>
+    <section class="actions">
+      <div>
+        <button class="action" type="button" data-action="primary">Run</button>
+        <button class="action" type="button" data-action="secondary">Mark</button>
+        <button class="action" type="button" data-action="refresh">Refresh</button>
+      </div>
+      <small id="eventLog">hardware api waiting</small>
+    </section>
+    <footer><span id="service">Linux API --</span><span>vb-mpy6k44x-e85c2d</span></footer>
+  </main>
+  <script src="./app.js?v=vb-mpy6k44x-e85c2d"></script>
+</body>
+</html>

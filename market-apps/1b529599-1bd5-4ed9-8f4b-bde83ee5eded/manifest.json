@@ -1,0 +1,30 @@
+{
+  "id": "vb-mpya9p0j-4f4459",
+  "prompt": "给我生成一个虚拟的热带鱼缸，里面有海草和鱼，还有石头",
+  "generator": "vibeboard-llm-webcoding-v1",
+  "mode": "custom",
+  "title": "Virtual Tropical Fish Tank",
+  "target": "/home/linaro/workspace/taishan-screen/static",
+  "hardwareApi": [
+    "/api/status",
+    "./hardware-result.json"
+  ],
+  "files": [
+    "index.html",
+    "style.css",
+    "app.js",
+    "hardware_app.py",
+    "manifest.json"
+  ],
+  "createdAt": "2026-06-03T16:31:31.228Z",
+  "source": "llm",
+  "model": "deepseek-v4-flash",
+  "provider": "deepseek",
+  "notes": "Canvas-based animated fish tank with seaweed, rocks, bubbles, and live board status overlay. Fetches /api/status every 15s for connectivity indicator.",
+  "compile": {
+    "web": "node --check app.js",
+    "hardware": "python -m py_compile hardware_app.py",
+    "hardwareLog": "local py_compile ok"
+  },
+  "builtAt": "2026-06-03T16:31:31.418Z"
+}

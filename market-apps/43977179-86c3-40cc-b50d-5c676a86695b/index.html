@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=480, initial-scale=1.0">
+  <title>桌面篮球</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div id="app">
+    <div id="header">
+      <span id="title">桌面篮球</span>
+      <span id="status-badge">等待中</span>
+    </div>
+    <div id="court">
+      <div id="ball" class="ball-idle"></div>
+      <div id="hoop"></div>
+      <div id="backboard"></div>
+    </div>
+    <div id="scoreboard">
+      <div class="score-item">
+        <span class="score-label">得分</span>
+        <span id="score-value" class="score-value">0</span>
+      </div>
+      <div class="score-item">
+        <span class="score-label">投篮</span>
+        <span id="attempts-value" class="score-value">0</span>
+      </div>
+      <div class="score-item">
+        <span class="score-label">命中率</span>
+        <span id="accuracy-value" class="score-value">0%</span>
+      </div>
+    </div>
+    <div id="controls">
+      <button id="shoot-btn" class="ctrl-btn">投篮</button>
+      <button id="reset-btn" class="ctrl-btn">重置</button>
+    </div>
+    <div id="sysinfo">
+      <span id="cpu-temp">--</span>
+      <span id="mem-info">--</span>
+      <span id="uptime-info">--</span>
+    </div>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>

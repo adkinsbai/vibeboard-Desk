@@ -1,0 +1,30 @@
+{
+  "id": "vb-mpy9o0v7-ef1092",
+  "prompt": "帮我生成一个桌面的篮球",
+  "generator": "vibeboard-llm-webcoding-v1",
+  "mode": "custom",
+  "title": "桌面篮球",
+  "target": "/home/linaro/workspace/taishan-screen/static",
+  "hardwareApi": [
+    "/api/status",
+    "./hardware-result.json"
+  ],
+  "files": [
+    "index.html",
+    "style.css",
+    "app.js",
+    "hardware_app.py",
+    "manifest.json"
+  ],
+  "createdAt": "2026-06-03T16:14:37.131Z",
+  "source": "llm",
+  "model": "deepseek-v4-flash",
+  "provider": "deepseek",
+  "notes": "篮球投篮模拟器，点击投篮按钮触发动画和计分，45%命中率，底部显示系统状态信息，适配480x360小屏。",
+  "compile": {
+    "web": "node --check app.js",
+    "hardware": "python -m py_compile hardware_app.py",
+    "hardwareLog": "local py_compile ok"
+  },
+  "builtAt": "2026-06-03T16:14:37.323Z"
+}

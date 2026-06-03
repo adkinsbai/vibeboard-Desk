@@ -483,24 +483,46 @@
 
   <script>
     const API_BASE = '';
+    let isStaticMode = false;
 
-    // Load apps from market
+    // Load apps from market (API first, static fallback)
     async function loadMarketApps() {
       try {
+        // Try API first
         const res = await fetch(`${API_BASE}/api/market`);
         const data = await res.json();
-
         if (data.ok && data.apps.length > 0) {
           renderApps(data.apps);
-          document.getElementById('totalApps').textContent = data.apps.length;
-          document.getElementById('totalDownloads').textContent = data.apps.reduce((sum, app) => sum + (app.downloads || 0), 0);
-        } else {
-          showEmptyState();
+          updateStats(data.apps);
+          return;
         }
       } catch (err) {
-        console.error('Failed to load market apps:', err);
-        showEmptyState();
+        console.log('API not available, loading from static catalog...');
       }
+
+      // Fallback: load from static catalog.json
+      try {
+        const res = await fetch('./market-apps/catalog.json');
+        const data = await res.json();
+        if (data.ok && data.apps.length > 0) {
+          isStaticMode = true;
+          renderApps(data.apps);
+          updateStats(data.apps);
+          // Update header to show static mode
+          const subtitle = document.querySelector('.market-subtitle');
+          if (subtitle) subtitle.textContent = '发现和部署社区创建的硬件应用（静态模式 — 启动 VibeBoard 服务器可部署到设备）';
+          return;
+        }
+      } catch (err) {
+        console.error('Failed to load static catalog:', err);
+      }
+
+      showEmptyState();
+    }
+
+    function updateStats(apps) {
+      document.getElementById('totalApps').textContent = apps.length;
+      document.getElementById('totalDownloads').textContent = apps.reduce((sum, app) => sum + (app.downloads || 0), 0);
     }
 
     // Render apps grid
@@ -611,6 +633,11 @@
 
     // Deploy app to device
     async function deployApp(appId) {
+      if (isStaticMode) {
+        alert('部署功能需要启动 VibeBoard 服务器。\n\n请运行 start.bat 或执行 node server.mjs 后重试。');
+        return;
+      }
+
       showDeployOverlay();
       startDeployProgress();
 

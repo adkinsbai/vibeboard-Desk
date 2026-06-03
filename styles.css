@@ -713,20 +713,22 @@ textarea:focus {
   display: grid;
   place-items: center;
   min-height: 0;
-  padding: 20px;
+  padding: 0;
+  overflow: hidden;
 }
 
 /* Real photo Mac frame */
 .mac-photo {
   position: relative;
   width: min(750px, 100%);
+  margin-top: -60px;
+  user-select: none;
 }
 
 .mac-photo-img {
   width: 100%;
   height: auto;
   display: block;
-  border-radius: 4px;
 }
 
 .mac-screen-overlay {
@@ -737,21 +739,79 @@ textarea:focus {
   width: 45%;
   height: 17.3%;
   overflow: hidden;
-  border-radius: 2px;
-  background: #000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  cursor: move;
 }
 
 .mac-screen-overlay iframe {
-  /* Scale 480x360 to fit the CRT screen area */
-  width: 480px;
-  height: 360px;
+  width: 100%;
+  height: 100%;
   border: none;
-  transform-origin: center center;
-  transform: scale(var(--screen-scale, 0.7));
+  display: block;
+  pointer-events: none;
 }
+
+/* Debug mode - draggable overlay */
+.mac-photo.debug-mode .mac-screen-overlay {
+  border: 2px dashed #38bdf8;
+  background: rgba(56, 189, 248, 0.1);
+  z-index: 10;
+}
+
+.mac-photo.debug-mode .mac-screen-overlay::after {
+  content: '拖动调整位置';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #38bdf8;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.debug-coords {
+  position: fixed;
+  bottom: 10px;
+  left: 10px;
+  background: rgba(0, 0, 0, 0.8);
+  color: #38bdf8;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-family: monospace;
+  font-size: 12px;
+  z-index: 1000;
+  display: none;
+}
+
+.debug-coords.visible {
+  display: block;
+}
+
+.debug-coords button {
+  margin-left: 12px;
+  padding: 2px 8px;
+  background: #38bdf8;
+  color: #000;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+/* Resize handles */
+.resize-handle {
+  position: absolute;
+  z-index: 20;
+}
+
+.handle-n { top: -4px; left: 20%; right: 20%; height: 8px; cursor: n-resize; }
+.handle-s { bottom: -4px; left: 20%; right: 20%; height: 8px; cursor: s-resize; }
+.handle-e { right: -4px; top: 20%; bottom: 20%; width: 8px; cursor: e-resize; }
+.handle-w { left: -4px; top: 20%; bottom: 20%; width: 8px; cursor: w-resize; }
+.handle-ne { top: -4px; right: -4px; width: 12px; height: 12px; cursor: ne-resize; }
+.handle-nw { top: -4px; left: -4px; width: 12px; height: 12px; cursor: nw-resize; }
+.handle-se { bottom: -4px; right: -4px; width: 12px; height: 12px; cursor: se-resize; }
+.handle-sw { bottom: -4px; left: -4px; width: 12px; height: 12px; cursor: sw-resize; }
 
 .mac {
   width: min(640px, 100%);

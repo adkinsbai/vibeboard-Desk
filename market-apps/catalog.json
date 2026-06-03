@@ -1,0 +1,133 @@
+{
+  "ok": true,
+  "apps": [
+    {
+      "id": "eeb6c316-2e4e-48f6-b737-e75ea10562ed",
+      "name": "天气瓶",
+      "description": "一个运行在泰山派 RK3566 上的硬件应用，通过 VibeBoard 平台生成。",
+      "preview_url": "market-apps/eeb6c316-2e4e-48f6-b737-e75ea10562ed/preview.png",
+      "author": "user",
+      "downloads": 0,
+      "created_at": "2026-06-03 16:51:24",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ]
+    },
+    {
+      "id": "42d0e4b0-0cbe-4772-945e-0275600925f1",
+      "name": "赛车游戏",
+      "description": "一个运行在泰山派 RK3566 上的硬件应用，通过 VibeBoard 平台生成。",
+      "preview_url": "market-apps/42d0e4b0-0cbe-4772-945e-0275600925f1/preview.png",
+      "author": "user",
+      "downloads": 0,
+      "created_at": "2026-06-03 16:35:34",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ]
+    },
+    {
+      "id": "1b529599-1bd5-4ed9-8f4b-bde83ee5eded",
+      "name": "模拟鱼缸",
+      "description": "一个运行在泰山派 RK3566 上的硬件应用，通过 VibeBoard 平台生成。",
+      "preview_url": "market-apps/1b529599-1bd5-4ed9-8f4b-bde83ee5eded/preview.png",
+      "author": "user",
+      "downloads": 0,
+      "created_at": "2026-06-03 16:32:43",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ]
+    },
+    {
+      "id": "43977179-86c3-40cc-b50d-5c676a86695b",
+      "name": "桌面篮球",
+      "description": "一个运行在泰山派 RK3566 上的硬件应用，通过 VibeBoard 平台生成。",
+      "preview_url": "market-apps/43977179-86c3-40cc-b50d-5c676a86695b/preview.png",
+      "author": "user",
+      "downloads": 0,
+      "created_at": "2026-06-03 16:15:35",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ]
+    },
+    {
+      "id": "7e946dab-632f-410c-afd2-bfe585291cbc",
+      "name": "虚拟牧场",
+      "description": "一个运行在泰山派 RK3566 上的硬件应用，通过 VibeBoard 平台生成。",
+      "preview_url": null,
+      "author": "user",
+      "downloads": 0,
+      "created_at": "2026-06-03 15:37:43",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ]
+    },
+    {
+      "id": "9c178585-b38e-4395-b91d-26d93c134c43",
+      "name": "贪吃蛇",
+      "description": "一个运行在泰山派 RK3566 上的硬件应用，通过 VibeBoard 平台生成。",
+      "preview_url": null,
+      "author": "user",
+      "downloads": 1,
+      "created_at": "2026-06-03 15:20:46",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ]
+    },
+    {
+      "id": "86e24046-150a-4b58-aec9-811115c8efb4",
+      "name": "圆圈",
+      "description": "一个运行在泰山派 RK3566 上的硬件应用，通过 VibeBoard 平台生成。",
+      "preview_url": null,
+      "author": "user",
+      "downloads": 1,
+      "created_at": "2026-06-03 15:17:47",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ]
+    },
+    {
+      "id": "091e8ebb-a2b6-421c-876f-2ebf511c97db",
+      "name": "Test App",
+      "description": "A test application",
+      "preview_url": null,
+      "author": "user",
+      "downloads": 0,
+      "created_at": "2026-06-03 14:48:19",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ]
+    }
+  ]
+}

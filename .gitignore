@@ -27,6 +27,7 @@ previews/
 # Debug screenshots
 *.png
 !mac-frame.png
+!market-apps/**/*.png
 ui-previews/
 
 # Test scripts

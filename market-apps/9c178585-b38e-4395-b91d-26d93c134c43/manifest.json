@@ -1,0 +1,30 @@
+{
+  "id": "vb-mpy7pyts-9b3609",
+  "prompt": "给我做一个碰到边界不会死掉的贪吃蛇游戏，那个虫子可以吃苹果长大，贪吃蛇的长度要更像一只贪吃蛇，有个头",
+  "generator": "vibeboard-llm-webcoding-v1",
+  "mode": "custom",
+  "title": "Snake Game - No Death Boundary",
+  "target": "/home/linaro/workspace/taishan-screen/static",
+  "hardwareApi": [
+    "/api/status",
+    "./hardware-result.json"
+  ],
+  "files": [
+    "index.html",
+    "style.css",
+    "app.js",
+    "hardware_app.py",
+    "manifest.json"
+  ],
+  "createdAt": "2026-06-03T15:20:06.896Z",
+  "source": "llm",
+  "model": "deepseek-v4-flash",
+  "provider": "deepseek",
+  "notes": "Snake wraps around edges instead of dying; head has eyes for direction; apple food with stem; score display; hardware status indicator via /api/status polling.",
+  "compile": {
+    "web": "node --check app.js",
+    "hardware": "python -m py_compile hardware_app.py",
+    "hardwareLog": "local py_compile ok"
+  },
+  "builtAt": "2026-06-03T15:20:07.062Z"
+}

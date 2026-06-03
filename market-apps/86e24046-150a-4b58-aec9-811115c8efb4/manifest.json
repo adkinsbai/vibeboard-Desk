@@ -1,0 +1,30 @@
+{
+  "id": "vb-mpy7la4q-f99b45",
+  "prompt": "做一个旋转的圆圈",
+  "generator": "vibeboard-llm-webcoding-v1",
+  "mode": "dashboard",
+  "title": "Spinning Circle Dashboard",
+  "target": "/home/linaro/workspace/taishan-screen/static",
+  "hardwareApi": [
+    "/api/status",
+    "./hardware-result.json"
+  ],
+  "files": [
+    "index.html",
+    "style.css",
+    "app.js",
+    "hardware_app.py",
+    "manifest.json"
+  ],
+  "createdAt": "2026-06-03T15:16:20.575Z",
+  "source": "llm",
+  "model": "deepseek-v4-flash",
+  "provider": "deepseek",
+  "notes": "Rotating circle animation paired with live system stats from /api/status. UI fits 480x360 with no scroll, updates every 5s.",
+  "compile": {
+    "web": "node --check app.js",
+    "hardware": "python -m py_compile hardware_app.py",
+    "hardwareLog": "local py_compile ok"
+  },
+  "builtAt": "2026-06-03T15:16:20.754Z"
+}

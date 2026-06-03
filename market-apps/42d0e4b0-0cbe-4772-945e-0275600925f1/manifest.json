@@ -1,0 +1,30 @@
+{
+  "id": "vb-mpyadigk-08b381",
+  "prompt": "帮我生成一个赛车游戏。\n\n我可以通过点击方向键来控制赛车的前后左右，时不时前面会有一些车辆过来，我需要躲避它们。如果躲避失败，游戏就结束了，然后可以按空格键 restart。",
+  "generator": "vibeboard-llm-webcoding-v1",
+  "mode": "custom",
+  "title": "Racing Game",
+  "target": "/home/linaro/workspace/taishan-screen/static",
+  "hardwareApi": [
+    "/api/status",
+    "./hardware-result.json"
+  ],
+  "files": [
+    "index.html",
+    "style.css",
+    "app.js",
+    "hardware_app.py",
+    "manifest.json"
+  ],
+  "createdAt": "2026-06-03T16:34:31.059Z",
+  "source": "llm",
+  "model": "deepseek-v4-flash",
+  "provider": "deepseek",
+  "notes": "Arrow keys control the blue car; red oncoming cars spawn faster over time; SPACE restarts after crash. Hardware panel hidden but populated from /api/status.",
+  "compile": {
+    "web": "node --check app.js",
+    "hardware": "python -m py_compile hardware_app.py",
+    "hardwareLog": "local py_compile ok"
+  },
+  "builtAt": "2026-06-03T16:34:31.233Z"
+}

@@ -1,0 +1,28 @@
+{
+  "id": "vb-mpy6k44x-e85c2d",
+  "prompt": "hello world test",
+  "generator": "vibeboard-web-coding-v2",
+  "mode": "assistant",
+  "title": "AI Screen Assistant",
+  "target": "/home/linaro/workspace/taishan-screen/static",
+  "hardwareApi": [
+    "/api/status",
+    "./hardware-result.json"
+  ],
+  "files": [
+    "index.html",
+    "style.css",
+    "app.js",
+    "hardware_app.py",
+    "manifest.json"
+  ],
+  "createdAt": "2026-06-03T14:47:14.673Z",
+  "source": "template",
+  "fallbackReason": "model settings not configured",
+  "compile": {
+    "web": "node --check app.js",
+    "hardware": "python -m py_compile hardware_app.py",
+    "hardwareLog": "local py_compile ok"
+  },
+  "builtAt": "2026-06-03T14:47:27.359Z"
+}
