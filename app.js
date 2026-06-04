@@ -321,19 +321,19 @@ function closeDrawers() {
 }
 
 function fitDeviceFrame() {
-  const overlay = document.querySelector('.mac-screen-overlay');
-  if (!overlay) return;
-
-  // Get the actual size of the CRT screen overlay area
-  const rect = overlay.getBoundingClientRect();
-  const availableWidth = rect.width;
-  const availableHeight = rect.height;
-
+  if (!deviceScreen || !screenViewport) return;
+  const frame = screenViewport.closest(".display-frame");
+  const rect = frame ? frame.getBoundingClientRect() : screenViewport.getBoundingClientRect();
+  const style = frame ? getComputedStyle(frame) : null;
+  const padX = style ? parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) : 0;
+  const padY = style ? parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) : 0;
+  const availableWidth = Math.max(0, rect.width - padX);
+  const availableHeight = Math.max(0, rect.height - padY);
   if (!availableWidth || !availableHeight) return;
-
-  // Calculate scale to fit 480x360 iframe into the CRT screen area
-  const scale = Math.min(availableWidth / 480, availableHeight / 360);
-  overlay.style.setProperty('--screen-scale', String(scale));
+  const scale = Math.max(0.1, Math.min(availableWidth / 480, availableHeight / 360));
+  screenViewport.style.width = `${480 * scale}px`;
+  screenViewport.style.height = `${360 * scale}px`;
+  deviceScreen.style.setProperty("--screen-scale", String(scale || 1));
 }
 
 function scheduleFitDeviceFrame() {
@@ -589,10 +589,10 @@ window.addEventListener("resize", scheduleFitDeviceFrame);
 if (deviceFrame) {
   deviceFrame.addEventListener("load", scheduleFitDeviceFrame);
 }
-const macOverlay = document.querySelector('.mac-screen-overlay');
-if (macOverlay && "ResizeObserver" in window) {
+if (screenViewport && "ResizeObserver" in window) {
+  const frame = screenViewport.closest(".display-frame");
   const observer = new ResizeObserver(scheduleFitDeviceFrame);
-  observer.observe(macOverlay);
+  if (frame) observer.observe(frame);
 }
 refreshBoard();
 
