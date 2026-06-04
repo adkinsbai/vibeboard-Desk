@@ -2381,7 +2381,7 @@ async function deployCurrent() {
     "nohup \"$app_root/start-kiosk.sh\" >/tmp/vibeboard-kiosk-reload-request.log 2>&1 </dev/null &",
     "sleep 5",
     "kiosk=$( { ps -C chromium -o pid=,args= 2>/dev/null; ps -C chromium-bin -o pid=,args= 2>/dev/null; } | head -n 1 || true )",
-    "curl -fsS http://127.0.0.1:8765/ >/tmp/vibeboard-deploy-check.html || exit 30",
+    "rm -f /tmp/vibeboard-deploy-check.html; curl -fsS http://127.0.0.1:8765/ >/tmp/vibeboard-deploy-check.html || exit 30",
     "printf 'service=%s\\nbackup=%s\\ncompile=%s\\nprogram=%s\\nkiosk=%s\\n' \"$state\" \"$backup\" \"$compile_log\" \"$program_result\" \"$kiosk\""
   ].join("\n");
 
