@@ -675,15 +675,24 @@ Return ONLY a JSON object (no markdown, no commentary):
   "notes": "one concise implementation note"
 }
 
-${isEditing ? `## Editing Mode
-You are editing an EXISTING project. The user wants to modify or improve the current code.
-- Preserve the existing structure and style unless the user asks to change it.
-- Only modify files that need to change. For files that stay the same, include them unchanged.
-- Make targeted edits, not full rewrites, when the change is small.
-- If the user says "the screen is black" or reports a bug, fix the specific issue.
+${isEditing ? `## ⚠️ Editing Mode — CRITICAL RULES
+You are modifying an EXISTING project that is already deployed.
+The user can see the current code in the "当前部署的完整代码" section below.
+
+**YOU MUST:**
+1. Return ALL files in the JSON, even if you only changed one file
+2. For files the user didn't ask to change: copy them EXACTLY as-is (no formatting changes, no "improvements")
+3. Only modify the specific thing the user asked about
+4. If the user says "把3改成2", find what "3" refers to in the code and change only that to "2"
+5. NEVER rewrite the entire project from scratch when making a small change
+6. Preserve all existing functionality that the user didn't mention
+
+**COMMON MISTAKE TO AVOID:**
+User says "fix the color of button X" → Do NOT remove button Y or change the layout.
+User says "change item 3 to 2" → Find item 3 in the code, change its value to 2. Keep everything else.
 ` : `## Generation Mode
 You are creating a NEW project from scratch.
-`}
+` }
 
 ## Hard Requirements (always apply)
 - index.html must link "./style.css" and "./app.js" with relative paths.
@@ -798,6 +807,46 @@ ${isEditing ? "5. 需要修改哪些文件：..." : ""}
     console.warn("[thinkBeforeGenerate] Failed:", err.message);
     return { thinking: "", analysis: null };
   }
+}
+
+function llmUserPrompt(prompt, id, history = []) {
+  const isEditing = history.length > 0;
+
+  if (!isEditing) {
+    // New project: simple prompt
+    return `Build id: ${id}
+User request: ${prompt}
+
+Respond with ONLY the JSON object containing the files.`;
+  }
+
+  // Editing mode: inject FULL current code snapshot
+  let codeSnapshot = "";
+  if (currentBuild?.files) {
+    const fileList = Object.keys(currentBuild.files).filter(f => f !== "manifest.json");
+    codeSnapshot = "\n\n## 当前部署的完整代码（这是用户正在看的版本）\n";
+    codeSnapshot += "你必须基于这些代码做修改，保留未被要求修改的部分。\n\n";
+    for (const name of fileList) {
+      const content = currentBuild.files[name] || "";
+      if (content.length > 8000) {
+        codeSnapshot += `### ${name}\n\`\`\`\n${content.slice(0, 8000)}\n... (截断)\n\`\`\`\n\n`;
+      } else {
+        codeSnapshot += `### ${name}\n\`\`\`\n${content}\n\`\`\`\n\n`;
+      }
+    }
+  }
+
+  return `Build id: ${id}
+用户请求: ${prompt}
+${codeSnapshot}
+
+## 关键规则
+1. 返回完整的 JSON，包含所有文件（即使只改了一个文件，其他文件也要原样返回）
+2. 只修改用户要求改的部分，其他内容保持不变
+3. 不要重新设计或重构用户没有提到的部分
+4. 如果用户说"把X改成Y"，只改X相关的内容
+
+Respond with ONLY the JSON object.`;
 }
 
 async function callChatModel(settings, prompt, id, history = []) {
