@@ -678,6 +678,22 @@ async function refreshBoard() {
   }
 }
 
+// Build conversation history for multi-turn context
+function buildConversationHistory() {
+  const msgs = chatLog.querySelectorAll(".msg");
+  const history = [];
+  for (const msg of msgs) {
+    const role = msg.classList.contains("user") ? "user" : "assistant";
+    const body = msg.querySelector("p, .msg-text");
+    if (body) {
+      const text = body.textContent.trim();
+      if (text) history.push({ role, content: text });
+    }
+  }
+  // Limit to last 10 messages to avoid token overflow
+  return history.slice(-10);
+}
+
 async function runFlow(prompt) {
   if (busy) return;
   setBusy(true);
@@ -685,11 +701,17 @@ async function runFlow(prompt) {
   addMessage("user", prompt);
   persistMessage("user", prompt);
   const progress = addStageCard();
+  const history = buildConversationHistory();
 
   try {
     progress.set("generate", "active", "run");
     deployState.textContent = labels.generating;
-    const gen = await postJson(api.generate, { prompt, modelSettings: getModelPayload(), conversation_id: currentConversationId });
+    const gen = await postJson(api.generate, {
+      prompt,
+      modelSettings: getModelPayload(),
+      conversation_id: currentConversationId,
+      history
+    });
     renderFiles(gen.files);
     renderDevicePreview(prompt, "已生成应用");
     progress.set("generate", "done", "ok");
@@ -714,7 +736,22 @@ async function runFlow(prompt) {
 
     deployState.textContent = "生成完成";
     addDeployButton(prompt);
-    const successMessage = `已生成 ${Object.keys(gen.files).length} 个文件并通过编译校验。点击下方按钮部署到泰山派真机。`;
+    const fileCount = Object.keys(gen.files).length;
+    let verifyNote = "";
+    if (gen.verification) {
+      if (gen.verification.ok) {
+        verifyNote = "✅ 截图验证通过，页面渲染正常。";
+      } else {
+        const issues = [
+          ...(gen.verification.consoleErrors || []),
+          ...(gen.verification.pageErrors || [])
+        ];
+        if (gen.verification.isBlank) issues.push("页面白屏");
+        if (issues.length) verifyNote = `⚠️ 已自动修复 ${issues.length} 个问题并重新生成。`;
+      }
+    }
+    const successMessage = `已生成 ${fileCount} 个文件并通过编译校验。${verifyNote}
+点击下方按钮部署到泰山派真机，或继续对话修改代码。`;
     addMessage("agent", successMessage);
     persistMessage("agent", successMessage, gen.id || null);
   } catch (error) {

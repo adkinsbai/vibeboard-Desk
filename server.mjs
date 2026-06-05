@@ -636,10 +636,33 @@ if __name__ == "__main__":
   return wrapper;
 }
 
-function llmSystemPrompt() {
-  return `You are VibeBoard WebCoding, an expert frontend and embedded Linux web-app generator.
+const HARDWARE_PROFILE = {
+  屏幕: { 宽度: 480, 高度: 360, 色深: "RGB565", 触摸: false, 类型: "IPS LCD" },
+  芯片: { 型号: "RK3566", 架构: "aarch64", GPU: "Mali-G52 2EE", CPU: "4x Cortex-A55 @1.8GHz" },
+  系统: { OS: "Debian 11 (bullseye)", Python: "3.9", Node: "无（仅服务端有Node）" },
+  连接: { WiFi: true, 蓝牙: false, GPIO: "40pin", I2C: true, SPI: true, UART: true },
+  传感器: { CPU温度: "可读", GPU温度: "可读", 加速度: "无", 光线: "无", GPS: "无" },
+  输入: { 触摸屏: false, 按钮: "3个GPIO物理按钮（KEY1/KEY2/KEY3）", 旋钮: "无" },
+  输出: { 屏幕: "480x360 LCD", LED: "绿色LED x1", 蜂鸣器: "无", 喇叭: "3.5mm音频" },
+  已装软件: ["flask", "luma.oled", "PIL/Pillow", "pygame", "RPi.GPIO", "requests"],
+  网络: { HTTP服务: "可运行flask或node http-server", 端口: "可用任意高端口" }
+};
 
-Generate a complete 480x360 web kiosk app for an RK3566 Linux board. Return ONLY a JSON object with this exact shape:
+function llmSystemPrompt(conversationHistory = []) {
+  const isEditing = conversationHistory.length > 0;
+
+  return `You are VibeBoard, a hardware-aware coding assistant embedded in a real physical device.
+
+## Your Hardware Context
+${JSON.stringify(HARDWARE_PROFILE, null, 2)}
+
+## Your Capabilities
+You generate complete, production-ready web applications that run on the above hardware.
+The screen is 480x360 pixels with NO touch input. Users interact via 3 physical GPIO buttons.
+Every app you create runs as a fullscreen kiosk in a real browser on a real embedded Linux board.
+
+## Output Format
+Return ONLY a JSON object (no markdown, no commentary):
 {
   "files": {
     "index.html": "...",
@@ -652,47 +675,59 @@ Generate a complete 480x360 web kiosk app for an RK3566 Linux board. Return ONLY
   "notes": "one concise implementation note"
 }
 
-Hard requirements:
-- No markdown, no commentary outside JSON.
+${isEditing ? `## Editing Mode
+You are editing an EXISTING project. The user wants to modify or improve the current code.
+- Preserve the existing structure and style unless the user asks to change it.
+- Only modify files that need to change. For files that stay the same, include them unchanged.
+- Make targeted edits, not full rewrites, when the change is small.
+- If the user says "the screen is black" or reports a bug, fix the specific issue.
+` : `## Generation Mode
+You are creating a NEW project from scratch.
+`}
+
+## Hard Requirements (always apply)
 - index.html must link "./style.css" and "./app.js" with relative paths.
-- html, body and the main screen root must be exactly 480px by 360px, overflow hidden.
-- Do not use external CSS or JavaScript packages.
-- Do not use emoji as UI icons.
-- app.js must define window.VibeBoardHardware with getStatus(), getProgramResult(), getSnapshot().
-- app.js must fetch "/api/status" and "./hardware-result.json".
-- app.js must define const BUILD_ID and const PROMPT.
-- hardware_app.py must be valid Python 3, define BUILD_ID and PROMPT, print JSON, and include "available_apis": ["/api/status", "./hardware-result.json"]. The JSON output MUST include "runtime": "executed_on_board" and "build_id": BUILD_ID to pass golden-loop verification.
-- Use the board SDK only through /api/status and hardware-result.json. Do not run shell commands from browser JavaScript.
-- Design for a real 480x360 small display: stable fixed dimensions, no scrolling, no text overlap, clear hierarchy.
-`;
-}
+- html, body, main screen root: exactly 480px by 360px, overflow hidden, no scrollbar.
+- No external CSS/JS libraries. No CDN. Pure vanilla HTML/CSS/JS only.
+- No emoji as UI icons (use CSS shapes, SVG, or text symbols instead).
+- app.js MUST define: const BUILD_ID = "..." and const PROMPT = "...".
+- app.js MUST define window.VibeBoardHardware = { getStatus(), getProgramResult(), getSnapshot() }.
+- app.js MUST fetch "/api/status" every 10s for live hardware data.
+- app.js MUST fetch "./hardware-result.json" once for program output.
+- hardware_app.py MUST be valid Python 3, define BUILD_ID and PROMPT, print JSON to stdout.
+- hardware_app.py JSON MUST include "runtime": "executed_on_board" and "build_id": BUILD_ID.
+- Design for a REAL 480x360 display: stable layout, no overflow, clear visual hierarchy.
+- Use dark theme (dark background, light text) for best readability on LCD.
+- Font sizes: titles 16-20px, body 12-14px, small labels 10-11px.
+- Colors: avoid pure white (#fff), prefer #e2e8f0 or similar soft white.
 
-function llmUserPrompt(prompt, id) {
-  return `Build id: ${id}
-User request: ${prompt}
-
-Available runtime data from /api/status:
+## Available Runtime Data (from /api/status)
 - hostname, model, kernel, time, uptime, cpu_temp
 - memory.percent, memory.used_h, memory.total_h
 - disk.percent, disk.used_h, disk.total_h
 - network.wifi, network.addresses[0], network.gateway
 - services.ssh, services.frpc, services.display
-
-Make the app feel purpose-built for the user's request. Keep the UI dense enough for 480x360, polished, and reliable if APIs are slow.`;
+`;
 }
 
-async function callChatModel(settings, prompt, id) {
+async function callChatModel(settings, prompt, id, history = []) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
+  const timeout = setTimeout(() => controller.abort(), 90000);
   try {
+    const messages = [
+      { role: "system", content: llmSystemPrompt(history) }
+    ];
+    // Add conversation history (previous user/assistant turns)
+    for (const msg of history) {
+      messages.push({ role: msg.role, content: msg.content });
+    }
+    // Add current user prompt
+    messages.push({ role: "user", content: llmUserPrompt(prompt, id, history) });
     const payload = {
       model: settings.model,
-      messages: [
-        { role: "system", content: llmSystemPrompt() },
-        { role: "user", content: llmUserPrompt(prompt, id) }
-      ],
+      messages,
       temperature: 0.2,
-      max_tokens: 8000
+      max_tokens: 16000
     };
     if (settings.provider === "deepseek") {
       payload.thinking = { type: "disabled" };
@@ -775,20 +810,24 @@ function templateGeneratedFiles(prompt, id, reason = "") {
   };
 }
 
-async function generateFilesForPrompt(prompt, id, modelSettings = {}) {
+async function generateFilesForPrompt(prompt, id, modelSettings = {}, history = []) {
   const settings = normalizeModelSettings(modelSettings);
   if (!settings.enabled) {
     return templateGeneratedFiles(prompt, id, "model settings not configured");
   }
 
   try {
-    const content = await callChatModel(settings, prompt, id);
+    const content = await callChatModel(settings, prompt, id, history);
     const raw = extractJsonObject(content);
     return normalizeGeneratedFiles(raw, prompt, id, {
       provider: settings.provider,
       model: settings.model
     });
   } catch (error) {
+    if (history.length > 0) {
+      // If editing and LLM fails, don't fall back to template - throw the error
+      throw error;
+    }
     return templateGeneratedFiles(prompt, id, `model generation failed: ${error.message}`);
   }
 }
@@ -1879,9 +1918,9 @@ print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 `;
 }
 
-async function writeGenerated(prompt, modelSettings = {}) {
+async function writeGenerated(prompt, modelSettings = {}, history = []) {
   const id = buildId();
-  const { files, manifest } = await generateFilesForPrompt(prompt, id, modelSettings);
+  const { files, manifest } = await generateFilesForPrompt(prompt, id, modelSettings, history);
   await writeGeneratedFiles(GENERATED_DIR, files);
   currentBuild = { id, prompt, files, dir: GENERATED_DIR, built: false, deployed: false, manifest };
   return currentBuild;
@@ -1967,42 +2006,63 @@ async function buildCurrent() {
   return manifest;
 }
 
-// Capture preview screenshot of the generated app
+// Capture preview screenshot and return verification report
 async function capturePreview() {
-  if (!currentBuild) return null;
+  if (!currentBuild) return { ok: false, error: "no build" };
   try {
     await fs.mkdir(PREVIEWS_DIR, { recursive: true });
     const previewPath = path.join(PREVIEWS_DIR, `${currentBuild.id}.png`);
+    const reportPath = path.join(PREVIEWS_DIR, `${currentBuild.id}.json`);
     const scriptPath = path.join(ROOT, "screenshot.cjs");
     const url = `http://127.0.0.1:${PORT}/generated/current/index.html`;
 
-    // Run screenshot via child_process (Windows Playwright)
-    await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [scriptPath, url, previewPath], {
-        timeout: 20000,
-        stdio: ["ignore", "pipe", "pipe"]
+    let stdout = "", stderr = "";
+    let exitCode = 0;
+    try {
+      await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [scriptPath, url, previewPath, reportPath], {
+          timeout: 25000,
+          stdio: ["ignore", "pipe", "pipe"]
+        });
+        child.stdout.on("data", d => stdout += d);
+        child.stderr.on("data", d => stderr += d);
+        child.on("close", code => { exitCode = code; resolve(); });
+        child.on("error", reject);
       });
-      let stdout = "", stderr = "";
-      child.stdout.on("data", d => stdout += d);
-      child.stderr.on("data", d => stderr += d);
-      child.on("close", code => {
-        if (code === 0) resolve(stdout);
-        else reject(new Error(stderr || `screenshot exit code ${code}`));
-      });
-      child.on("error", reject);
-    });
-
-    // Verify the file was created
-    const stat = await fs.stat(previewPath);
-    if (stat.size > 0) {
-      currentBuild.previewPath = previewPath;
-      console.log("[capturePreview] Saved:", previewPath);
-      return previewPath;
+    } catch (spawnErr) {
+      exitCode = 1;
+      stderr = spawnErr.message;
     }
+
+    // Parse report from stdout
+    let report = { ok: false, consoleErrors: [], pageErrors: [], isBlank: false };
+    const reportMatch = stdout.match(/__REPORT__(.*)/);
+    if (reportMatch) {
+      try { report = JSON.parse(reportMatch[1]); } catch {}
+    }
+
+    // Also try reading from report file
+    if (!report.ok) {
+      try {
+        const fileReport = await fs.readFile(reportPath, "utf8");
+        report = JSON.parse(fileReport);
+      } catch {}
+    }
+
+    // Set preview path if screenshot exists
+    try {
+      const stat = await fs.stat(previewPath);
+      if (stat.size > 0) {
+        currentBuild.previewPath = previewPath;
+      }
+    } catch {}
+
+    report.screenshot = previewPath;
+    return report;
   } catch (err) {
     console.error("[capturePreview] Failed:", err.message);
+    return { ok: false, error: err.message, consoleErrors: [], pageErrors: [], isBlank: false };
   }
-  return null;
 }
 
 async function verifyGoldenLoop(expectedId = currentBuild?.id) {
@@ -2328,7 +2388,63 @@ async function route(req, res) {
       const body = await readBody(req);
       const prompt = String(body.prompt || "").trim();
       if (!prompt) throw new Error("Prompt is required.");
-      const build = await writeGenerated(prompt, body.modelSettings || {});
+      const history = Array.isArray(body.history) ? body.history : [];
+      const modelSettings = body.modelSettings || {};
+      const MAX_RETRIES = 1;
+
+      let build = await writeGenerated(prompt, modelSettings, history);
+      let lastReport = null;
+
+      // Auto-verify with screenshot
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          // Build first
+          await buildCurrent();
+
+          // Capture screenshot and get report
+          const report = await capturePreview();
+          lastReport = report;
+
+          if (report.ok) {
+            console.log(`[generate] Screenshot OK on attempt ${attempt + 1}`);
+            break;
+          }
+
+          // If not ok and we have retries left, retry with error context
+          if (attempt < MAX_RETRIES) {
+            const errors = [
+              ...(report.consoleErrors || []),
+              ...(report.pageErrors || [])
+            ].join("; ");
+            const reason = report.isBlank
+              ? "页面白屏，没有任何可见内容"
+              : errors || "截图验证失败";
+
+            console.log(`[generate] Screenshot failed (attempt ${attempt + 1}): ${reason}, retrying...`);
+
+            // Build retry prompt with error context
+            const retryHistory = [
+              ...history,
+              { role: "user", content: prompt },
+              { role: "assistant", content: JSON.stringify({ files: build.files }) },
+              { role: "user", content: `你生成的代码有以下问题：${reason}\n请修复这些问题，重新生成代码。注意：\n- 如果是白屏，检查CSS是否正确设置了background-color，检查JS是否有语法错误\n- 如果是console错误，修复具体的JS错误\n- 确保所有元素在480x360屏幕内可见` }
+            ];
+            build = await writeGenerated(prompt, modelSettings, retryHistory);
+          }
+        } catch (buildErr) {
+          console.error(`[generate] Build error on attempt ${attempt + 1}:`, buildErr.message);
+          if (attempt >= MAX_RETRIES) throw buildErr;
+          // Retry with build error context
+          const retryHistory = [
+            ...history,
+            { role: "user", content: prompt },
+            { role: "assistant", content: "生成失败" },
+            { role: "user", content: `代码编译失败：${buildErr.message}\n请修复后重新生成。` }
+          ];
+          build = await writeGenerated(prompt, modelSettings, retryHistory);
+        }
+      }
+
       // Save files to conversation if conversation_id provided
       const convId = body.conversation_id || null;
       if (convId && build.files) {
@@ -2340,7 +2456,8 @@ async function route(req, res) {
         files: build.files,
         manifest: build.manifest || null,
         source: build.manifest?.source || "unknown",
-        fallbackReason: build.manifest?.fallbackReason || ""
+        fallbackReason: build.manifest?.fallbackReason || "",
+        verification: lastReport || null
       });
       return;
     }
