@@ -221,6 +221,76 @@ function summarizeRemoteError(error) {
   return interesting || lines.slice(-1)[0] || "remote command failed";
 }
 
+// Classify errors into user-friendly categories
+function classifyError(error, context = "") {
+  const text = `${error?.message || ""}\n${error?.stderr || ""}\n${error?.stdout || ""}`.toLowerCase();
+
+  // SSH / Network errors
+  if (/timed out|ETIMEDOUT|ConnectTimeout/i.test(text)) {
+    return { type: "ssh_timeout", label: "设备连接超时" };
+  }
+  if (/connection refused|ECONNREFUSED/i.test(text)) {
+    return { type: "connection_refused", label: "设备拒绝连接" };
+  }
+  if (/unable to reach|NoValidConnectionsError|Error reading SSH protocol banner/i.test(text)) {
+    return { type: "board_offline", label: "设备离线" };
+  }
+  if (/Authentication failed|Permission denied|kex_exchange_identification/i.test(text)) {
+    return { type: "auth_failed", label: "设备认证失败" };
+  }
+  if (/Connection closed|Connection reset|EOFError/i.test(text)) {
+    return { type: "connection_dropped", label: "设备连接中断" };
+  }
+
+  // Deploy-specific errors (exit codes from remote shell)
+  if (/exit code 10/.test(text)) {
+    return { type: "deploy_mkdir", label: "设备存储空间不足" };
+  }
+  if (/exit code 1[1-5]/.test(text)) {
+    return { type: "deploy_copy", label: "文件写入设备失败" };
+  }
+  if (/exit code 16|exit code 17/.test(text)) {
+    return { type: "deploy_compile", label: "应用在设备上运行出错" };
+  }
+  if (/exit code 20|exit code 21/.test(text)) {
+    return { type: "deploy_service", label: "设备服务重启失败" };
+  }
+  if (/exit code 30/.test(text)) {
+    return { type: "deploy_http", label: "设备 HTTP 服务无响应" };
+  }
+
+  // Generate errors
+  if (/model settings not configured|no api key/i.test(text)) {
+    return { type: "no_api_key", label: "未配置 AI 模型" };
+  }
+  if (/model generation failed|fetch failed|ENOTFOUND|ECONNREFUSED.*api/i.test(text)) {
+    return { type: "llm_failed", label: "AI 模型调用失败" };
+  }
+  if (/timeout/i.test(text) && context === "generate") {
+    return { type: "llm_timeout", label: "AI 模型响应超时" };
+  }
+
+  // Build errors
+  if (/SyntaxError|Unexpected token|node --check/i.test(text)) {
+    return { type: "syntax_error", label: "生成的代码有语法错误" };
+  }
+  if (/py_compile|SyntaxError.*python/i.test(text)) {
+    return { type: "python_syntax", label: "硬件代码有语法错误" };
+  }
+  if (/is empty/i.test(text)) {
+    return { type: "empty_file", label: "生成的文件为空" };
+  }
+
+  // Generic fallback
+  if (context === "deploy") {
+    return { type: "deploy_failed", label: "部署失败" };
+  }
+  if (context === "generate") {
+    return { type: "generate_failed", label: "代码生成失败" };
+  }
+  return { type: "unknown", label: "操作失败" };
+}
+
 async function paramikoExecOnce(endpoint, remoteCommand, timeout = 30000, input = "") {
   const script = String.raw`
 import json
@@ -2475,7 +2545,18 @@ async function route(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (req.method === "GET" && url.pathname === "/api/board") {
-      json(res, 200, { ok: true, ...(await boardStatus()) });
+      try {
+        json(res, 200, { ok: true, ...(await boardStatus()) });
+      } catch (error) {
+        const classified = classifyError(error, "board");
+        json(res, 503, {
+          ok: false,
+          connected: false,
+          error: error.message,
+          errorType: classified.type,
+          errorLabel: classified.label
+        });
+      }
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/board-config") {
@@ -2506,7 +2587,17 @@ async function route(req, res) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/status") {
-      json(res, 200, await rawBoardStatus());
+      try {
+        json(res, 200, await rawBoardStatus());
+      } catch (error) {
+        const classified = classifyError(error, "board");
+        json(res, 503, {
+          ok: false,
+          error: error.message,
+          errorType: classified.type,
+          errorLabel: classified.label
+        });
+      }
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/verify") {
@@ -2518,23 +2609,47 @@ async function route(req, res) {
     if (req.method === "POST" && url.pathname === "/api/generate") {
       const body = await readBody(req);
       const prompt = String(body.prompt || "").trim();
-      if (!prompt) throw new Error("Prompt is required.");
-      const build = await writeGenerated(prompt, body.modelSettings || {});
-      json(res, 200, {
-        ok: true,
-        id: build.id,
-        files: build.files,
-        manifest: build.manifest || null,
-        source: build.manifest?.source || "unknown",
-        fallbackReason: build.manifest?.fallbackReason || ""
-      });
+      if (!prompt) {
+        const classified = { type: "empty_prompt", label: "请输入你的需求" };
+        json(res, 400, { ok: false, error: "Prompt is required.", errorType: classified.type, errorLabel: classified.label });
+        return;
+      }
+      try {
+        const build = await writeGenerated(prompt, body.modelSettings || {});
+        json(res, 200, {
+          ok: true,
+          id: build.id,
+          files: build.files,
+          manifest: build.manifest || null,
+          source: build.manifest?.source || "unknown",
+          fallbackReason: build.manifest?.fallbackReason || ""
+        });
+      } catch (error) {
+        const classified = classifyError(error, "generate");
+        json(res, 500, {
+          ok: false,
+          error: error.message,
+          errorType: classified.type,
+          errorLabel: classified.label
+        });
+      }
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/build") {
-      const manifest = await buildCurrent();
-      // Capture preview screenshot after successful build
-      capturePreview().catch(err => console.error("[build] preview capture failed:", err.message));
-      json(res, 200, { ok: true, summary: `${manifest.files.length} files`, manifest });
+      try {
+        const manifest = await buildCurrent();
+        // Capture preview screenshot after successful build
+        capturePreview().catch(err => console.error("[build] preview capture failed:", err.message));
+        json(res, 200, { ok: true, summary: `${manifest.files.length} files`, manifest });
+      } catch (error) {
+        const classified = classifyError(error, "build");
+        json(res, 500, {
+          ok: false,
+          error: error.message,
+          errorType: classified.type,
+          errorLabel: classified.label
+        });
+      }
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/deploy") {
@@ -2548,9 +2663,12 @@ async function route(req, res) {
         console.error("[deploy] Stack:", error.stack);
         if (error.stdout) console.error("[deploy] stdout:", error.stdout);
         if (error.stderr) console.error("[deploy] stderr:", error.stderr);
+        const classified = classifyError(error, "deploy");
         json(res, 500, { 
           ok: false, 
           error: error.message,
+          errorType: classified.type,
+          errorLabel: classified.label,
           stdout: error.stdout || "",
           stderr: error.stderr || ""
         });
@@ -2695,7 +2813,7 @@ async function route(req, res) {
       } catch {}
 
       if (Object.keys(codeFiles).length === 0) {
-        json(res, 400, { ok: false, error: "App has no code to deploy" });
+        json(res, 400, { ok: false, error: "App has no code to deploy", errorType: "no_code", errorLabel: "此应用为示例预览，无法直接部署" });
         return;
       }
 
@@ -2719,7 +2837,8 @@ async function route(req, res) {
           deployId: deployResult.id
         });
       } catch (deployErr) {
-        json(res, 500, { ok: false, error: "Deploy failed: " + deployErr.message });
+        const classified = classifyError(deployErr, "deploy");
+        json(res, 500, { ok: false, error: deployErr.message, errorType: classified.type, errorLabel: classified.label });
       }
       return;
     }

@@ -120,6 +120,132 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+// User-friendly error messages with actionable suggestions
+const FRIENDLY_ERRORS = {
+  ssh_timeout: {
+    title: "设备连接超时",
+    detail: "无法在规定时间内连接到泰山派设备。",
+    suggestion: "请检查：① 设备是否已开机 ② 设备是否连接了网络 ③ FRP 隧道是否正常（可在 FRP 面板 http://150.158.146.192:7500 查看）"
+  },
+  connection_refused: {
+    title: "设备拒绝连接",
+    detail: "泰山派设备的 SSH 服务没有响应。",
+    suggestion: "请检查：① 设备是否已开机 ② SSH 服务是否正常运行 ③ 端口号是否正确"
+  },
+  board_offline: {
+    title: "设备离线",
+    detail: "无法连接到泰山派设备，设备可能已关机或网络不通。",
+    suggestion: "请检查：① 设备是否已开机并连接网络 ② FRP 隧道是否正常 ③ 稍等片刻后重试"
+  },
+  auth_failed: {
+    title: "设备认证失败",
+    detail: "SSH 密码认证被拒绝。",
+    suggestion: "请检查设备 SSH 密码是否正确，或联系管理员重置"
+  },
+  connection_dropped: {
+    title: "设备连接中断",
+    detail: "SSH 连接在传输过程中断开。",
+    suggestion: "可能是网络不稳定，请稍后重试"
+  },
+  deploy_mkdir: {
+    title: "设备存储空间不足",
+    detail: "无法在设备上创建部署目录。",
+    suggestion: "设备存储可能已满，请联系管理员清理设备空间"
+  },
+  deploy_copy: {
+    title: "文件写入设备失败",
+    detail: "应用文件无法复制到设备的目标目录。",
+    suggestion: "可能是设备存储空间不足或文件权限问题"
+  },
+  deploy_compile: {
+    title: "应用在设备上运行出错",
+    detail: "应用代码在泰山派上执行时出现错误。",
+    suggestion: "可能是代码兼容性问题，请尝试重新生成应用"
+  },
+  deploy_service: {
+    title: "设备服务重启失败",
+    detail: "泰山派上的显示服务无法正常重启。",
+    suggestion: "请尝试手动重启设备，或联系管理员检查服务状态"
+  },
+  deploy_http: {
+    title: "设备 HTTP 服务无响应",
+    detail: "部署完成后，设备上的网页服务没有正常启动。",
+    suggestion: "应用可能启动缓慢，请等待几秒后刷新页面查看"
+  },
+  no_api_key: {
+    title: "未配置 AI 模型",
+    detail: "还没有设置 AI 模型的 API Key，将使用本地模板生成。",
+    suggestion: "点击右上角「Model」按钮配置 DeepSeek 或其他模型，获得更好的生成效果"
+  },
+  llm_failed: {
+    title: "AI 模型调用失败",
+    detail: "无法连接到 AI 模型服务。",
+    suggestion: "请检查：① API Key 是否正确 ② 网络是否能访问模型服务 ③ 模型服务是否正常"
+  },
+  llm_timeout: {
+    title: "AI 模型响应超时",
+    detail: "AI 模型没有在规定时间内返回结果。",
+    suggestion: "可能是模型服务繁忙，请稍后重试"
+  },
+  syntax_error: {
+    title: "代码语法错误",
+    detail: "生成的 JavaScript 代码有语法问题。",
+    suggestion: "系统会尝试重新生成，请再试一次"
+  },
+  python_syntax: {
+    title: "硬件代码语法错误",
+    detail: "生成的 Python 硬件代码有语法问题。",
+    suggestion: "系统会尝试重新生成，请再试一次"
+  },
+  empty_file: {
+    title: "生成的文件为空",
+    detail: "代码生成过程中出现了问题，文件内容为空。",
+    suggestion: "请重新生成，如果持续出现请联系管理员"
+  },
+  no_code: {
+    title: "此应用为示例预览",
+    detail: "这个应用没有存储源代码，无法直接部署到设备。",
+    suggestion: "请在对话中输入类似的需求，生成你自己的应用版本后部署"
+  },
+  empty_prompt: {
+    title: "请输入你的需求",
+    detail: "描述不能为空。",
+    suggestion: "例如：做一个显示天气的应用、做一个时钟"
+  },
+  deploy_failed: {
+    title: "部署失败",
+    detail: "将应用写入设备时出现问题。",
+    suggestion: "请检查设备状态后重试"
+  },
+  generate_failed: {
+    title: "代码生成失败",
+    detail: "生成应用代码时出现问题。",
+    suggestion: "请检查模型配置后重试"
+  },
+  unknown: {
+    title: "操作失败",
+    detail: "执行过程中出现了未知错误。",
+    suggestion: "请稍后重试，如果问题持续请联系管理员"
+  }
+};
+
+function friendlyError(data, fallbackMsg) {
+  const type = data?.errorType || "unknown";
+  const info = FRIENDLY_ERRORS[type] || FRIENDLY_ERRORS.unknown;
+  return {
+    title: info.title,
+    detail: info.detail,
+    suggestion: info.suggestion,
+    type,
+    raw: data?.error || fallbackMsg || ""
+  };
+}
+
+function formatFriendlyError(data, fallbackMsg) {
+  const f = friendlyError(data, fallbackMsg);
+  return `${f.title}。${f.detail}\n💡 ${f.suggestion}`;
+}
+
 function addMessage(role, text) {
   const article = document.createElement("article");
   article.className = `msg ${role}`;
@@ -178,7 +304,9 @@ async function postJson(url, payload = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.ok === false) {
-    throw new Error(data.error || `HTTP ${res.status}`);
+    const err = new Error(data.errorLabel || data.error || `HTTP ${res.status}`);
+    err.data = data;
+    throw err;
   }
   return data;
 }
@@ -187,7 +315,9 @@ async function getJson(url) {
   const res = await fetch(url, { cache: "no-store" });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.ok === false) {
-    throw new Error(data.error || `HTTP ${res.status}`);
+    const err = new Error(data.errorLabel || data.error || `HTTP ${res.status}`);
+    err.data = data;
+    throw err;
   }
   return data;
 }
@@ -440,8 +570,9 @@ async function refreshBoard() {
     if (data.kernel) el("boardOs").textContent = `Linux ${data.kernel}`;
   } catch (error) {
     const sshState = el("sshState");
-    if (sshState) sshState.textContent = "ssh error";
-    addMessage("agent", `\u8BFB\u53D6\u771F\u673A\u72B6\u6001\u5931\u8D25\uFF1A${error.message}`);
+    if (sshState) sshState.textContent = "offline";
+    const f = friendlyError(error.data, error.message);
+    addMessage("agent", `⚠️ ${f.title}。${f.detail}\n💡 ${f.suggestion}`);
   } finally {
     if (refreshBoardBtn) refreshBoardBtn.disabled = false;
   }
@@ -466,7 +597,14 @@ async function runFlow(prompt) {
     if (gen.source === "llm") {
       addMessage("agent", `已通过 ${modelSettings.provider} / ${modelSettings.model} 生成应用代码。`);
     } else if (gen.fallbackReason) {
-      addMessage("agent", `模型连接不可用，已继续使用本地模板生成；写入流程会继续。原因：${gen.fallbackReason}`);
+      const reason = gen.fallbackReason;
+      let hint = "";
+      if (/not configured|no api key/i.test(reason)) {
+        hint = "💡 点击右上角「Model」配置 AI 模型后，可获得更好的生成效果。";
+      } else if (/failed|timeout|error/i.test(reason)) {
+        hint = "💡 请检查 API Key 和网络连接，或稍后重试。";
+      }
+      addMessage("agent", `⚠️ 未配置 AI 模型，已使用本地模板生成应用。\n${hint}`);
     }
 
     progress.set("build", "active", "run");
@@ -483,7 +621,8 @@ async function runFlow(prompt) {
     const current = stages.find(stage => document.querySelector(`[data-stage="${stage.id}"].active`));
     if (current) progress.set(current.id, "fail", "fail");
     deployState.textContent = labels.failed;
-    const errorMessage = `流程失败：${error.message}`;
+    const f = friendlyError(error.data, error.message);
+    const errorMessage = `❌ ${f.title}\n${f.detail}\n💡 ${f.suggestion}`;
     addMessage("agent", errorMessage);
     persistMessage("agent", errorMessage);
   } finally {
@@ -521,12 +660,13 @@ async function runDeploy(btn) {
     renderHardwareRun(deployed);
     deployState.textContent = labels.done;
     renderDevicePreview("", "已写入真机");
-    addMessage("agent", `部署成功！已写入泰山派，服务已重启。Backup: ${deployed.backup || "remote backup"}`);
+    addMessage("agent", `✅ 部署成功！应用已写入泰山派设备，服务已重启。\n你可以在右侧预览窗口查看效果，或直接在设备屏幕上查看。`);
     btn.textContent = "✅ 部署完成";
     btn.classList.add("done");
   } catch (error) {
     deployState.textContent = labels.failed;
-    addMessage("agent", `部署失败：${error.message}`);
+    const f = friendlyError(error.data, error.message);
+    addMessage("agent", `❌ ${f.title}\n${f.detail}\n💡 ${f.suggestion}`);
     btn.textContent = "❌ 部署失败，点击重试";
     btn.disabled = false;
   } finally {

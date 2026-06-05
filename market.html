@@ -627,8 +627,30 @@
         document.getElementById('deployTitle').textContent = '部署失败';
         const result = document.getElementById('deployResult');
         result.className = 'deploy-result visible error';
-        result.innerHTML = `<p>❌ ${message}</p><button onclick="hideDeployOverlay()">关闭</button>`;
+        // Render newlines as <br> for readability
+        const htmlMsg = message.replace(/\n/g, '<br>');
+        result.innerHTML = `<p style="line-height:1.6;text-align:left">${htmlMsg}</p><button onclick="hideDeployOverlay()">关闭</button>`;
       }
+    }
+
+    // Friendly error messages for market deploy
+    const MARKET_ERRORS = {
+      ssh_timeout: '设备连接超时。请检查泰山派是否开机、网络是否正常。',
+      connection_refused: '设备拒绝连接。请检查 SSH 服务是否正常。',
+      board_offline: '设备离线。请确认泰山派已开机并连接网络。',
+      auth_failed: '设备认证失败。请联系管理员检查 SSH 密码。',
+      connection_dropped: '设备连接中断。网络可能不稳定，请稍后重试。',
+      deploy_compile: '应用在设备上运行出错。可能是代码兼容性问题。',
+      deploy_service: '设备服务重启失败。请尝试手动重启设备。',
+      deploy_http: '设备 HTTP 服务无响应。应用可能启动缓慢，请等待后刷新。',
+      deploy_copy: '文件写入设备失败。设备存储可能已满。',
+      deploy_mkdir: '设备存储空间不足。请联系管理员清理。',
+      no_code: '此应用为示例预览，没有存储源代码。请在对话中生成类似应用后部署。',
+      unknown: '部署过程中出现未知错误，请稍后重试。'
+    };
+    function marketFriendlyError(data) {
+      const type = data?.errorType || 'unknown';
+      return MARKET_ERRORS[type] || data?.errorLabel || data?.error || MARKET_ERRORS.unknown;
     }
 
     // Deploy app to device
@@ -650,10 +672,11 @@
         if (data.ok) {
           finishDeployProgress(true, '应用已成功部署到泰山派设备！');
         } else {
-          finishDeployProgress(false, data.error || '未知错误');
+          const msg = marketFriendlyError(data);
+          finishDeployProgress(false, msg);
         }
       } catch (err) {
-        finishDeployProgress(false, err.message);
+        finishDeployProgress(false, '网络连接失败，请检查服务器是否在运行。\n💡 如果服务器在 Windows 上，请确认 start.bat 已启动');
       }
     }
 
