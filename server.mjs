@@ -22,6 +22,7 @@ import {
   readStaticMarketCode as readStaticMarketCodeFromDir
 } from "./src/marketCatalog.mjs";
 import { createConversationStore } from "./src/conversationStore.mjs";
+import { runAgent } from "./src/agent.mjs";
 import { chatCompletionsUrl, normalizeModelSettings } from "./src/modelSettings.mjs";
 import {
   buildGoldenLoopResult,
@@ -2626,95 +2627,90 @@ async function route(req, res) {
       if (!prompt) throw new Error("Prompt is required.");
       const rawHistory = Array.isArray(body.history) ? body.history : [];
       const modelSettings = body.modelSettings || {};
-      const MAX_RETRIES = 1;
 
-      // Compress history: summarize old messages, keep recent intact
+      // Compress history
       const history = await compressHistory(rawHistory, normalizeModelSettings(modelSettings));
-      if (rawHistory.length > HISTORY_WINDOW) {
-        console.log(`[generate] History compressed: ${rawHistory.length} -> ${history.length} messages`);
-      }
-
-      // Step 1: Think before generating
       const settings = normalizeModelSettings(modelSettings);
-      const thinking = await thinkBeforeGenerate(settings, prompt, "pending", history);
-      if (thinking.thinking) {
-        console.log(`[generate] Thinking complete (${thinking.thinking.length} chars)`);
+
+      if (!settings.enabled) {
+        // Fallback to template if no model configured
+        const build = await writeGenerated(prompt, modelSettings, []);
+        json(res, 200, {
+          ok: true, id: build.id, files: build.files,
+          manifest: build.manifest || null, source: "template",
+          agentActions: [], thinking: ""
+        });
+        return;
       }
 
-      // Step 2: Generate with thinking context
-      const enrichedHistory = thinking.thinking ? [
-        ...history,
-        { role: "system", content: `[我的分析]\n${thinking.thinking}\n\n基于以上分析，现在生成代码。` }
-      ] : history;
+      // Prepare file store: editing = current files, new = empty
+      const isEditing = history.length > 0 && currentBuild?.files;
+      const fileStore = isEditing
+        ? { ...currentBuild.files }
+        : {};
 
-      let build = await writeGenerated(prompt, modelSettings, enrichedHistory);
-      build.thinking = thinking.thinking || "";
-      let lastReport = null;
+      // Run the coding agent
+      console.log(`[generate] Agent starting (${isEditing ? "edit" : "new"} mode)`);
+      const agentResult = await runAgent(settings, prompt, fileStore, history, (action) => {
+        console.log(`[agent] ${action.tool}: ${action.args?.path || action.args?.query || action.args?.summary || ""}`);
+      });
 
-      // Auto-verify with screenshot
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        try {
-          // Build first
-          await buildCurrent();
-
-          // Capture screenshot and get report
-          const report = await capturePreview();
-          lastReport = report;
-
-          if (report.ok) {
-            console.log(`[generate] Screenshot OK on attempt ${attempt + 1}`);
-            break;
-          }
-
-          // If not ok and we have retries left, retry with error context
-          if (attempt < MAX_RETRIES) {
-            const errors = [
-              ...(report.consoleErrors || []),
-              ...(report.pageErrors || [])
-            ].join("; ");
-            const reason = report.isBlank
-              ? "页面白屏，没有任何可见内容"
-              : errors || "截图验证失败";
-
-            console.log(`[generate] Screenshot failed (attempt ${attempt + 1}): ${reason}, retrying...`);
-
-            // Build retry prompt with error context
-            const retryHistory = [
-              ...history,
-              { role: "user", content: prompt },
-              { role: "assistant", content: JSON.stringify({ files: build.files }) },
-              { role: "user", content: `你生成的代码有以下问题：${reason}\n请修复这些问题，重新生成代码。注意：\n- 如果是白屏，检查CSS是否正确设置了background-color，检查JS是否有语法错误\n- 如果是console错误，修复具体的JS错误\n- 确保所有元素在480x360屏幕内可见` }
-            ];
-            build = await writeGenerated(prompt, modelSettings, retryHistory);
-          }
-        } catch (buildErr) {
-          console.error(`[generate] Build error on attempt ${attempt + 1}:`, buildErr.message);
-          if (attempt >= MAX_RETRIES) throw buildErr;
-          // Retry with build error context
-          const retryHistory = [
-            ...history,
-            { role: "user", content: prompt },
-            { role: "assistant", content: "生成失败" },
-            { role: "user", content: `代码编译失败：${buildErr.message}\n请修复后重新生成。` }
-          ];
-          build = await writeGenerated(prompt, modelSettings, retryHistory);
-        }
+      if (!agentResult.success) {
+        throw new Error(agentResult.summary || "Agent failed");
       }
 
-      // Save files to conversation if conversation_id provided
+      // Ensure hardware_app.py and manifest exist
+      const id = buildId();
+      const agentFiles = agentResult.files;
+
+      if (!agentFiles["hardware_app.py"]) {
+        const spec = createAppSpec(prompt, id);
+        agentFiles["hardware_app.py"] = generatedHardwareAppV2(prompt, id, spec);
+      }
+      agentFiles["hardware_app.py"] = injectHardwareAppContracts(agentFiles["hardware_app.py"], id);
+
+      const spec = createAppSpec(prompt, id);
+      const manifest = generatedManifestV2(prompt, id, spec, {
+        generator: "vibeboard-agent-v1",
+        title: prompt.slice(0, 40),
+        source: "agent",
+        model: settings.model,
+        provider: settings.provider,
+        notes: agentResult.summary,
+        target: BOARD.targetStatic
+      });
+      agentFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
+
+      // Write to disk
+      await writeGeneratedFiles(GENERATED_DIR, agentFiles);
+      currentBuild = { id, prompt, files: agentFiles, dir: GENERATED_DIR, built: false, deployed: false, manifest };
+
+      // Auto-build
+      try {
+        await buildCurrent();
+      } catch (buildErr) {
+        console.error("[generate] Build error:", buildErr.message);
+      }
+
+      // Save to conversation
       const convId = body.conversation_id || null;
-      if (convId && build.files) {
-        conversationStore.saveConversationFiles(convId, build.id, build.files);
+      if (convId) {
+        conversationStore.saveConversationFiles(convId, id, agentFiles);
       }
+
       json(res, 200, {
         ok: true,
-        id: build.id,
-        files: build.files,
-        manifest: build.manifest || null,
-        source: build.manifest?.source || "unknown",
-        fallbackReason: build.manifest?.fallbackReason || "",
-        verification: lastReport || null,
-        thinking: build.thinking || ""
+        id,
+        files: agentFiles,
+        manifest,
+        source: "agent",
+        agentSummary: agentResult.summary,
+        agentActions: agentResult.actions.map(a => ({
+          tool: a.tool,
+          path: a.args?.path,
+          query: a.args?.query,
+          summary: a.args?.summary
+        }))
       });
       return;
     }

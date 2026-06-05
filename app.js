@@ -712,6 +712,75 @@ function addThinkingBubble(thinking) {
   return article;
 }
 
+// Show agent actions as a collapsible card
+function addAgentActionsCard(actions, summary) {
+  const article = document.createElement("article");
+  article.className = "msg agent";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = "VB";
+  const body = document.createElement("div");
+  body.className = "agent-card";
+
+  const header = document.createElement("div");
+  header.className = "agent-card-header";
+  const icon = document.createElement("span");
+  icon.textContent = "⚙️";
+  const title = document.createElement("span");
+  title.textContent = `执行了 ${actions.length} 步操作`;
+  const toggle = document.createElement("span");
+  toggle.className = "agent-toggle";
+  toggle.textContent = "▼";
+  header.append(icon, title, toggle);
+
+  const list = document.createElement("div");
+  list.className = "agent-actions-list";
+  list.style.display = "none";
+
+  const toolIcons = {
+    list_files: "📁", read_file: "📖", search_code: "🔍",
+    edit_file: "✏️", create_file: "📄", verify_syntax: "✅", done: "🎯"
+  };
+
+  for (const action of actions) {
+    const row = document.createElement("div");
+    row.className = "agent-action";
+    const toolIcon = document.createElement("span");
+    toolIcon.className = "agent-action-icon";
+    toolIcon.textContent = toolIcons[action.tool] || "🔧";
+    const desc = document.createElement("span");
+    desc.className = "agent-action-desc";
+    if (action.tool === "edit_file") {
+      desc.textContent = `编辑 ${action.path || ""}`;
+    } else if (action.tool === "read_file") {
+      desc.textContent = `读取 ${action.path || ""}`;
+    } else if (action.tool === "search_code") {
+      desc.textContent = `搜索 "${action.query || ""}" in ${action.path || ""}`;
+    } else if (action.tool === "create_file") {
+      desc.textContent = `创建 ${action.path || ""}`;
+    } else if (action.tool === "verify_syntax") {
+      desc.textContent = "验证语法";
+    } else if (action.tool === "done") {
+      desc.textContent = action.summary || "完成";
+    } else {
+      desc.textContent = action.tool;
+    }
+    row.append(toolIcon, desc);
+    list.appendChild(row);
+  }
+
+  header.addEventListener("click", () => {
+    const isHidden = list.style.display === "none";
+    list.style.display = isHidden ? "block" : "none";
+    toggle.textContent = isHidden ? "▲" : "▼";
+  });
+
+  body.append(header, list);
+  article.append(avatar, body);
+  chatLog.appendChild(article);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
 // Show thinking animation while waiting
 function addThinkingAnimation() {
   const article = document.createElement("article");
@@ -771,17 +840,22 @@ async function runFlow(prompt) {
       history
     });
 
-    // Remove thinking animation, show actual thinking if available
+    // Remove thinking animation, show agent actions
     removeThinkingAnimation();
-    if (gen.thinking) {
+    if (gen.agentActions?.length) {
+      addAgentActionsCard(gen.agentActions, gen.agentSummary);
+    } else if (gen.thinking) {
       addThinkingBubble(gen.thinking);
     }
 
     renderFiles(gen.files);
-    renderDevicePreview(prompt, "已生成应用");
+    renderDevicePreview(prompt, gen.agentSummary || "已生成应用");
     progress.set("generate", "done", "ok");
     el("lastBuildState").textContent = gen.id || "generated";
-    if (gen.source === "llm") {
+    if (gen.source === "agent") {
+      const summary = gen.agentSummary || "已完成代码生成";
+      addMessage("agent", `🤖 ${summary}`);
+    } else if (gen.source === "llm") {
       addMessage("agent", `已通过 ${modelSettings.provider} / ${modelSettings.model} 生成应用代码。`);
     } else if (gen.fallbackReason) {
       const reason = gen.fallbackReason;

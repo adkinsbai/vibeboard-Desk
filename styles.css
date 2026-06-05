@@ -1517,3 +1517,51 @@ pre {
   66% { content: ".."; }
   100% { content: "..."; }
 }
+
+/* Agent actions card */
+.agent-card {
+  background: rgba(16,185,129,.06);
+  border: 1px solid rgba(16,185,129,.2);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+.agent-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text, #6ee7b7);
+  font-weight: 600;
+}
+.agent-card-header:hover { color: #34d399; }
+.agent-toggle {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: .6;
+}
+.agent-actions-list {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(16,185,129,.15);
+}
+.agent-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--text-secondary, #94a3b8);
+}
+.agent-action-icon {
+  font-size: 14px;
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.agent-action-desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
