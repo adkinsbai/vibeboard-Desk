@@ -710,6 +710,96 @@ You are creating a NEW project from scratch.
 `;
 }
 
+/**
+ * Thinking engine: analyze the user's request before generating code.
+ * Returns { thinking, analysis } where thinking is displayable text.
+ */
+async function thinkBeforeGenerate(settings, prompt, id, history = []) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const isEditing = history.length > 0;
+    const recentContext = history.slice(-4).map(m =>
+      `[${m.role === "user" ? "用户" : "助手"}] ${m.content.slice(0, 200)}`
+    ).join("\n");
+
+    const thinkingPrompt = `你是一个嵌入式硬件编程助手，在生成代码前先思考分析。
+
+## 当前任务
+用户${isEditing ? "要修改已有的应用" : "请求创建一个新应用"}：${prompt}
+
+${isEditing ? `## 最近对话
+${recentContext}
+
+## 当前代码
+${currentBuild?.files ? Object.keys(currentBuild.files).filter(f => f !== "manifest.json").map(name => {
+  const content = currentBuild.files[name] || "";
+  return "### " + name + "\n" + content.slice(0, 2000) + (content.length > 2000 ? "\n...(已截断)" : "");
+}).join("\n\n") : "无"}` : ""}
+
+## 你的硬件环境
+- 屏幕 480x360 像素，无触摸，3个GPIO物理按钮
+- RK3566 芯片，Debian 11，Python 3.9
+- 深色主题 LCD 显示屏
+
+请用中文思考，输出你的分析过程。格式：
+
+思考过程：
+1. 需求理解：...
+2. 技术方案：...
+3. UI布局规划：...
+4. 需要注意的问题：...
+${isEditing ? "5. 需要修改哪些文件：..." : ""}
+
+不要生成代码，只输出思考分析。`;
+
+    const messages = [
+      { role: "system", content: "你是一个善于分析和规划的嵌入式系统编程专家。在动手写代码前，你会先仔细思考需求、规划方案、预判问题。用中文回答。" },
+      { role: "user", content: thinkingPrompt }
+    ];
+
+    // For DeepSeek, enable native thinking
+    const payload = {
+      model: settings.model,
+      messages,
+      temperature: 0.3,
+      max_tokens: 2000
+    };
+    if (settings.provider === "deepseek") {
+      payload.thinking = { type: "enabled" };
+    }
+
+    const res = await fetch(chatCompletionsUrl(settings.baseUrl), {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${settings.apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { thinking: "", analysis: null };
+    }
+
+    // Extract thinking from DeepSeek native thinking or content
+    let thinking = "";
+    if (data.choices?.[0]?.message?.reasoning_content) {
+      thinking = data.choices[0].message.reasoning_content;
+    } else {
+      thinking = data.choices?.[0]?.message?.content || "";
+    }
+
+    return { thinking: thinking.trim(), analysis: thinking.trim() };
+  } catch (err) {
+    console.warn("[thinkBeforeGenerate] Failed:", err.message);
+    return { thinking: "", analysis: null };
+  }
+}
+
 async function callChatModel(settings, prompt, id, history = []) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90000);
@@ -729,9 +819,6 @@ async function callChatModel(settings, prompt, id, history = []) {
       temperature: 0.2,
       max_tokens: 16000
     };
-    if (settings.provider === "deepseek") {
-      payload.thinking = { type: "disabled" };
-    }
     const res = await fetch(chatCompletionsUrl(settings.baseUrl), {
       method: "POST",
       headers: {
@@ -746,7 +833,10 @@ async function callChatModel(settings, prompt, id, history = []) {
       const message = data.error?.message || data.base_resp?.status_msg || `model HTTP ${res.status}`;
       throw new Error(message);
     }
-    const content = data.choices?.[0]?.message?.content || "";
+    // Support DeepSeek reasoning_content field
+    const content = data.choices?.[0]?.message?.reasoning_content
+      ? data.choices[0].message.content || ""
+      : data.choices?.[0]?.message?.content || "";
     if (!content.trim()) throw new Error("Model returned empty content.");
     return content;
   } finally {
@@ -2495,7 +2585,21 @@ async function route(req, res) {
         console.log(`[generate] History compressed: ${rawHistory.length} -> ${history.length} messages`);
       }
 
-      let build = await writeGenerated(prompt, modelSettings, history);
+      // Step 1: Think before generating
+      const settings = normalizeModelSettings(modelSettings);
+      const thinking = await thinkBeforeGenerate(settings, prompt, "pending", history);
+      if (thinking.thinking) {
+        console.log(`[generate] Thinking complete (${thinking.thinking.length} chars)`);
+      }
+
+      // Step 2: Generate with thinking context
+      const enrichedHistory = thinking.thinking ? [
+        ...history,
+        { role: "system", content: `[我的分析]\n${thinking.thinking}\n\n基于以上分析，现在生成代码。` }
+      ] : history;
+
+      let build = await writeGenerated(prompt, modelSettings, enrichedHistory);
+      build.thinking = thinking.thinking || "";
       let lastReport = null;
 
       // Auto-verify with screenshot
@@ -2560,7 +2664,8 @@ async function route(req, res) {
         manifest: build.manifest || null,
         source: build.manifest?.source || "unknown",
         fallbackReason: build.manifest?.fallbackReason || "",
-        verification: lastReport || null
+        verification: lastReport || null,
+        thinking: build.thinking || ""
       });
       return;
     }

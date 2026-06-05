@@ -678,6 +678,62 @@ async function refreshBoard() {
   }
 }
 
+// Add a thinking bubble to the chat
+function addThinkingBubble(thinking) {
+  const article = document.createElement("article");
+  article.className = "msg agent thinking-msg";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = "VB";
+  const body = document.createElement("div");
+  body.className = "thinking-body";
+  const header = document.createElement("div");
+  header.className = "thinking-header";
+  header.innerHTML = `<span class="thinking-icon">🧠</span> <span>思考过程</span> <span class="thinking-toggle">▼</span>`;
+  const content = document.createElement("div");
+  content.className = "thinking-content";
+  content.style.display = "none";
+  // Format thinking text: preserve line breaks
+  const lines = thinking.split("\n").filter(l => l.trim());
+  for (const line of lines) {
+    const p = document.createElement("p");
+    p.textContent = line;
+    content.appendChild(p);
+  }
+  header.addEventListener("click", () => {
+    const isHidden = content.style.display === "none";
+    content.style.display = isHidden ? "block" : "none";
+    header.querySelector(".thinking-toggle").textContent = isHidden ? "▲" : "▼";
+  });
+  body.append(header, content);
+  article.append(avatar, body);
+  chatLog.appendChild(article);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return article;
+}
+
+// Show thinking animation while waiting
+function addThinkingAnimation() {
+  const article = document.createElement("article");
+  article.className = "msg agent thinking-msg";
+  article.id = "thinking-animation";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = "VB";
+  const body = document.createElement("div");
+  body.className = "thinking-body thinking-active";
+  body.innerHTML = `<span class="thinking-icon">🧠</span> <span>正在思考中</span><span class="thinking-dots">...</span>`;
+  article.append(avatar, body);
+  chatLog.appendChild(article);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return article;
+}
+
+function removeThinkingAnimation() {
+  const el = document.getElementById("thinking-animation");
+  if (el) el.remove();
+}
+
 // Build conversation history for multi-turn context (send ALL, server compresses)
 function buildConversationHistory() {
   const msgs = chatLog.querySelectorAll(".msg");
@@ -702,6 +758,9 @@ async function runFlow(prompt) {
   const progress = addStageCard();
   const history = buildConversationHistory();
 
+  // Show thinking animation
+  addThinkingAnimation();
+
   try {
     progress.set("generate", "active", "run");
     deployState.textContent = labels.generating;
@@ -711,6 +770,13 @@ async function runFlow(prompt) {
       conversation_id: currentConversationId,
       history
     });
+
+    // Remove thinking animation, show actual thinking if available
+    removeThinkingAnimation();
+    if (gen.thinking) {
+      addThinkingBubble(gen.thinking);
+    }
+
     renderFiles(gen.files);
     renderDevicePreview(prompt, "已生成应用");
     progress.set("generate", "done", "ok");
