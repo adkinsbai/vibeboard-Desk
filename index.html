@@ -84,19 +84,21 @@
                   <p class="kicker">Live Hardware Preview</p>
                   <h2>小屏效果</h2>
                 </div>
-                <span class="pill" id="deployState">not deployed</span>
+                <div class="device-actions">
+                  <select id="deviceSelect" class="device-select" aria-label="选择设备">
+                    <option value="taishan-transparent">透明版</option>
+                    <option value="taishan-gray">灰色版</option>
+                    <option value="taishan-black">亮黑版</option>
+                  </select>
+                  <span class="pill" id="deployState">not deployed</span>
+                </div>
               </div>
               <div class="device-stage">
-                <div class="mac">
-                  <div class="display-frame">
-                    <div class="screen-viewport" id="screenViewport">
-                      <div class="device-screen" id="deviceScreen">
-                        <iframe id="deviceFrame" title="Generated 480x360 screen preview" src="/generated/current/index.html"></iframe>
-                      </div>
-                    </div>
+                <div class="mac-photo" id="macPhoto">
+                  <img id="macPhotoImg" src="/mac-frame.png" alt="Taishan Board" class="mac-photo-img">
+                  <div class="mac-screen-overlay">
+                    <iframe id="deviceFrame" title="Generated 480x360 screen preview" src="/generated/current/index.html?preview=1"></iframe>
                   </div>
-                  <div class="mac-slot"></div>
-                  <div class="mac-foot"></div>
                 </div>
               </div>
               <!-- Deploy to Market Button -->
@@ -228,6 +230,7 @@
     </div>
   </section>
 
-  <script src="./app.js"></script>
+  <script src="app.js"></script>
+  <script src="mac-debug.js"></script>
 </body>
 </html>

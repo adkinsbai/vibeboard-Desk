@@ -26,6 +26,9 @@ const codePreview = el("codePreview");
 const screenViewport = el("screenViewport");
 const deviceScreen = el("deviceScreen");
 const deviceFrame = el("deviceFrame");
+const deviceSelect = el("deviceSelect");
+const macPhoto = el("macPhoto");
+const macPhotoImg = el("macPhotoImg");
 const modelConfigBtn = el("modelConfigBtn");
 const modelModal = el("modelModal");
 const closeModelModal = el("closeModelModal");
@@ -47,6 +50,39 @@ let busy = false;
 let conversationInitPromise = null;
 
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
+const DEVICE_STORAGE_KEY = "vibeboard-active-device";
+const deviceProfiles = {
+  "taishan-transparent": {
+    id: "taishan-transparent",
+    label: "透明版",
+    image: "/mac-frame-transparent.png",
+    previewPath: "/generated/current/index.html",
+    screen: { left: "22.6%", top: "29.1%", width: "55.4%", height: "26.0%" }
+  },
+  "taishan-gray": {
+    id: "taishan-gray",
+    label: "灰色版",
+    image: "/mac-frame.png",
+    previewPath: "/generated/current/index.html",
+    screen: { left: "30.18%", top: "31.88%", width: "44.3%", height: "21.8%" }
+  },
+  "taishan-black": {
+    id: "taishan-black",
+    label: "亮黑版",
+    image: "/mac-frame.png",
+    previewPath: "/generated/current/index.html",
+    screen: { left: "30.18%", top: "31.88%", width: "44.3%", height: "21.8%" }
+  }
+};
+
+function getActiveDeviceId() {
+  const saved = localStorage.getItem(DEVICE_STORAGE_KEY);
+  if (saved && deviceProfiles[saved]) return saved;
+  return "taishan-gray";
+}
+
+let activeDeviceId = getActiveDeviceId();
+
 const providerPresets = {
   deepseek: {
     label: "DeepSeek",
@@ -120,12 +156,14 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+
+
 // User-friendly error messages with actionable suggestions
 const FRIENDLY_ERRORS = {
   ssh_timeout: {
     title: "设备连接超时",
     detail: "无法在规定时间内连接到泰山派设备。",
-    suggestion: "请检查：① 设备是否已开机 ② 设备是否连接了网络 ③ FRP 隧道是否正常（可在 FRP 面板 http://150.158.146.192:7500 查看）"
+    suggestion: "请检查：① 设备是否已开机 ② 设备是否连接了网络 ③ FRP 隧道是否正常"
   },
   connection_refused: {
     title: "设备拒绝连接",
@@ -175,12 +213,12 @@ const FRIENDLY_ERRORS = {
   no_api_key: {
     title: "未配置 AI 模型",
     detail: "还没有设置 AI 模型的 API Key，将使用本地模板生成。",
-    suggestion: "点击右上角「Model」按钮配置 DeepSeek 或其他模型，获得更好的生成效果"
+    suggestion: "点击右上角「Model」按钮配置 DeepSeek 或其他模型"
   },
   llm_failed: {
     title: "AI 模型调用失败",
     detail: "无法连接到 AI 模型服务。",
-    suggestion: "请检查：① API Key 是否正确 ② 网络是否能访问模型服务 ③ 模型服务是否正常"
+    suggestion: "请检查：① API Key 是否正确 ② 网络是否能访问模型服务"
   },
   llm_timeout: {
     title: "AI 模型响应超时",
@@ -243,7 +281,7 @@ function friendlyError(data, fallbackMsg) {
 
 function formatFriendlyError(data, fallbackMsg) {
   const f = friendlyError(data, fallbackMsg);
-  return `${f.title}。${f.detail}\n💡 ${f.suggestion}`;
+  return f.title + "。" + f.detail + "\n💡 " + f.suggestion;
 }
 
 function addMessage(role, text) {
@@ -296,11 +334,21 @@ function addStageCard() {
   };
 }
 
+function withDeviceQuery(url) {
+  const href = new URL(url, window.location.origin);
+  href.searchParams.set("deviceId", activeDeviceId);
+  return `${href.pathname}${href.search}`;
+}
+
+function withDevicePayload(payload = {}) {
+  return { ...payload, deviceId: activeDeviceId };
+}
+
 async function postJson(url, payload = {}) {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(withDevicePayload(payload))
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.ok === false) {
@@ -312,7 +360,7 @@ async function postJson(url, payload = {}) {
 }
 
 async function getJson(url) {
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetch(withDeviceQuery(url), { cache: "no-store" });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.ok === false) {
     const err = new Error(data.errorLabel || data.error || `HTTP ${res.status}`);
@@ -451,19 +499,19 @@ function closeDrawers() {
 }
 
 function fitDeviceFrame() {
-  if (!deviceScreen || !screenViewport) return;
-  const frame = screenViewport.closest(".display-frame");
-  const rect = frame ? frame.getBoundingClientRect() : screenViewport.getBoundingClientRect();
-  const style = frame ? getComputedStyle(frame) : null;
-  const padX = style ? parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) : 0;
-  const padY = style ? parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) : 0;
-  const availableWidth = Math.max(0, rect.width - padX);
-  const availableHeight = Math.max(0, rect.height - padY);
+  const overlay = document.querySelector('.mac-screen-overlay');
+  if (!overlay) return;
+
+  // Get the actual size of the CRT screen overlay area
+  const rect = overlay.getBoundingClientRect();
+  const availableWidth = rect.width;
+  const availableHeight = rect.height;
+
   if (!availableWidth || !availableHeight) return;
-  const scale = Math.max(0.1, Math.min(availableWidth / 480, availableHeight / 360));
-  screenViewport.style.width = `${480 * scale}px`;
-  screenViewport.style.height = `${360 * scale}px`;
-  deviceScreen.style.setProperty("--screen-scale", String(scale || 1));
+
+  // Calculate scale to fit 480x360 iframe into the CRT screen area
+  const scale = Math.min(availableWidth / 480, availableHeight / 360);
+  overlay.style.setProperty('--screen-scale', String(scale));
 }
 
 function scheduleFitDeviceFrame() {
@@ -473,12 +521,61 @@ function scheduleFitDeviceFrame() {
   });
 }
 
+function makePreviewUrl(path = "/generated/current/index.html", buildId = Date.now()) {
+  const url = new URL(path, window.location.origin);
+  url.searchParams.set("build", String(buildId));
+  url.searchParams.set("deviceId", activeDeviceId);
+  return `${url.pathname}${url.search}`;
+}
+
+function applyDeviceProfile({ refresh = true } = {}) {
+  const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
+  if (deviceSelect) deviceSelect.value = profile.id;
+  if (macPhotoImg) {
+    macPhotoImg.src = profile.image;
+    macPhotoImg.alt = `${profile.label} Taishan Board`;
+  }
+  if (macPhoto) {
+    macPhoto.dataset.device = profile.id;
+    macPhoto.style.setProperty("--screen-left", profile.screen.left);
+    macPhoto.style.setProperty("--screen-top", profile.screen.top);
+    macPhoto.style.setProperty("--screen-width", profile.screen.width);
+    macPhoto.style.setProperty("--screen-height", profile.screen.height);
+  }
+  scheduleFitDeviceFrame();
+  if (refresh) {
+    syncDeviceFrameFromCurrent();
+    refreshBoard();
+  }
+}
+
 function renderDevicePreview(prompt, statusText) {
   if (deviceFrame) {
-    deviceFrame.src = `/generated/current/index.html?t=${Date.now()}`;
+    let buildId = "";
+    try {
+      buildId = generatedFiles?.["manifest.json"] ? JSON.parse(generatedFiles["manifest.json"]).id || "" : "";
+    } catch {}
+    if (!buildId) buildId = Date.now();
+    const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
+    deviceFrame.src = makePreviewUrl(profile.previewPath, buildId);
   }
-  deviceScreen.dataset.status = statusText || "";
-  deviceScreen.dataset.prompt = prompt || "";
+  if (deviceScreen) {
+    deviceScreen.dataset.status = statusText || "";
+    deviceScreen.dataset.prompt = prompt || "";
+  }
+}
+
+async function syncDeviceFrameFromCurrent() {
+  if (!deviceFrame) return;
+  const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
+  try {
+    const res = await fetch("/generated/current/manifest.json", { cache: "no-store" });
+    const manifest = await res.json();
+    const buildId = manifest.id || Date.now();
+    deviceFrame.src = makePreviewUrl(profile.previewPath, buildId);
+  } catch {
+    deviceFrame.src = makePreviewUrl(profile.previewPath, Date.now());
+  }
 }
 
 function renderGoldenLoop(goldenLoop) {
@@ -566,8 +663,11 @@ async function refreshBoard() {
     el("tempState").textContent = data.temp == null ? "--" : `${data.temp}\u00b0C`;
     el("memoryState").textContent = data.memory || "--";
     const sshState = el("sshState");
-    if (sshState) sshState.textContent = data.connected ? "ssh live" : "offline";
+    if (sshState) sshState.textContent = data.connected ? "ssh live" : "ssh checking";
     if (data.kernel) el("boardOs").textContent = `Linux ${data.kernel}`;
+    if (!data.connected && !data.error) {
+      window.setTimeout(() => refreshBoard(), 3000);
+    }
   } catch (error) {
     const sshState = el("sshState");
     if (sshState) sshState.textContent = "offline";
@@ -631,6 +731,7 @@ async function runFlow(prompt) {
 }
 
 function addDeployButton(prompt) {
+  const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
   const article = document.createElement("article");
   article.className = "msg agent";
   const avatar = document.createElement("div");
@@ -640,7 +741,7 @@ function addDeployButton(prompt) {
   body.className = "deploy-action";
   const btn = document.createElement("button");
   btn.className = "deploy-btn";
-  btn.textContent = "🚀 部署到泰山派真机";
+  btn.textContent = `部署到${profile.label}真机`;
   btn.addEventListener("click", () => runDeploy(btn));
   body.appendChild(btn);
   article.append(avatar, body);
@@ -649,10 +750,11 @@ function addDeployButton(prompt) {
 }
 
 async function runDeploy(btn) {
+  const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
   if (busy) return;
   setBusy(true);
   btn.disabled = true;
-  btn.textContent = "⏳ 部署中...";
+  btn.textContent = `部署到${profile.label}中...`;
   deployState.textContent = labels.deploying;
 
   try {
@@ -660,8 +762,8 @@ async function runDeploy(btn) {
     renderHardwareRun(deployed);
     deployState.textContent = labels.done;
     renderDevicePreview("", "已写入真机");
-    addMessage("agent", `✅ 部署成功！应用已写入泰山派设备，服务已重启。\n你可以在右侧预览窗口查看效果，或直接在设备屏幕上查看。`);
-    btn.textContent = "✅ 部署完成";
+    addMessage("agent", `✅ 部署成功！应用已写入${profile.label}，服务已重启。\n你可以在右侧预览窗口查看效果，或直接在设备屏幕上查看。`);
+    btn.textContent = "部署完成";
     btn.classList.add("done");
   } catch (error) {
     deployState.textContent = labels.failed;
@@ -698,6 +800,12 @@ closeStatusDrawer?.addEventListener("click", () => setStatusDrawer(false));
 modelConfigBtn?.addEventListener("click", () => setModelModal(true));
 closeModelModal?.addEventListener("click", () => setModelModal(false));
 modelProvider?.addEventListener("change", () => applyProviderPreset(modelProvider.value));
+deviceSelect?.addEventListener("change", () => {
+  activeDeviceId = deviceProfiles[deviceSelect.value] ? deviceSelect.value : "taishan-gray";
+  localStorage.setItem(DEVICE_STORAGE_KEY, activeDeviceId);
+  deployState.textContent = "device changed";
+  applyDeviceProfile();
+});
 modelForm?.addEventListener("submit", event => {
   event.preventDefault();
   saveModelSettings({
@@ -724,15 +832,16 @@ document.querySelectorAll("[data-prompt]").forEach(button => {
 });
 
 scheduleFitDeviceFrame();
+applyDeviceProfile({ refresh: true });
 syncModelUi();
 window.addEventListener("resize", scheduleFitDeviceFrame);
 if (deviceFrame) {
   deviceFrame.addEventListener("load", scheduleFitDeviceFrame);
 }
-if (screenViewport && "ResizeObserver" in window) {
-  const frame = screenViewport.closest(".display-frame");
+const macOverlay = document.querySelector('.mac-screen-overlay');
+if (macOverlay && "ResizeObserver" in window) {
   const observer = new ResizeObserver(scheduleFitDeviceFrame);
-  if (frame) observer.observe(frame);
+  observer.observe(macOverlay);
 }
 refreshBoard();
 
