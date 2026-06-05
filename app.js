@@ -678,7 +678,7 @@ async function refreshBoard() {
   }
 }
 
-// Build conversation history for multi-turn context
+// Build conversation history for multi-turn context (send ALL, server compresses)
 function buildConversationHistory() {
   const msgs = chatLog.querySelectorAll(".msg");
   const history = [];
@@ -690,8 +690,7 @@ function buildConversationHistory() {
       if (text) history.push({ role, content: text });
     }
   }
-  // Limit to last 10 messages to avoid token overflow
-  return history.slice(-10);
+  return history;
 }
 
 async function runFlow(prompt) {
