@@ -1419,3 +1419,38 @@ pre {
 .deploy-btn.done {
   background: var(--green);
 }
+
+/* Welcome block */
+.welcome-block {
+  line-height: 1.6;
+}
+.welcome-greeting {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.welcome-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.suggestion-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 14px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 8px;
+  background: var(--surface-2, rgba(255,255,255,.04));
+  color: var(--text, #e2e8f0);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all .15s;
+  white-space: nowrap;
+}
+.suggestion-btn:hover {
+  background: rgba(56,189,248,.12);
+  border-color: rgba(56,189,248,.3);
+  transform: translateY(-1px);
+}

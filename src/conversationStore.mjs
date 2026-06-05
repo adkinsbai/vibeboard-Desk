@@ -38,6 +38,17 @@ export function createConversationStore(db, saveDb = () => {}) {
           FOREIGN KEY (conversation_id) REFERENCES conversations(id)
         )
       `);
+      db.run(`
+        CREATE TABLE IF NOT EXISTS conversation_files (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_id TEXT NOT NULL,
+          build_id TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          content TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+        )
+      `);
     },
 
     listConversations() {
@@ -50,6 +61,7 @@ export function createConversationStore(db, saveDb = () => {}) {
     },
 
     deleteConversation(id) {
+      run(db, saveDb, "DELETE FROM conversation_files WHERE conversation_id = ?", [id]);
       run(db, saveDb, "DELETE FROM messages WHERE conversation_id = ?", [id]);
       run(db, saveDb, "DELETE FROM conversations WHERE id = ?", [id]);
     },
@@ -75,6 +87,34 @@ export function createConversationStore(db, saveDb = () => {}) {
           run(db, saveDb, "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [title, conversationId]);
         }
       }
+    },
+
+    saveConversationFiles(conversationId, buildId, files) {
+      // Clear old files for this conversation
+      run(db, saveDb, "DELETE FROM conversation_files WHERE conversation_id = ?", [conversationId]);
+      // Save new files
+      for (const [filename, content] of Object.entries(files || {})) {
+        run(
+          db,
+          saveDb,
+          "INSERT INTO conversation_files (conversation_id, build_id, filename, content) VALUES (?, ?, ?, ?)",
+          [conversationId, buildId, filename, content]
+        );
+      }
+    },
+
+    loadConversationFiles(conversationId) {
+      const rows = query(db, "SELECT filename, content, build_id FROM conversation_files WHERE conversation_id = ? ORDER BY id ASC", [conversationId]);
+      if (rows.length === 0) return { buildId: null, files: {} };
+      const files = {};
+      for (const row of rows) {
+        files[row.filename] = row.content;
+      }
+      return { buildId: rows[0].build_id, files };
+    },
+
+    deleteConversationFiles(conversationId) {
+      run(db, saveDb, "DELETE FROM conversation_files WHERE conversation_id = ?", [conversationId]);
     }
   };
 }

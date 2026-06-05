@@ -689,7 +689,7 @@ async function runFlow(prompt) {
   try {
     progress.set("generate", "active", "run");
     deployState.textContent = labels.generating;
-    const gen = await postJson(api.generate, { prompt, modelSettings: getModelPayload() });
+    const gen = await postJson(api.generate, { prompt, modelSettings: getModelPayload(), conversation_id: currentConversationId });
     renderFiles(gen.files);
     renderDevicePreview(prompt, "已生成应用");
     progress.set("generate", "done", "ok");
@@ -949,15 +949,26 @@ async function selectConversation(id) {
     `;
   }
 
-  // Load messages
+  // Load messages and files in parallel
   try {
-    const res = await fetch(`${API_BASE}/api/conversations/${id}/messages`);
-    const data = await res.json();
-    if (data.ok) {
-      renderMessages(data.messages);
+    const [msgRes, fileRes] = await Promise.all([
+      fetch(`${API_BASE}/api/conversations/${id}/messages`),
+      fetch(`${API_BASE}/api/conversations/${id}/files`)
+    ]);
+    const msgData = await msgRes.json();
+    const fileData = await fileRes.json();
+
+    // Restore code files if available
+    if (fileData.ok && fileData.files && Object.keys(fileData.files).length > 0) {
+      renderFiles(fileData.files);
+      renderDevicePreview("", "已加载应用");
+    }
+
+    if (msgData.ok) {
+      renderMessages(msgData.messages);
     }
   } catch (err) {
-    console.error("Failed to load messages:", err);
+    console.error("Failed to load conversation:", err);
     if (chatLog) {
       chatLog.innerHTML = `
         <article class="msg agent">
@@ -978,9 +989,25 @@ function renderMessages(messages) {
     chatLog.innerHTML = `
       <article class="msg agent">
         <div class="avatar">VB</div>
-        <p>告诉我你想在硬件上做什么。我会把需求拆成文件、做最小编译校验，然后通过 SSH 写入右侧连接的泰山派小屏。</p>
+        <div class="welcome-block">
+          <p class="welcome-greeting">👋 你好！我是 VibeBoard，你的硬件应用助手。</p>
+          <p>告诉我你想在泰山派小屏上实现什么，我会自动生成代码、编译校验，然后一键写入真机。</p>
+          <div class="welcome-suggestions">
+            <button class="suggestion-btn" data-prompt="做一个显示当前时间的全屏时钟应用">⏰ 全屏时钟</button>
+            <button class="suggestion-btn" data-prompt="做一个显示天气信息和温度的应用">🌤 天气面板</button>
+            <button class="suggestion-btn" data-prompt="做一个轮播展示图片的应用">🖼 图片轮播</button>
+            <button class="suggestion-btn" data-prompt="做一个显示 CPU 温度和内存使用率的系统监控面板">📊 系统监控</button>
+          </div>
+        </div>
       </article>
     `;
+    // Bind suggestion buttons
+    chatLog.querySelectorAll('.suggestion-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        promptInput.value = btn.dataset.prompt;
+        promptInput.focus();
+      });
+    });
     return;
   }
 
@@ -1000,6 +1027,7 @@ function renderMessages(messages) {
 
   // If the last message has a build_id, restore the deploy button
   if (lastBuildId) {
+    const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
     const article = document.createElement("article");
     article.className = "msg agent";
     const avatar = document.createElement("div");
@@ -1009,7 +1037,7 @@ function renderMessages(messages) {
     body.className = "deploy-action";
     const btn = document.createElement("button");
     btn.className = "deploy-btn";
-    btn.textContent = "🚀 部署到泰山派真机";
+    btn.textContent = `部署到${profile.label}真机`;
     btn.addEventListener("click", () => runDeploy(btn));
     body.appendChild(btn);
     article.append(avatar, body);
@@ -1034,9 +1062,25 @@ async function createConversation({ resetChat = true } = {}) {
           chatLog.innerHTML = `
             <article class="msg agent">
               <div class="avatar">VB</div>
-              <p>告诉我你想在硬件上做什么。我会把需求拆成文件、做最小编译校验，然后通过 SSH 写入右侧连接的泰山派小屏。</p>
+        <div class="welcome-block">
+          <p class="welcome-greeting">👋 你好！我是 VibeBoard，你的硬件应用助手。</p>
+          <p>告诉我你想在泰山派小屏上实现什么，我会自动生成代码、编译校验，然后一键写入真机。</p>
+          <div class="welcome-suggestions">
+            <button class="suggestion-btn" data-prompt="做一个显示当前时间的全屏时钟应用">⏰ 全屏时钟</button>
+            <button class="suggestion-btn" data-prompt="做一个显示天气信息和温度的应用">🌤 天气面板</button>
+            <button class="suggestion-btn" data-prompt="做一个轮播展示图片的应用">🖼 图片轮播</button>
+            <button class="suggestion-btn" data-prompt="做一个显示 CPU 温度和内存使用率的系统监控面板">📊 系统监控</button>
+          </div>
+        </div>
             </article>
           `;
+          // Bind suggestion buttons
+          chatLog.querySelectorAll('.suggestion-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+              promptInput.value = btn.dataset.prompt;
+              promptInput.focus();
+            });
+          });
         }
         const titleEl = document.getElementById("currentConversationTitle");
         if (titleEl) titleEl.textContent = "New App";

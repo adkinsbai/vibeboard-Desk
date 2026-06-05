@@ -2329,6 +2329,11 @@ async function route(req, res) {
       const prompt = String(body.prompt || "").trim();
       if (!prompt) throw new Error("Prompt is required.");
       const build = await writeGenerated(prompt, body.modelSettings || {});
+      // Save files to conversation if conversation_id provided
+      const convId = body.conversation_id || null;
+      if (convId && build.files) {
+        conversationStore.saveConversationFiles(convId, build.id, build.files);
+      }
       json(res, 200, {
         ok: true,
         id: build.id,
@@ -2398,6 +2403,13 @@ async function route(req, res) {
       const convId = url.pathname.split("/")[3];
       const messages = conversationStore.listMessages(convId);
       json(res, 200, { ok: true, messages });
+      return;
+    }
+    // Load saved files for a conversation (for state restoration)
+    if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/files")) {
+      const convId = url.pathname.split("/")[3];
+      const { buildId, files } = conversationStore.loadConversationFiles(convId);
+      json(res, 200, { ok: true, buildId, files });
       return;
     }
     if (req.method === "POST" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/messages")) {
