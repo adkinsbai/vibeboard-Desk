@@ -6,6 +6,7 @@ const api = {
   verify: "/api/verify",
   clarify: "/api/clarify",
   preferences: "/api/preferences",
+  agent: "/api/agent",
   chat: "/api/chat",
 };
 
@@ -1459,7 +1460,8 @@ async function handleChat(prompt) {
 
   try {
     const messages = buildChatMessages();
-    const result = await postJson(api.chat, {
+    const result = await postJson(api.agent, {
+      action: "message",
       messages,
       conversation_id: conversationId,
       modelSettings: getModelPayload(),
@@ -1534,8 +1536,10 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
     deployState.textContent = labels.generating;
     generatePoller = createGenerateLogPoller(progress);
     generatePoller.start();
-    const gen = await postJson(api.generate, {
+    const gen = await postJson(api.agent, {
+      action: "confirm_build",
       prompt,
+      build_prompt: prompt,
       modelSettings: getModelPayload(),
       conversation_id: conversationId,
       clarify_answers: [],
@@ -1561,7 +1565,11 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
 
     if (!conversationId || conversationId === currentConversationId) {
       renderFiles(gen.files);
-      renderDevicePreview(prompt, gen.agentSummary || "已生成应用");
+      if (conversationId) {
+        renderConversationPreview(conversationId, gen.id, gen.agentSummary || "已生成应用");
+      } else {
+        renderDevicePreview(prompt, gen.agentSummary || "已生成应用");
+      }
     }
     progress.set("generate", "done", "ok");
     el("lastBuildState").textContent = gen.id || "generated";

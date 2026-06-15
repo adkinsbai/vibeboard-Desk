@@ -30,6 +30,7 @@ import { createPlaybookStore } from "./src/playbookStore.mjs";
 import { verifyAllLocal } from "./src/verifiers/index.mjs";
 import { analyzeAndClarify, buildRefinedPrompt } from "./src/clarifyEngine.mjs";
 import { planChatWithModel } from "./src/chatPlanner.mjs";
+import { runAgentGraph } from "./src/agentGraph.mjs";
 import {
   assertFileContracts,
   validationRulesText
@@ -5172,6 +5173,297 @@ function formatProjectMemoryForPrompt(memory = {}) {
   return `\n\n## 当前项目记忆\n${lines.join("\n")}`;
 }
 
+async function runGenerateRequest(body = {}) {
+  const rawPrompt = String(body.prompt || "").trim();
+  if (!rawPrompt) throw new Error("Prompt is required.");
+  const rawHistory = Array.isArray(body.history) ? body.history : [];
+  const normalizedHistory = normalizeGenerateHistory(rawHistory);
+  const clarifyAnswers = Array.isArray(body.clarify_answers) ? body.clarify_answers : [];
+  const modelSettings = body.modelSettings || {};
+  const conversationId = String(body.conversation_id || "").trim();
+  const projectMemory = conversationId ? conversationStore.getProjectMemory(conversationId) : normalizeProjectMemory();
+  const conversationFiles = conversationId
+    ? conversationStore.loadConversationFiles(conversationId).files
+    : {};
+
+  const settings = normalizeModelSettings(modelSettings);
+  const history = await compressHistory(normalizedHistory, settings);
+  const userPreferences = memoryStore.getAll();
+  const prompt = buildRefinedPrompt(`${rawPrompt}${formatProjectMemoryForPrompt(projectMemory)}`, clarifyAnswers, userPreferences);
+
+  if (clarifyAnswers.length > 0) {
+    for (const ans of clarifyAnswers) {
+      if (ans.key && ans.answer) {
+        memoryStore.set(ans.key, ans.answer, {
+          label: ans.question || ans.key,
+          category: "clarify",
+          source: "auto_extract",
+        });
+      }
+    }
+  }
+
+  const fileStore = { ...conversationFiles };
+  const isEditing = Object.keys(fileStore).some(name => name !== "manifest.json");
+  const agentStartedAt = Date.now();
+  const agentSettings = {
+    ...settings,
+    maxIterations: positiveInt(process.env.VIBEBOARD_AGENT_MAX_ITERATIONS, DEFAULT_GENERATE_AGENT_MAX_ITERATIONS),
+    maxVerificationAttempts: positiveInt(process.env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS, DEFAULT_GENERATE_AGENT_MAX_VERIFICATION_ATTEMPTS),
+    timeoutMs: positiveInt(process.env.VIBEBOARD_AGENT_TIMEOUT_MS, DEFAULT_GENERATE_AGENT_TIMEOUT_MS),
+    llmTimeoutMs: positiveInt(process.env.VIBEBOARD_AGENT_LLM_TIMEOUT_MS, DEFAULT_GENERATE_AGENT_LLM_TIMEOUT_MS),
+  };
+
+  return runBuildGraph({
+    prompt,
+    rawPrompt,
+    settings,
+    agentSettings,
+    modelSettings,
+    fileStore,
+    history,
+    userPreferences,
+    conversationId,
+    isEditing,
+  }, {
+    agentGenerate: async () => {
+      console.log(`[generate] Agent starting (${isEditing ? "edit" : "new"} mode)`);
+      await appendServerLog("generate.agent.start", {
+        prompt: prompt.slice(0, 160),
+        isEditing,
+        fileCount: Object.keys(fileStore).length,
+        files: Object.keys(fileStore).slice(0, 12),
+        model: settings.model,
+        provider: settings.provider,
+        maxIterations: agentSettings.maxIterations,
+        maxVerificationAttempts: agentSettings.maxVerificationAttempts,
+        timeoutMs: agentSettings.timeoutMs,
+        llmTimeoutMs: agentSettings.llmTimeoutMs,
+      });
+
+      let agentResult;
+      try {
+        agentResult = await runAgent(agentSettings, prompt, fileStore, history, (action) => {
+          console.log(`[agent] ${action.tool}: ${action.args?.path || action.args?.query || action.args?.summary || ""}`);
+          appendServerLog("generate.agent.action", {
+            tool: action.tool,
+            path: action.args?.path || "",
+            query: action.args?.query || "",
+            summary: action.args?.summary || "",
+          }).catch(() => {});
+        }, userPreferences, experienceStore, { ssh, scp, board: BOARD });
+      } catch (agentErr) {
+        await appendServerLog("generate.agent.failed", {
+          error: agentErr.message,
+          ...structuredErrorFieldsForLog(agentErr),
+          durationMs: Date.now() - agentStartedAt,
+        });
+        throw agentErr;
+      }
+
+      if (!agentResult.success) {
+        await appendServerLog("generate.agent.failed", {
+          error: agentResult.summary || "Agent failed",
+          agentError: agentResult.error || null,
+          actionCount: agentResult.actions?.length || 0,
+          limit: agentResult.limit || "",
+          iteration: agentResult.iteration ?? null,
+          durationMs: Date.now() - agentStartedAt,
+        });
+        const error = new Error(agentResult.summary || "Agent failed");
+        if (agentResult.error && typeof agentResult.error === "object") {
+          Object.assign(error, agentResult.error);
+        }
+        throw error;
+      }
+
+      const id = buildId();
+      const agentFiles = agentResult.files;
+
+      if (!agentFiles["hardware_app.py"]) {
+        const spec = createAppSpec(prompt, id);
+        agentFiles["hardware_app.py"] = generatedHardwareAppV2(prompt, id, spec);
+      }
+      agentFiles["hardware_app.py"] = injectHardwareAppContractsV2(agentFiles["hardware_app.py"], id);
+
+      const spec = createAppSpec(prompt, id);
+      const manifest = generatedManifestV2(prompt, id, spec, {
+        generator: "vibeboard-agent-v1",
+        title: prompt.slice(0, 40),
+        source: "agent",
+        model: settings.model,
+        provider: settings.provider,
+        notes: agentResult.summary,
+        target: BOARD.targetStatic
+      });
+      agentFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
+
+      await writeGeneratedFiles(GENERATED_DIR, agentFiles);
+      let agentRun = transitionRun(createAgentRun({
+        prompt,
+        mode: "agent",
+        buildId: id,
+        hardwareMode: boardPassword ? "real" : "simulated",
+      }), AGENT_PHASES.CODE, {
+        spec: buildInitialSpec(prompt, { requireBoard: Boolean(boardPassword) }),
+      });
+      agentRun = appendEvidence(agentRun, {
+        phase: AGENT_PHASES.CODE,
+        ok: true,
+        summary: agentResult.summary || "agent code completed",
+        evidence: {
+          whatWorked: agentResult.whatWorked || [],
+          whatFailed: agentResult.whatFailed || [],
+          actionCount: agentResult.actions?.length || 0,
+        },
+        issues: [],
+      });
+      currentBuild = { id, prompt, files: agentFiles, dir: GENERATED_DIR, built: false, deployed: false, manifest, agentRun };
+
+      try {
+        await buildCurrent();
+      } catch (buildErr) {
+        console.error("[generate] Build error:", buildErr.message);
+        await appendServerLog("generate.agent.build_failed", { id, error: buildErr.message });
+        throw new Error(`Generated app failed validation: ${buildErr.message}`);
+      }
+
+      recordAgentLearning({
+        prompt,
+        agentResult,
+        verificationResult: currentBuild.buildEvidence || null,
+        success: true,
+      });
+
+      await appendServerLog("generate.agent.done", {
+        id,
+        actionCount: agentResult.actions?.length || 0,
+        durationMs: Date.now() - agentStartedAt,
+      });
+
+      return {
+        ok: true,
+        id,
+        files: agentFiles,
+        manifest,
+        source: "agent",
+        spec: currentBuild.agentRun?.spec || null,
+        evidence: formatRunEvidence(currentBuild.agentRun || {}),
+        buildEvidence: currentBuild.buildEvidence || null,
+        verificationMode: boardPassword ? "real-ready" : "local-simulated",
+        agentSummary: agentResult.summary,
+        agentActions: agentResult.actions.map(a => ({
+          tool: a.tool,
+          path: a.args?.path,
+          query: a.args?.query,
+          summary: a.args?.summary
+        }))
+      };
+    },
+    templateGenerate: async () => {
+      const build = await writeGenerated(prompt, modelSettings, []);
+      return {
+        ok: true,
+        id: build.id,
+        files: build.files,
+        manifest: build.manifest || null,
+        source: "template",
+        spec: build.agentRun?.spec || null,
+        evidence: formatRunEvidence(build.agentRun || {}),
+        buildEvidence: build.buildEvidence || null,
+        verificationMode: boardPassword ? "real-ready" : "local-simulated",
+        agentActions: [],
+        thinking: ""
+      };
+    },
+    saveSnapshot: async (state) => {
+      if (!conversationId) return;
+      try {
+        conversationStore.saveConversationFiles(
+          conversationId,
+          state.result.id,
+          await filesWithHardwareResult(state.result.files)
+        );
+      } catch (saveErr) {
+        await appendServerLog(`generate.${state.result.source}.conversation_save_failed`, {
+          id: state.result.id,
+          conversationId,
+          error: saveErr.message,
+        });
+      }
+    }
+  });
+}
+
+async function runAgentRequest(body = {}) {
+  const conversationId = String(body.conversation_id || "").trim();
+  const modelSettings = normalizeModelSettings(body.modelSettings || {});
+  const projectMemory = conversationId ? conversationStore.getProjectMemory(conversationId) : normalizeProjectMemory();
+  const rawMessages = Array.isArray(body.messages) ? body.messages : [];
+
+  return runAgentGraph({
+    action: body.action,
+    messages: rawMessages,
+    conversationId,
+    projectMemory,
+    buildPrompt: body.build_prompt || body.prompt || "",
+  }, {
+    planMessage: async () => {
+      if (!modelSettings.enabled) {
+        return {
+          intent: "chat",
+          reply: "请先在右上角 Model 里配置可用的大模型。配置后我会先和你对话、梳理需求，只有你确认开始构建时才会生成代码。",
+          understanding: [],
+          planned_changes: [],
+          target: "chat",
+          ready_to_build: false,
+          build_prompt: "",
+          project_memory: projectMemory,
+        };
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 60000);
+      try {
+        const plan = await planChatWithModel(
+          modelSettings,
+          rawMessages,
+          memoryStore.getAll(),
+          projectMemory,
+          (url, options = {}) => fetch(url, { ...options, signal: controller.signal })
+        );
+        if (conversationId && plan.project_memory) {
+          conversationStore.setProjectMemory(conversationId, plan.project_memory);
+        }
+        return plan;
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+    build: async (_state, prompt) => runGenerateRequest({
+      prompt,
+      modelSettings: body.modelSettings || {},
+      conversation_id: conversationId,
+      clarify_answers: Array.isArray(body.clarify_answers) ? body.clarify_answers : [],
+      history: Array.isArray(body.history) ? body.history : rawMessages,
+    }),
+    reflect: async (state) => {
+      const build = state.build || {};
+      const issues = build.buildEvidence?.issues || [];
+      if (!issues.length) return;
+      state.learning = recordAgentLearning({
+        prompt: body.build_prompt || body.prompt || projectMemory.build_prompt || "",
+        agentResult: {
+          whatWorked: build.buildEvidence?.ok ? ["local verification passed"] : [],
+          whatFailed: issues.map(issue => issue.message || issue.code || String(issue)),
+        },
+        verificationResult: build.buildEvidence,
+        success: Boolean(build.buildEvidence?.ok),
+      });
+    },
+  });
+}
+
 async function route(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -5258,40 +5550,9 @@ async function route(req, res) {
     // --- Chat: 对话式规划（不生成代码） ---
     if (req.method === "POST" && url.pathname === "/api/chat") {
       const body = await readBody(req);
-      const rawMessages = Array.isArray(body.messages) ? body.messages : [];
-      const conversationId = String(body.conversation_id || "").trim();
-      const modelSettings = normalizeModelSettings(body.modelSettings || {});
-      const projectMemory = conversationId ? conversationStore.getProjectMemory(conversationId) : normalizeProjectMemory();
-
-      if (!modelSettings.enabled) {
-        json(res, 200, {
-          ok: true,
-          intent: "chat",
-          reply: "请先在右上角 Model 里配置可用的大模型。配置后我会先和你对话、梳理需求，只有你确认开始构建时才生成代码。",
-          ready_to_build: false,
-          build_prompt: "",
-          project_memory: projectMemory
-        });
-        return;
-      }
-
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 60000);
       try {
-        const plan = await planChatWithModel(
-          modelSettings,
-          rawMessages,
-          memoryStore.getAll(),
-          projectMemory,
-          (url, options = {}) => fetch(url, { ...options, signal: controller.signal })
-        );
-        if (conversationId && plan.project_memory) {
-          conversationStore.setProjectMemory(conversationId, plan.project_memory);
-        }
-        clearTimeout(timeout);
-        json(res, 200, { ok: true, ...plan });
+        json(res, 200, await runAgentRequest({ ...(body || {}), action: "message" }));
       } catch (err) {
-        clearTimeout(timeout);
         const classified = classifyError(err);
         json(res, 500, { ok: false, error: err.message, ...classified });
       }
@@ -5358,236 +5619,21 @@ async function route(req, res) {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/agent") {
+      const body = await readBody(req);
+      try {
+        json(res, 200, await runAgentRequest(body || {}));
+      } catch (err) {
+        const classified = classifyError(err);
+        json(res, 500, { ok: false, error: err.message, ...classified });
+      }
+      return;
+    }
+
     // --- Generate: AI 代码生成 ---
     if (req.method === "POST" && url.pathname === "/api/generate") {
       const body = await readBody(req);
-      const rawPrompt = String(body.prompt || "").trim();
-      if (!rawPrompt) throw new Error("Prompt is required.");
-      const rawHistory = Array.isArray(body.history) ? body.history : [];
-      const normalizedHistory = normalizeGenerateHistory(rawHistory);
-      const clarifyAnswers = Array.isArray(body.clarify_answers) ? body.clarify_answers : [];
-      const modelSettings = body.modelSettings || {};
-      const conversationId = String(body.conversation_id || "").trim();
-      const projectMemory = conversationId ? conversationStore.getProjectMemory(conversationId) : normalizeProjectMemory();
-      const conversationFiles = conversationId
-        ? conversationStore.loadConversationFiles(conversationId).files
-        : {};
-
-      // Compress history
-      const history = await compressHistory(normalizedHistory, normalizeModelSettings(modelSettings));
-      const settings = normalizeModelSettings(modelSettings);
-
-      // 构建精细化 prompt（合并 clarify 答案 + 用户偏好）
-      const userPreferences = memoryStore.getAll();
-      const prompt = buildRefinedPrompt(`${rawPrompt}${formatProjectMemoryForPrompt(projectMemory)}`, clarifyAnswers, userPreferences);
-
-      // 保存用户选择的偏好到记忆（LLM 自动提取）
-      if (clarifyAnswers.length > 0) {
-        for (const ans of clarifyAnswers) {
-          if (ans.key && ans.answer) {
-            memoryStore.set(ans.key, ans.answer, {
-              label: ans.question || ans.key,
-              category: "clarify",
-              source: "auto_extract",
-            });
-          }
-        }
-      }
-
-      // Prepare file store from this project only. Chat history alone does not
-      // mean the user is editing existing code.
-      const fileStore = { ...conversationFiles };
-      const isEditing = Object.keys(fileStore).some(name => name !== "manifest.json");
-      const agentStartedAt = Date.now();
-      const agentSettings = {
-        ...settings,
-        maxIterations: positiveInt(process.env.VIBEBOARD_AGENT_MAX_ITERATIONS, DEFAULT_GENERATE_AGENT_MAX_ITERATIONS),
-        maxVerificationAttempts: positiveInt(process.env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS, DEFAULT_GENERATE_AGENT_MAX_VERIFICATION_ATTEMPTS),
-        timeoutMs: positiveInt(process.env.VIBEBOARD_AGENT_TIMEOUT_MS, DEFAULT_GENERATE_AGENT_TIMEOUT_MS),
-        llmTimeoutMs: positiveInt(process.env.VIBEBOARD_AGENT_LLM_TIMEOUT_MS, DEFAULT_GENERATE_AGENT_LLM_TIMEOUT_MS),
-      };
-
-      const buildResult = await runBuildGraph({
-        prompt,
-        rawPrompt,
-        settings,
-        agentSettings,
-        modelSettings,
-        fileStore,
-        history,
-        userPreferences,
-        conversationId,
-        isEditing,
-      }, {
-        agentGenerate: async () => {
-          console.log(`[generate] Agent starting (${isEditing ? "edit" : "new"} mode)`);
-          await appendServerLog("generate.agent.start", {
-            prompt: prompt.slice(0, 160),
-            isEditing,
-            fileCount: Object.keys(fileStore).length,
-            files: Object.keys(fileStore).slice(0, 12),
-            model: settings.model,
-            provider: settings.provider,
-            maxIterations: agentSettings.maxIterations,
-            maxVerificationAttempts: agentSettings.maxVerificationAttempts,
-            timeoutMs: agentSettings.timeoutMs,
-            llmTimeoutMs: agentSettings.llmTimeoutMs,
-          });
-
-          let agentResult;
-          try {
-            agentResult = await runAgent(agentSettings, prompt, fileStore, history, (action) => {
-              console.log(`[agent] ${action.tool}: ${action.args?.path || action.args?.query || action.args?.summary || ""}`);
-              appendServerLog("generate.agent.action", {
-                tool: action.tool,
-                path: action.args?.path || "",
-                query: action.args?.query || "",
-                summary: action.args?.summary || "",
-              }).catch(() => {});
-            }, userPreferences, experienceStore, { ssh, scp, board: BOARD });
-          } catch (agentErr) {
-            await appendServerLog("generate.agent.failed", {
-              error: agentErr.message,
-              ...structuredErrorFieldsForLog(agentErr),
-              durationMs: Date.now() - agentStartedAt,
-            });
-            throw agentErr;
-          }
-
-          if (!agentResult.success) {
-            await appendServerLog("generate.agent.failed", {
-              error: agentResult.summary || "Agent failed",
-              agentError: agentResult.error || null,
-              actionCount: agentResult.actions?.length || 0,
-              limit: agentResult.limit || "",
-              iteration: agentResult.iteration ?? null,
-              durationMs: Date.now() - agentStartedAt,
-            });
-            const error = new Error(agentResult.summary || "Agent failed");
-            if (agentResult.error && typeof agentResult.error === "object") {
-              Object.assign(error, agentResult.error);
-            }
-            throw error;
-          }
-
-          const id = buildId();
-          const agentFiles = agentResult.files;
-
-          if (!agentFiles["hardware_app.py"]) {
-            const spec = createAppSpec(prompt, id);
-            agentFiles["hardware_app.py"] = generatedHardwareAppV2(prompt, id, spec);
-          }
-          agentFiles["hardware_app.py"] = injectHardwareAppContractsV2(agentFiles["hardware_app.py"], id);
-
-          const spec = createAppSpec(prompt, id);
-          const manifest = generatedManifestV2(prompt, id, spec, {
-            generator: "vibeboard-agent-v1",
-            title: prompt.slice(0, 40),
-            source: "agent",
-            model: settings.model,
-            provider: settings.provider,
-            notes: agentResult.summary,
-            target: BOARD.targetStatic
-          });
-          agentFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
-
-          await writeGeneratedFiles(GENERATED_DIR, agentFiles);
-          let agentRun = transitionRun(createAgentRun({
-            prompt,
-            mode: "agent",
-            buildId: id,
-            hardwareMode: boardPassword ? "real" : "simulated",
-          }), AGENT_PHASES.CODE, {
-            spec: buildInitialSpec(prompt, { requireBoard: Boolean(boardPassword) }),
-          });
-          agentRun = appendEvidence(agentRun, {
-            phase: AGENT_PHASES.CODE,
-            ok: true,
-            summary: agentResult.summary || "agent code completed",
-            evidence: {
-              whatWorked: agentResult.whatWorked || [],
-              whatFailed: agentResult.whatFailed || [],
-              actionCount: agentResult.actions?.length || 0,
-            },
-            issues: [],
-          });
-          currentBuild = { id, prompt, files: agentFiles, dir: GENERATED_DIR, built: false, deployed: false, manifest, agentRun };
-
-          try {
-            await buildCurrent();
-          } catch (buildErr) {
-            console.error("[generate] Build error:", buildErr.message);
-            await appendServerLog("generate.agent.build_failed", { id, error: buildErr.message });
-            throw new Error(`Generated app failed validation: ${buildErr.message}`);
-          }
-
-          recordAgentLearning({
-            prompt,
-            agentResult,
-            verificationResult: currentBuild.buildEvidence || null,
-            success: true,
-          });
-
-          await appendServerLog("generate.agent.done", {
-            id,
-            actionCount: agentResult.actions?.length || 0,
-            durationMs: Date.now() - agentStartedAt,
-          });
-
-          return {
-            ok: true,
-            id,
-            files: agentFiles,
-            manifest,
-            source: "agent",
-            spec: currentBuild.agentRun?.spec || null,
-            evidence: formatRunEvidence(currentBuild.agentRun || {}),
-            buildEvidence: currentBuild.buildEvidence || null,
-            verificationMode: boardPassword ? "real-ready" : "local-simulated",
-            agentSummary: agentResult.summary,
-            agentActions: agentResult.actions.map(a => ({
-              tool: a.tool,
-              path: a.args?.path,
-              query: a.args?.query,
-              summary: a.args?.summary
-            }))
-          };
-        },
-        templateGenerate: async () => {
-          const build = await writeGenerated(prompt, modelSettings, []);
-          return {
-            ok: true,
-            id: build.id,
-            files: build.files,
-            manifest: build.manifest || null,
-            source: "template",
-            spec: build.agentRun?.spec || null,
-            evidence: formatRunEvidence(build.agentRun || {}),
-            buildEvidence: build.buildEvidence || null,
-            verificationMode: boardPassword ? "real-ready" : "local-simulated",
-            agentActions: [],
-            thinking: ""
-          };
-        },
-        saveSnapshot: async (state) => {
-          if (!conversationId) return;
-          try {
-            conversationStore.saveConversationFiles(
-              conversationId,
-              state.result.id,
-              await filesWithHardwareResult(state.result.files)
-            );
-          } catch (saveErr) {
-            await appendServerLog(`generate.${state.result.source}.conversation_save_failed`, {
-              id: state.result.id,
-              conversationId,
-              error: saveErr.message,
-            });
-          }
-        }
-      });
-
-      json(res, 200, buildResult);
+      json(res, 200, await runGenerateRequest(body || {}));
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/build") {

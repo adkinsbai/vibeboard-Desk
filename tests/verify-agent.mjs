@@ -718,6 +718,70 @@ await test("build graph runs template path and returns trace", async () => {
   assert(nodes.includes("save_snapshot"), "build graph should include snapshot node");
 });
 
+await test("agent graph keeps chat behind confirmation gate", async () => {
+  const { runAgentGraph } = await import(pathToFileURL(path.join(ROOT, "src", "agentGraph.mjs")).href);
+  let buildCalled = false;
+  const result = await runAgentGraph({
+    action: "message",
+    messages: [{ role: "user", content: "你能做什么？" }],
+    projectMemory: { summary: "old clock", build_prompt: "Build an old clock." },
+  }, {
+    planMessage: async () => ({
+      intent: "chat",
+      reply: "我可以先帮你梳理需求，确认后再构建。",
+      target: "chat",
+      ready_to_build: false,
+      build_prompt: "",
+      project_memory: {
+        summary: "用户在询问能力范围",
+        goal: "",
+        requirements: [],
+        constraints: [],
+        open_questions: ["还没有具体应用需求"],
+        decisions: [],
+        build_prompt: "",
+      },
+    }),
+    build: async () => {
+      buildCalled = true;
+      return { ok: true };
+    },
+  });
+
+  assert(result.ok === true, `expected ok chat result, got ${JSON.stringify(result)}`);
+  assert(result.mode === "chat", "capability question should stay chat mode");
+  assert(result.ready_to_build === false, "chat should not be ready to build");
+  assert(buildCalled === false, "chat path must not call build node");
+  assert(result.agentGraph.some(item => item.node === "confirm_gate" && item.status === "blocked"), "agent graph should record blocked confirmation gate");
+});
+
+await test("agent graph confirm action runs build graph and returns build result", async () => {
+  const { runAgentGraph } = await import(pathToFileURL(path.join(ROOT, "src", "agentGraph.mjs")).href);
+  let receivedPrompt = "";
+  const result = await runAgentGraph({
+    action: "confirm_build",
+    buildPrompt: "Build a cyberpunk clock.",
+    projectMemory: { build_prompt: "Build a stale weather panel." },
+  }, {
+    build: async (_state, prompt) => {
+      receivedPrompt = prompt;
+      return {
+        ok: true,
+        id: "vb-agent-graph-test",
+        files: { "index.html": "<html></html>" },
+        source: "template",
+        buildEvidence: { ok: true, issues: [] },
+      };
+    },
+  });
+
+  assert(result.ok === true, `expected build ok, got ${JSON.stringify(result)}`);
+  assert(result.mode === "build_done", "confirm action should return build_done");
+  assert(result.id === "vb-agent-graph-test", "build result should pass through");
+  assert(receivedPrompt === "Build a cyberpunk clock.", "explicit confirmed prompt should win over stale memory");
+  assert(result.agentGraph.some(item => item.node === "build_graph" && item.status === "done"), "agent graph should include build_graph node");
+});
+
 await test("agent accepts complete text-only final answer after local verification", async () => {
   const { runAgent } = await import(pathToFileURL(path.join(ROOT, "src", "agent.mjs")).href);
   const files = validGeneratedFiles();

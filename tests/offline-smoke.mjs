@@ -118,6 +118,30 @@ try {
   assert(generatedA.id !== generatedB.id, "separate conversations should get separate build ids");
   assert(generatedA.buildGraph?.some(item => item.node === "save_snapshot"), "conversation generate should save a snapshot through BuildGraph");
 
+  const conversationC = await jsonFetch("/api/conversations", { method: "POST" });
+  createdConversationIds.push(conversationC.id);
+  const agentPrompt = "agent unified cyberpunk clock";
+  const generatedC = await jsonFetch("/api/agent", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "confirm_build",
+      build_prompt: agentPrompt,
+      conversation_id: conversationC.id,
+      modelSettings: { enabled: false },
+      history: [{ role: "user", content: "确认按这个方案构建" }],
+    }),
+  });
+  assert(generatedC.ok === true, "/api/agent confirm_build should succeed in template mode");
+  assert(generatedC.mode === "build_done", "/api/agent confirm_build should report build_done");
+  assert(Array.isArray(generatedC.agentGraph), "/api/agent should include AgentGraph trace");
+  assert(generatedC.agentGraph.some(item => item.node === "build_graph"), "AgentGraph trace should include build_graph");
+  assert(generatedC.buildGraph?.some(item => item.node === "save_snapshot"), "AgentGraph build should preserve BuildGraph snapshot save");
+
+  const filesC = await jsonFetch(`/api/conversations/${conversationC.id}/files`);
+  assert(filesC.buildId === generatedC.id, "agent conversation should keep its generated build id");
+  const previewC = await textFetch(`/api/conversations/${conversationC.id}/preview/index.html`);
+  assert(previewC.includes(generatedC.id), "agent conversation preview should show its build id");
+
   const filesA = await jsonFetch(`/api/conversations/${conversationA.id}/files`);
   assert(filesA.buildId === generatedA.id, "conversation A should keep its own build id");
   assert(filesA.files["hardware-result.json"], "conversation files should include hardware-result.json for restored previews");
