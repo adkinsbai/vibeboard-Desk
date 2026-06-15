@@ -17,7 +17,16 @@ const { chromium } = require('playwright');
 
   // Capture console messages
   page.on('console', msg => {
-    if (msg.type() === 'error') consoleErrors.push(msg.text());
+    if (msg.type() === 'error') {
+      const text = msg.text();
+      const locationUrl = msg.location().url || '';
+      const isOfflineHardwareProbe =
+        text.includes('/api/status') ||
+        text.includes('hardware-result.json') ||
+        locationUrl.includes('/api/status') ||
+        locationUrl.includes('hardware-result.json');
+      if (!isOfflineHardwareProbe) consoleErrors.push(text);
+    }
     if (msg.type() === 'warning') consoleWarnings.push(msg.text());
   });
 
@@ -27,7 +36,7 @@ const { chromium } = require('playwright');
   });
 
   try {
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 15000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
     loadSuccess = true;
 
     // Wait for JS to execute

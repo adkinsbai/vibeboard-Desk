@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs && node --check app.js"
+    "check": "node --check server.mjs && node --check app.js",
+    "verify:agent": "node tests/verify-agent.mjs",
+    "verify:offline": "node tests/offline-smoke.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.10.0",

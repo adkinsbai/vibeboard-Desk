@@ -21,9 +21,27 @@ import {
   mergeMarketApps,
   readStaticMarketCode as readStaticMarketCodeFromDir
 } from "./src/marketCatalog.mjs";
-import { createConversationStore } from "./src/conversationStore.mjs";
+import { createConversationStore, normalizeProjectMemory } from "./src/conversationStore.mjs";
 import { runAgent } from "./src/agent.mjs";
 import { chatCompletionsUrl, normalizeModelSettings } from "./src/modelSettings.mjs";
+import { createMemoryStore } from "./src/memoryStore.mjs";
+import { createExperienceStore, makePlaybookCandidate } from "./src/experienceStore.mjs";
+import { createPlaybookStore } from "./src/playbookStore.mjs";
+import { verifyAllLocal } from "./src/verifiers/index.mjs";
+import { analyzeAndClarify, buildRefinedPrompt } from "./src/clarifyEngine.mjs";
+import { planChatWithModel } from "./src/chatPlanner.mjs";
+import {
+  assertFileContracts,
+  validationRulesText
+} from "./src/contracts.mjs";
+import {
+  AGENT_PHASES,
+  appendEvidence,
+  buildInitialSpec,
+  createAgentRun,
+  formatRunEvidence,
+  transitionRun
+} from "./src/agentStateMachine.mjs";
 import {
   buildGoldenLoopResult,
   buildGoldenLoopRemoteCommand,
@@ -59,9 +77,16 @@ const ROOT = __dirname;
 const GENERATED_DIR = path.join(ROOT, "generated", "current");
 const PREVIEWS_DIR = path.join(ROOT, "previews");
 const RUNTIME_DIR = path.join(ROOT, "runtime");
+const SERVER_LOG_PATH = path.join(RUNTIME_DIR, "server.log");
+const SERVER_LOG_STRING_LIMIT = 600;
+const SERVER_LOG_ARRAY_LIMIT = 20;
 const MARKET_APPS_DIR = path.join(ROOT, "market-apps");
 const PORT = Number(process.env.VIBEBOARD_PORT || 8789);
 const DB_PATH = path.join(ROOT, "vibeboard.db");
+const DEFAULT_GENERATE_AGENT_MAX_ITERATIONS = 18;
+const DEFAULT_GENERATE_AGENT_MAX_VERIFICATION_ATTEMPTS = 1;
+const DEFAULT_GENERATE_AGENT_TIMEOUT_MS = 120000;
+const DEFAULT_GENERATE_AGENT_LLM_TIMEOUT_MS = 60000;
 
 // Initialize SQLite database
 const SQL = await initSqlJs();
@@ -115,6 +140,15 @@ function run(sql, params = []) {
 const conversationStore = createConversationStore(db, saveDb);
 conversationStore.initSchema();
 
+const memoryStore = createMemoryStore(db, saveDb);
+memoryStore.initSchema();
+
+const experienceStore = createExperienceStore(db, saveDb);
+experienceStore.initSchema();
+
+const playbookStore = createPlaybookStore(db, saveDb);
+playbookStore.initSchema();
+
 let BOARD = createBoardConfig();
 let knownHosts = process.env.VIBEBOARD_KNOWN_HOSTS || path.join(os.tmpdir(), `${BOARD.id}_known_hosts`);
 const identityFile = process.env.VIBEBOARD_IDENTITY_FILE || path.join(os.homedir(), ".ssh", "id_ed25519");
@@ -137,6 +171,47 @@ const mimeTypes = {
   ".png": "image/png",
   ".svg": "image/svg+xml"
 };
+
+function compactForLog(value, depth = 0) {
+  if (value == null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    return value.length > SERVER_LOG_STRING_LIMIT
+      ? `${value.slice(0, SERVER_LOG_STRING_LIMIT)}... [truncated ${value.length - SERVER_LOG_STRING_LIMIT} chars]`
+      : value;
+  }
+  if (Array.isArray(value)) {
+    const items = value.slice(0, SERVER_LOG_ARRAY_LIMIT).map(item => compactForLog(item, depth + 1));
+    if (value.length > SERVER_LOG_ARRAY_LIMIT) items.push(`... [truncated ${value.length - SERVER_LOG_ARRAY_LIMIT} items]`);
+    return items;
+  }
+  if (typeof value === "object") {
+    if (depth >= 2) {
+      const keys = Object.keys(value);
+      return { _type: "object", keys: keys.slice(0, SERVER_LOG_ARRAY_LIMIT), truncated: Math.max(0, keys.length - SERVER_LOG_ARRAY_LIMIT) };
+    }
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, compactForLog(item, depth + 1)])
+    );
+  }
+  return String(value);
+}
+
+async function appendServerLog(event, detail = {}) {
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    event,
+    ...compactForLog(detail),
+  });
+  try {
+    await fs.mkdir(RUNTIME_DIR, { recursive: true });
+    await fs.appendFile(SERVER_LOG_PATH, `${line}\n`, "utf8");
+  } catch {}
+}
+
+function positiveInt(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+}
 
 function loadStaticMarketApps() {
   return loadStaticMarketAppsFromDir(MARKET_APPS_DIR, GENERATED_FILE_NAMES);
@@ -190,7 +265,12 @@ function execFileP(command, args, options = {}) {
       cwd: options.cwd || ROOT,
       timeout: options.timeout || 30000,
       windowsHide: true,
-      maxBuffer: 1024 * 1024 * 4
+      maxBuffer: 1024 * 1024 * 4,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: "utf-8",
+        ...(options.env || {})
+      }
     }, (error, stdout, stderr) => {
       if (error) {
         error.stdout = stdout;
@@ -201,6 +281,20 @@ function execFileP(command, args, options = {}) {
       resolve({ stdout, stderr });
     });
   });
+}
+
+function parseJsonObject(text, label = "JSON") {
+  const raw = String(text || "").trim();
+  if (!raw) throw new Error(`${label} is empty.`);
+  try {
+    return JSON.parse(raw);
+  } catch {}
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    return JSON.parse(raw.slice(start, end + 1));
+  }
+  throw new Error(`${label} is not valid JSON.`);
 }
 
 function shouldUsePasswordFallback(error) {
@@ -450,9 +544,11 @@ function promptHas(prompt, words) {
 function createAppSpec(prompt, id) {
   const text = String(prompt || "").trim() || "Build a VibeBoard hardware app";
   let mode = "assistant";
+  if (promptHas(text, ["carousel", "slideshow", "photo", "image", "图片", "照片", "轮播", "相册"])) mode = "carousel";
+  if (promptHas(text, ["fullscreen clock", "full screen clock", "clock", "全屏时钟", "时钟", "大时钟"])) mode = "clock";
   if (promptHas(text, ["voice", "audio", "record", "speech", "语音", "录音", "麦克风"])) mode = "voice";
   if (promptHas(text, ["server", "dashboard", "status", "监控", "状态", "面板", "服务器"])) mode = "dashboard";
-  if (promptHas(text, ["timer", "clock", "focus", "countdown", "时间", "倒计时", "番茄"])) mode = "timer";
+  if (promptHas(text, ["timer", "focus", "countdown", "倒计时", "番茄"])) mode = "timer";
   if (promptHas(text, ["control", "switch", "gpio", "relay", "button", "控制", "开关", "继电器"])) mode = "control";
   if (promptHas(text, ["weather", "天气", "气温", "白底蓝字", "白色", "蓝色", "小屏助手"])) mode = "weather";
 
@@ -462,7 +558,9 @@ function createAppSpec(prompt, id) {
     dashboard: "Device Dashboard",
     timer: "Focus Clock",
     control: "Hardware Control",
-    weather: "小屏助手"
+    weather: "小屏助手",
+    clock: "全屏时钟",
+    carousel: "图片轮播"
   };
   const accents = {
     assistant: "#22c55e",
@@ -470,7 +568,9 @@ function createAppSpec(prompt, id) {
     dashboard: "#f59e0b",
     timer: "#a78bfa",
     control: "#fb7185",
-    weather: "#0b63ce"
+    weather: "#0b63ce",
+    clock: "#f8fafc",
+    carousel: "#fb7185"
   };
   const widgetsByMode = {
     assistant: [
@@ -508,10 +608,28 @@ function createAppSpec(prompt, id) {
       ["temp", "板端温度", "--", "thermal zone"],
       ["wifi", "Wi-Fi", "--", "live network"],
       ["memory", "内存", "--", "system"]
+    ],
+    clock: [
+      ["time", "Time", "--:--", "fullscreen clock"],
+      ["date", "Date", "--", "calendar"],
+      ["seconds", "Seconds", "--", "ticker"],
+      ["service", "Service", "--", "hardware api"]
+    ],
+    carousel: [
+      ["slide", "Slide", "1/4", "image index"],
+      ["caption", "Caption", "ready", "current image"],
+      ["runtime", "Runtime", "--", "python result"],
+      ["service", "Service", "--", "hardware api"]
     ]
   };
   const actionsByMode = {
-    weather: [{ id: "refresh", label: "刷新" }]
+    weather: [{ id: "refresh", label: "刷新" }],
+    clock: [{ id: "refresh", label: "Sync" }],
+    carousel: [
+      { id: "previous", label: "Prev" },
+      { id: "next", label: "Next" },
+      { id: "refresh", label: "Sync" }
+    ]
   };
 
   return {
@@ -552,28 +670,107 @@ function extractJsonObject(text) {
 }
 
 function validateGeneratedFileContracts(files, label) {
-  const appSource = files["app.js"] || "";
-  const indexSource = files["index.html"] || "";
-  const hardwareSource = files["hardware_app.py"] || "";
+  assertFileContracts(files, label);
+}
 
-  if (!appSource.includes("window.VibeBoardHardware")) {
-    throw new Error(`${label} app.js is missing window.VibeBoardHardware.`);
+function hasBoardCredentials() {
+  return Boolean(boardPassword || process.env.VIBEBOARD_IDENTITY_FILE || process.env.VIBEBOARD_FORCE_REAL_BOARD === "1");
+}
+
+function buildOfflineGoldenLoop(buildId = currentBuild?.id || "") {
+  const checkedAt = new Date().toISOString();
+  const checks = [
+    "ssh-route",
+    "upload",
+    "board-python",
+    "service-restart",
+    "http-build-id",
+    "display-geometry",
+    "kiosk-window",
+  ].map(id => ({
+    id,
+    label: `${id} skipped without hardware`,
+    ok: false,
+    skipped: true,
+    evidence: "No Taishan board credentials or reachable route configured in this session.",
+  }));
+
+  return {
+    id: buildId,
+    ok: false,
+    skipped: true,
+    mode: "offline-simulated",
+    checkedAt,
+    route: activeEndpoint ? endpointLabel(activeEndpoint) : "",
+    checks,
+    raw: {},
+  };
+}
+
+function buildOfflineDeployResult() {
+  const buildEvidence = currentBuild?.buildEvidence || null;
+  return {
+    id: currentBuild?.id || "",
+    skipped: true,
+    mode: "offline-simulated",
+    deployed: false,
+    backup: "",
+    output: "Hardware deploy skipped because no board credentials or reachable route are configured.",
+    compileLog: buildEvidence?.ok ? "local L0-L3 verification passed" : "local verification not available",
+    hardwareResult: null,
+    hardwareResultRaw: "",
+    programPath: "generated/current/hardware-result.json",
+    compilePath: "",
+    buildEvidence,
+    goldenLoop: buildOfflineGoldenLoop(currentBuild?.id || ""),
+  };
+}
+
+function detectTaskTypeLocal(prompt = "") {
+  const lower = String(prompt || "").toLowerCase();
+  if (/时钟|clock|时间/.test(lower)) return "clock";
+  if (/游戏|game|snake|贪吃蛇|赛车/.test(lower)) return "game";
+  if (/天气|weather/.test(lower)) return "weather";
+  if (/动画|animation/.test(lower)) return "animation";
+  if (/音乐|music|播放/.test(lower)) return "music";
+  if (/计时|timer|倒计时/.test(lower)) return "timer";
+  return "general";
+}
+
+function recordAgentLearning({
+  prompt,
+  agentResult = {},
+  verificationResult = null,
+  success = false,
+} = {}) {
+  const record = {
+    taskType: detectTaskTypeLocal(prompt),
+    promptSummary: String(prompt || "").slice(0, 200),
+    whatWorked: agentResult.whatWorked || [],
+    whatFailed: agentResult.whatFailed || [],
+    fixesApplied: verificationResult?.issues?.length
+      ? (verificationResult.issues || []).flatMap(issue => issue.suggestedFixes || [])
+      : [],
+    verificationResult,
+    success,
+  };
+
+  try {
+    experienceStore.recordExperience(record);
+  } catch (err) {
+    console.warn("[learning] experience record failed:", err.message);
   }
-  if (!appSource.includes("BUILD_ID") || !appSource.includes("PROMPT")) {
-    throw new Error(`${label} app.js is missing BUILD_ID or PROMPT constants.`);
+
+  try {
+    const candidate = makePlaybookCandidate(record);
+    if (candidate.signature !== "general:unknown") {
+      return playbookStore.recordPlaybook(candidate);
+    }
+  } catch (err) {
+    console.warn("[learning] playbook record failed:", err.message);
   }
-  if (!appSource.includes("/api/status")) {
-    throw new Error(`${label} app.js is missing /api/status integration.`);
-  }
-  if (!appSource.includes("hardware-result.json")) {
-    throw new Error(`${label} app.js is missing hardware-result.json integration.`);
-  }
-  if (!indexSource.includes("./style.css") || !indexSource.includes("./app.js")) {
-    throw new Error(`${label} index.html must use relative ./style.css and ./app.js assets.`);
-  }
-  if (!hardwareSource.includes("available_apis") || !hardwareSource.includes("/api/status") || !hardwareSource.includes("hardware-result.json")) {
-    throw new Error(`${label} hardware_app.py must declare available hardware APIs.`);
-  }
+
+  return null;
 }
 
 /**
@@ -582,6 +779,7 @@ function validateGeneratedFileContracts(files, label) {
  */
 function injectHardwareAppContracts(source, buildId) {
   const idJson = JSON.stringify(buildId);
+  const sourceB64Json = JSON.stringify(Buffer.from(String(source || ""), "utf8").toString("base64"));
   
   // 检查是否已经有 runtime 字段
   if (source.includes('"runtime"') && source.includes('"executed_on_board"')) {
@@ -594,11 +792,13 @@ function injectHardwareAppContracts(source, buildId) {
   // 注入包装器：在脚本执行后，强制添加必需字段
   const wrapper = `
 # --- Golden-loop contract injection (auto-injected) ---
+import base64 as __base64
 import json as __json
 import sys as __sys
 
 __original_print = print
 __build_id = ${idJson}
+__script_content = __base64.b64decode(${sourceB64Json}).decode("utf-8")
 
 def __wrapped_main():
     """Run original script and inject required fields."""
@@ -625,16 +825,66 @@ def __wrapped_main():
     __original_print(__json.dumps(__result, ensure_ascii=False, indent=2))
 
 # 保存原始脚本内容
-__script_content = '''
-${source.replace(/'/g, "\\'").replace(/\\/g, "\\\\")}
-'''
-
 if __name__ == "__main__":
     import socket
     __wrapped_main()
 `;
   
   return wrapper;
+}
+
+function injectHardwareAppContractsV2(source, buildId) {
+  const sourceText = String(source || "");
+  const idJson = JSON.stringify(buildId);
+  const sourceB64Json = JSON.stringify(Buffer.from(sourceText, "utf8").toString("base64"));
+
+  return `
+# --- VibeBoard runtime contract injection (auto-injected) ---
+import base64 as __vb_base64
+import json as __vb_json
+import socket as __vb_socket
+import sys as __vb_sys
+
+__vb_build_id = ${idJson}
+__vb_script_content = __vb_base64.b64decode(${sourceB64Json}).decode("utf-8")
+
+def __vb_parse_output(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        return __vb_json.loads(raw)
+    except Exception:
+        pass
+    for line in reversed([item.strip() for item in raw.splitlines() if item.strip()]):
+        if line.startswith("{") or line.startswith("["):
+            try:
+                return __vb_json.loads(line)
+            except Exception:
+                pass
+    return {"raw_output": raw}
+
+def __vb_wrapped_main():
+    import io
+    old_stdout = __vb_sys.stdout
+    __vb_sys.stdout = buffer = io.StringIO()
+    try:
+        exec(__vb_script_content, {"__name__": "__main__"})
+    finally:
+        __vb_sys.stdout = old_stdout
+
+    result = __vb_parse_output(buffer.getvalue())
+    if not isinstance(result, dict):
+        result = {"value": result}
+    result["build_id"] = __vb_build_id
+    result["runtime"] = "executed_on_board"
+    result["hostname"] = result.get("hostname") or __vb_socket.gethostname()
+    result["available_apis"] = result.get("available_apis") or ["/api/status", "./hardware-result.json"]
+    print(__vb_json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+if __name__ == "__main__":
+    __vb_wrapped_main()
+`;
 }
 
 const HARDWARE_PROFILE = {
@@ -696,17 +946,7 @@ You are creating a NEW project from scratch.
 ` }
 
 ## Hard Requirements (always apply)
-- index.html must link "./style.css" and "./app.js" with relative paths.
-- html, body, main screen root: exactly 480px by 360px, overflow hidden, no scrollbar.
-- No external CSS/JS libraries. No CDN. Pure vanilla HTML/CSS/JS only.
-- No emoji as UI icons (use CSS shapes, SVG, or text symbols instead).
-- app.js MUST define: const BUILD_ID = "..." and const PROMPT = "...".
-- app.js MUST define window.VibeBoardHardware = { getStatus(), getProgramResult(), getSnapshot() }.
-- app.js MUST fetch "/api/status" every 10s for live hardware data.
-- app.js MUST fetch "./hardware-result.json" once for program output.
-- hardware_app.py MUST be valid Python 3, define BUILD_ID and PROMPT, print JSON to stdout.
-- hardware_app.py JSON MUST include "runtime": "executed_on_board" and "build_id": BUILD_ID.
-- Design for a REAL 480x360 display: stable layout, no overflow, clear visual hierarchy.
+${validationRulesText("en").map(rule => `- ${rule}`).join("\n")}
 - Use dark theme (dark background, light text) for best readability on LCD.
 - Font sizes: titles 16-20px, body 12-14px, small labels 10-11px.
 - Colors: avoid pure white (#fff), prefer #e2e8f0 or similar soft white.
@@ -913,7 +1153,7 @@ function normalizeGeneratedFiles(raw, prompt, id, meta = {}) {
   }
   
   // 兜底注入：确保 hardware_app.py 输出包含 golden-loop 必需字段
-  files["hardware_app.py"] = injectHardwareAppContracts(files["hardware_app.py"], id);
+  files["hardware_app.py"] = injectHardwareAppContractsV2(files["hardware_app.py"], id);
   
   validateGeneratedFileContracts(files, "Model");
 
@@ -953,6 +1193,59 @@ function templateGeneratedFiles(prompt, id, reason = "") {
 
 const HISTORY_WINDOW = 10; // keep last N messages uncompressed
 const HISTORY_LOOKBACK = 20; // how many old messages to summarize
+const GENERATE_HISTORY_ALLOWED_ROLES = new Set(["user", "assistant", "system"]);
+const GENERATE_HISTORY_MAX_MESSAGES = HISTORY_WINDOW + HISTORY_LOOKBACK;
+const GENERATE_HISTORY_CONTENT_LIMIT = 8000;
+
+function normalizeGenerateHistory(rawHistory) {
+  const messages = Array.isArray(rawHistory) ? rawHistory : [];
+  const normalized = [];
+
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object") continue;
+
+    let role = typeof msg.role === "string" ? msg.role.trim().toLowerCase() : "";
+    if (role === "agent") role = "assistant";
+    if (!GENERATE_HISTORY_ALLOWED_ROLES.has(role)) continue;
+    if (typeof msg.content !== "string") continue;
+
+    const content = msg.content.trim();
+    if (!content) continue;
+
+    normalized.push({
+      role,
+      content: content.length > GENERATE_HISTORY_CONTENT_LIMIT
+        ? content.slice(0, GENERATE_HISTORY_CONTENT_LIMIT)
+        : content,
+    });
+  }
+
+  return normalized.length > GENERATE_HISTORY_MAX_MESSAGES
+    ? normalized.slice(-GENERATE_HISTORY_MAX_MESSAGES)
+    : normalized;
+}
+
+function structuredErrorFieldsForLog(error) {
+  if (!(error instanceof Error)) return {};
+
+  const fields = {};
+  for (const key of Object.keys(error)) {
+    if (key === "message" || key === "stack") continue;
+    fields[key] = error[key];
+  }
+
+  if (error.cause instanceof Error) {
+    fields.cause = {
+      name: error.cause.name,
+      message: error.cause.message,
+      ...structuredErrorFieldsForLog(error.cause),
+    };
+  } else if (error.cause != null) {
+    fields.cause = error.cause;
+  }
+
+  return fields;
+}
 
 /**
  * Compress conversation history using a sliding window + summary approach.
@@ -1070,6 +1363,70 @@ async function generateFilesForPrompt(prompt, id, modelSettings = {}, history = 
 }
 
 function generatedIndexV2(prompt, id, spec = createAppSpec(prompt, id)) {
+  if (spec.mode === "clock") {
+    return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibeBoard Clock</title>
+  <link rel="stylesheet" href="./style.css?v=${id}">
+</head>
+<body>
+  <main class="screen clock-screen" data-mode="clock">
+    <section class="clock-face" aria-label="fullscreen clock">
+      <span id="date">--</span>
+      <strong id="time">--:--</strong>
+      <small id="seconds">--</small>
+    </section>
+    <footer>
+      <span id="service">Linux API --</span>
+      <span id="eventLog">waiting</span>
+      <button class="action" type="button" data-action="refresh">Sync</button>
+    </footer>
+  </main>
+  <script src="./app.js?v=${id}"></script>
+</body>
+</html>
+`;
+  }
+
+  if (spec.mode === "carousel") {
+    return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibeBoard Carousel</title>
+  <link rel="stylesheet" href="./style.css?v=${id}">
+</head>
+<body>
+  <main class="screen carousel-screen" data-mode="carousel">
+    <section class="slide-stage" aria-label="image carousel">
+      <div class="slide active" data-slide="0"><span>01</span><strong>晨光</strong></div>
+      <div class="slide" data-slide="1"><span>02</span><strong>城市</strong></div>
+      <div class="slide" data-slide="2"><span>03</span><strong>山海</strong></div>
+      <div class="slide" data-slide="3"><span>04</span><strong>夜色</strong></div>
+    </section>
+    <section class="carousel-meta">
+      <div>
+        <span id="slide">1/4</span>
+        <strong id="caption">晨光</strong>
+      </div>
+      <small id="eventLog">auto playing</small>
+    </section>
+    <footer>
+      <button class="action" type="button" data-action="previous">Prev</button>
+      <span id="service">Linux API --</span>
+      <button class="action" type="button" data-action="next">Next</button>
+    </footer>
+  </main>
+  <script src="./app.js?v=${id}"></script>
+</body>
+</html>
+`;
+  }
+
   if (spec.mode === "weather") {
     return `<!doctype html>
 <html lang="zh-CN">
@@ -1169,6 +1526,286 @@ function generatedIndexV2(prompt, id, spec = createAppSpec(prompt, id)) {
 }
 
 function generatedStyleV2(prompt = "", id = "preview", spec = createAppSpec(prompt, id)) {
+  if (spec.mode === "clock") {
+    return `:root {
+  color-scheme: dark;
+  --bg: #05070b;
+  --panel: rgba(255, 255, 255, .08);
+  --line: rgba(255, 255, 255, .16);
+  --text: #f8fafc;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  width: 480px;
+  height: 360px;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
+}
+
+button { font: inherit; }
+
+.screen {
+  width: 480px;
+  height: 360px;
+  display: grid;
+  grid-template-rows: 1fr 42px;
+  gap: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 22% 20%, rgba(56, 189, 248, .22), transparent 28%),
+    linear-gradient(135deg, #05070b 0%, #111827 52%, #020617 100%);
+}
+
+.clock-face {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 42px 172px 48px;
+  align-content: center;
+  justify-items: center;
+  padding: 22px 18px 10px;
+}
+
+.clock-face span,
+.clock-face small,
+footer {
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.clock-face strong {
+  overflow: hidden;
+  max-width: 456px;
+  color: var(--text);
+  font-family: Consolas, "Segoe UI", monospace;
+  font-size: 118px;
+  font-weight: 900;
+  line-height: .92;
+  letter-spacing: 0;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.clock-face small {
+  min-width: 78px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--accent);
+  background: var(--panel);
+  font-family: Consolas, monospace;
+  font-size: 28px;
+  font-weight: 800;
+  text-align: center;
+}
+
+footer {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 150px 1fr 74px;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 10px;
+  border-top: 1px solid var(--line);
+  background: rgba(2, 6, 23, .72);
+  white-space: nowrap;
+}
+
+footer span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.action {
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: rgba(56, 189, 248, .16);
+  font-size: 12px;
+  font-weight: 800;
+}
+`;
+  }
+
+  if (spec.mode === "carousel") {
+    return `:root {
+  color-scheme: dark;
+  --bg: #111827;
+  --line: rgba(255, 255, 255, .18);
+  --text: #f8fafc;
+  --muted: #cbd5e1;
+  --accent: #fb7185;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  width: 480px;
+  height: 360px;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
+}
+
+button { font: inherit; }
+
+.screen {
+  width: 480px;
+  height: 360px;
+  display: grid;
+  grid-template-rows: 248px 58px 54px;
+  overflow: hidden;
+  background: #111827;
+}
+
+.slide-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #0f172a;
+}
+
+.slide {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transform: scale(1.02);
+  transition: opacity .45s ease, transform .45s ease;
+}
+
+.slide.active {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.slide::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, .18), transparent 36%),
+    radial-gradient(circle at 20% 72%, rgba(255, 255, 255, .22), transparent 18%),
+    radial-gradient(circle at 78% 28%, rgba(255, 255, 255, .2), transparent 16%);
+}
+
+.slide[data-slide="0"] { background: linear-gradient(135deg, #0f766e, #f59e0b); }
+.slide[data-slide="1"] { background: linear-gradient(135deg, #1d4ed8, #7c3aed); }
+.slide[data-slide="2"] { background: linear-gradient(135deg, #166534, #0891b2); }
+.slide[data-slide="3"] { background: linear-gradient(135deg, #312e81, #be123c); }
+
+.slide span {
+  position: absolute;
+  top: 18px;
+  left: 20px;
+  color: rgba(255, 255, 255, .72);
+  font-family: Consolas, monospace;
+  font-size: 24px;
+  font-weight: 900;
+}
+
+.slide strong {
+  position: relative;
+  max-width: 420px;
+  overflow: hidden;
+  color: #ffffff;
+  font-size: 66px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 8px 20px rgba(0, 0, 0, .28);
+}
+
+.carousel-meta {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 160px;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  background: #111827;
+}
+
+.carousel-meta div,
+.carousel-meta small {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.carousel-meta span,
+.carousel-meta small,
+footer {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.carousel-meta strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 23px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+footer {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 86px 1fr 86px;
+  gap: 9px;
+  align-items: center;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  background: #0f172a;
+  white-space: nowrap;
+}
+
+footer span {
+  min-width: 0;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+}
+
+.action {
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: #fff;
+  background: rgba(251, 113, 133, .28);
+  font-size: 12px;
+  font-weight: 850;
+}
+`;
+  }
+
   if (spec.mode === "weather") {
     return `:root {
   color-scheme: light;
@@ -1545,6 +2182,153 @@ footer {
 function generatedAppV2(prompt, id, spec = createAppSpec(prompt, id)) {
   const specJson = JSON.stringify(spec);
   const idJson = JSON.stringify(id);
+  if (spec.mode === "clock") {
+    return `const SPEC = ${specJson};
+const PROMPT = SPEC.prompt;
+const BUILD_ID = ${idJson};
+const el = id => document.getElementById(id);
+
+window.VibeBoardHardware = {
+  async getStatus() {
+    const res = await fetch("/api/status", { cache: "no-store" });
+    if (!res.ok) throw new Error("status " + res.status);
+    return res.json();
+  },
+  async getProgramResult() {
+    const res = await fetch("./hardware-result.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("program " + res.status);
+    return res.json();
+  },
+  async getSnapshot() {
+    const settled = await Promise.allSettled([this.getStatus(), this.getProgramResult()]);
+    return {
+      status: settled[0].status === "fulfilled" ? settled[0].value : null,
+      program: settled[1].status === "fulfilled" ? settled[1].value : null
+    };
+  }
+};
+
+function pad(value) {
+  return String(value).padStart(2, "0");
+}
+
+function setText(id, value) {
+  const node = el(id);
+  if (node) node.textContent = value == null || value === "" ? "--" : String(value);
+}
+
+function drawClock() {
+  const now = new Date();
+  setText("time", pad(now.getHours()) + ":" + pad(now.getMinutes()));
+  setText("seconds", pad(now.getSeconds()));
+  setText("date", now.toLocaleDateString("zh-CN", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric"
+  }));
+}
+
+async function refresh() {
+  try {
+    const snapshot = await window.VibeBoardHardware.getSnapshot();
+    const data = snapshot.status || {};
+    const program = snapshot.program || {};
+    const serviceText = data.services ? "SSH " + (data.services.ssh || "--") + " / FRP " + (data.services.frpc || "--") : "Linux API ready";
+    setText("service", serviceText);
+    setText("eventLog", program.runtime || "clock synced");
+  } catch (error) {
+    setText("service", "Linux API retrying");
+    setText("eventLog", "offline clock");
+  }
+}
+
+document.querySelectorAll(".action").forEach(button => {
+  button.addEventListener("click", refresh);
+});
+
+drawClock();
+refresh();
+setInterval(drawClock, 1000);
+setInterval(refresh, 5000);
+console.log("VibeBoard preview ready", BUILD_ID, PROMPT);
+`;
+  }
+
+  if (spec.mode === "carousel") {
+    return `const SPEC = ${specJson};
+const PROMPT = SPEC.prompt;
+const BUILD_ID = ${idJson};
+const el = id => document.getElementById(id);
+const slides = Array.from(document.querySelectorAll(".slide"));
+const captions = ["晨光", "城市", "山海", "夜色"];
+let current = 0;
+
+window.VibeBoardHardware = {
+  async getStatus() {
+    const res = await fetch("/api/status", { cache: "no-store" });
+    if (!res.ok) throw new Error("status " + res.status);
+    return res.json();
+  },
+  async getProgramResult() {
+    const res = await fetch("./hardware-result.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("program " + res.status);
+    return res.json();
+  },
+  async getSnapshot() {
+    const settled = await Promise.allSettled([this.getStatus(), this.getProgramResult()]);
+    return {
+      status: settled[0].status === "fulfilled" ? settled[0].value : null,
+      program: settled[1].status === "fulfilled" ? settled[1].value : null
+    };
+  }
+};
+
+function setText(id, value) {
+  const node = el(id);
+  if (node) node.textContent = value == null || value === "" ? "--" : String(value);
+}
+
+function showSlide(index) {
+  if (!slides.length) return;
+  current = (index + slides.length) % slides.length;
+  slides.forEach((slide, idx) => slide.classList.toggle("active", idx === current));
+  setText("slide", String(current + 1) + "/" + String(slides.length));
+  setText("caption", captions[current] || "Slide " + String(current + 1));
+}
+
+async function refresh() {
+  try {
+    const snapshot = await window.VibeBoardHardware.getSnapshot();
+    const data = snapshot.status || {};
+    const program = snapshot.program || {};
+    const serviceText = data.services ? "SSH " + (data.services.ssh || "--") : "Linux API ready";
+    setText("service", serviceText);
+    setText("eventLog", "build " + (program.build_id || BUILD_ID).slice(0, 10));
+  } catch (error) {
+    setText("service", "Linux API retrying");
+    setText("eventLog", "local slideshow");
+  }
+}
+
+function handleAction(action) {
+  if (action === "previous") showSlide(current - 1);
+  if (action === "next") showSlide(current + 1);
+  if (action === "refresh") refresh();
+}
+
+document.querySelectorAll(".action").forEach(button => {
+  button.addEventListener("click", () => handleAction(button.dataset.action));
+});
+
+showSlide(0);
+refresh();
+setInterval(() => showSlide(current + 1), 3000);
+setInterval(refresh, 5000);
+console.log("VibeBoard preview ready", BUILD_ID, PROMPT);
+`;
+  }
+
   if (spec.mode === "weather") {
     return `const SPEC = ${specJson};
 const PROMPT = SPEC.prompt;
@@ -1671,7 +2455,7 @@ refreshAll();
 setInterval(drawClock, 1000);
 setInterval(refreshHardware, 5000);
 setInterval(refreshWeather, 600000);
-console.log("VibeBoard deployed", BUILD_ID, PROMPT);
+console.log("VibeBoard preview ready", BUILD_ID, PROMPT);
 `;
   }
 
@@ -1786,7 +2570,7 @@ document.querySelectorAll(".action").forEach(button => {
 setInterval(drawClock, 1000);
 setInterval(() => { state.tick += 1; renderMode(); }, 1000);
 setInterval(refresh, 5000);
-console.log("VibeBoard deployed", BUILD_ID, PROMPT);
+console.log("VibeBoard preview ready", BUILD_ID, PROMPT);
 `;
 }
 
@@ -1801,7 +2585,13 @@ import os
 import platform
 import shutil
 import socket
+import sys
 import time
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except AttributeError:
+    pass
 
 BUILD_ID = ${idJson}
 PROMPT = ${promptJson}
@@ -2094,7 +2884,7 @@ drawClock();
 refresh();
 setInterval(drawClock, 1000);
 setInterval(refresh, 5000);
-console.log("VibeBoard deployed", BUILD_ID, PROMPT);
+console.log("VibeBoard preview ready", BUILD_ID, PROMPT);
 `;
 }
 
@@ -2157,9 +2947,20 @@ print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 async function writeGenerated(prompt, modelSettings = {}, history = []) {
   const id = buildId();
+  await appendServerLog("generate.template.start", { id, prompt: String(prompt || "").slice(0, 160) });
   const { files, manifest } = await generateFilesForPrompt(prompt, id, modelSettings, history);
   await writeGeneratedFiles(GENERATED_DIR, files);
-  currentBuild = { id, prompt, files, dir: GENERATED_DIR, built: false, deployed: false, manifest };
+  const agentRun = transitionRun(createAgentRun({
+    prompt,
+    mode: "template",
+    buildId: id,
+    hardwareMode: boardPassword ? "real" : "simulated",
+  }), AGENT_PHASES.CODE, {
+    spec: buildInitialSpec(prompt, { requireBoard: Boolean(boardPassword) }),
+  });
+  currentBuild = { id, prompt, files, dir: GENERATED_DIR, built: false, deployed: false, manifest, agentRun };
+  await buildCurrent();
+  await appendServerLog("generate.template.done", { id, files: Object.keys(files) });
   return currentBuild;
 }
 
@@ -2195,8 +2996,10 @@ async function ensureInitialGenerated() {
 
 async function buildCurrent() {
   if (!currentBuild) throw new Error("No generated app. Generate first.");
+  await appendServerLog("build.start", { id: currentBuild.id });
   const appFile = path.join(currentBuild.dir, "app.js");
   const hardwareFile = path.join(currentBuild.dir, "hardware_app.py");
+  const hardwareResultFile = path.join(currentBuild.dir, "hardware-result.json");
   const indexFile = path.join(currentBuild.dir, "index.html");
   const styleFile = path.join(currentBuild.dir, "style.css");
   const manifestFile = path.join(currentBuild.dir, "manifest.json");
@@ -2210,10 +3013,22 @@ async function buildCurrent() {
   } catch {}
   await execFileP(process.execPath, ["--check", appFile], { timeout: 10000 });
   const hardwareCompile = await execFileP(PYTHON_BIN, ["-m", "py_compile", hardwareFile], { timeout: 10000 });
+  const hardwareRun = await execFileP(PYTHON_BIN, [hardwareFile], { cwd: currentBuild.dir, timeout: 10000 });
+  const hardwareResult = parseJsonObject(hardwareRun.stdout, "hardware_app.py output");
+  if (!hardwareResult.build_id) throw new Error("hardware_app.py output is missing build_id.");
+  if (hardwareResult.build_id !== currentBuild.id) {
+    throw new Error(`hardware_app.py build_id mismatch: ${hardwareResult.build_id} !== ${currentBuild.id}`);
+  }
+  if (!hardwareResult.runtime) throw new Error("hardware_app.py output is missing runtime.");
+  const hardwareResultJson = JSON.stringify(hardwareResult, null, 2);
+  await fs.writeFile(hardwareResultFile, hardwareResultJson, "utf8");
+  delete currentBuild.files["hardware-result.json"];
   for (const file of [indexFile, styleFile, appFile, hardwareFile, manifestFile]) {
     const stat = await fs.stat(file);
     if (!stat.size) throw new Error(`${path.basename(file)} is empty`);
   }
+  const hardwareResultStat = await fs.stat(hardwareResultFile);
+  if (!hardwareResultStat.size) throw new Error("hardware-result.json is empty");
   const indexSource = await fs.readFile(indexFile, "utf8");
   const appSource = await fs.readFile(appFile, "utf8");
   const hardwareSource = await fs.readFile(hardwareFile, "utf8");
@@ -2239,7 +3054,51 @@ async function buildCurrent() {
   await fs.writeFile(path.join(currentBuild.dir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
   currentBuild.files["manifest.json"] = JSON.stringify(manifest, null, 2);
   currentBuild.manifest = manifest;
+  const verificationFiles = {
+    "index.html": await fs.readFile(indexFile, "utf8"),
+    "style.css": await fs.readFile(styleFile, "utf8"),
+    "app.js": await fs.readFile(appFile, "utf8"),
+    "hardware_app.py": await fs.readFile(hardwareFile, "utf8"),
+    "manifest.json": await fs.readFile(manifestFile, "utf8"),
+    "hardware-result.json": hardwareResultJson,
+  };
+  const verification = await verifyAllLocal(verificationFiles, {
+    dir: currentBuild.dir,
+    pythonBin: PYTHON_BIN,
+    timeoutMs: 15000,
+  });
+  if (!verification.ok) {
+    await appendServerLog("build.failed", {
+      id: currentBuild.id,
+      issues: (verification.issues || []).map(issue => ({ code: issue.code, message: issue.message })),
+    });
+    const detail = (verification.issues || [])
+      .slice(0, 5)
+      .map(issue => `${issue.code}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`local verification failed: ${detail || verification.summary}`);
+  }
   currentBuild.built = true;
+  currentBuild.buildEvidence = verification;
+  currentBuild.buildEvidence.phase = AGENT_PHASES.LOCAL_VERIFY;
+  currentBuild.buildEvidence.summary = "L0-L3 local verification passed";
+  currentBuild.buildEvidence.evidence = {
+    ...currentBuild.buildEvidence.evidence,
+    nodeCheck: "passed",
+    pythonCompile: "passed",
+    hardwareRun: "passed",
+    hardwareResult: "generated/current/hardware-result.json",
+    buildId: currentBuild.id,
+    pythonBin: PYTHON_BIN,
+  };
+  if (currentBuild.agentRun) {
+    currentBuild.agentRun = appendEvidence(currentBuild.agentRun, currentBuild.buildEvidence);
+  }
+  await appendServerLog("build.done", {
+    id: currentBuild.id,
+    phase: currentBuild.buildEvidence.phase,
+    issueCount: currentBuild.buildEvidence.issues?.length || 0,
+  });
   return manifest;
 }
 
@@ -2477,6 +3336,42 @@ async function fastBoardStatus() {
   return refreshBoardStatus();
 }
 
+function fastRawBoardStatus() {
+  const cached = boardStatusCache.get(BOARD.id)?.status || null;
+  refreshBoardStatus().catch(error => {
+    console.warn("[board] background status refresh failed:", error.message);
+  });
+  const connected = Boolean(cached?.connected);
+  return {
+    ok: connected,
+    connected,
+    mode: connected ? "real" : "offline-simulated",
+    skipped: !connected,
+    verificationMode: connected ? "real-ready" : "local-simulated",
+    message: connected ? "Board connected." : "No board route is currently connected; local simulation remains available.",
+    hostname: cached?.hostname || "",
+    kernel: cached?.kernel || "",
+    cpu_temp: cached?.temp ?? null,
+    memory: cached?.memory ? { percent: Number.parseFloat(cached.memory) || 0 } : null,
+    network: {
+      wifi: cached?.wifi || "",
+      addresses: cached?.ip ? [cached.ip] : []
+    },
+    services: {
+      display: cached?.service || "",
+      ssh: cached?.ssh || "",
+      frpc: cached?.frpc || ""
+    },
+    board: cached?.board || {
+      id: BOARD.id,
+      label: BOARD.label,
+      host: BOARD.host,
+      port: String(BOARD.port),
+      targetStatic: BOARD.targetStatic,
+    },
+  };
+}
+
 async function rawBoardStatus() {
   const raw = await ssh("curl -fsS http://127.0.0.1:8765/api/status", 10000);
   return JSON.parse(raw);
@@ -2507,9 +3402,52 @@ async function serveStatic(req, res) {
   }
 }
 
+async function readServerLogTail(limit = 80) {
+  try {
+    const raw = await fs.readFile(SERVER_LOG_PATH, "utf8");
+    return raw
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(-Math.max(1, Math.min(Number(limit) || 80, 500)))
+      .map(line => {
+        try {
+          return compactForLog(JSON.parse(line));
+        } catch {
+          return { raw: compactForLog(line) };
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
 
 // ==================== Error Classification ====================
 function classifyError(error) {
+  const llmText = [
+    error?.type || "",
+    error?.code || "",
+    error?.status ? `HTTP ${error.status}` : "",
+    error?.endpoint || "",
+    error?.providerMessage || "",
+    error?.message || "",
+    error?.stdout || "",
+    error?.stderr || ""
+  ].join("\n");
+
+  if (/LLM_TIMEOUT|llm.*timeout|model.*timeout/i.test(llmText)) {
+    return { errorType: "llm_timeout", errorLabel: "AI model timeout" };
+  }
+  if (/not configured|no api key|NO_API_KEY/i.test(llmText)) {
+    return { errorType: "no_api_key", errorLabel: "AI model not configured" };
+  }
+  if (/LLM_CALL_FAILED|llm.*fail|model.*fail/i.test(llmText)) {
+    if (/HTTP\s*(?:401|403)|api key|invalid|unauthorized|forbidden|Authentication Fails|authentication failed|auth/i.test(llmText)) {
+      return { errorType: "llm_auth", errorLabel: "AI model authentication failed" };
+    }
+    return { errorType: "llm_failed", errorLabel: "AI model call failed" };
+  }
+
   const text = [
     error?.message || "",
     error?.stdout || "",
@@ -2558,6 +3496,9 @@ function classifyError(error) {
   if (/LLM_TIMEOUT|llm.*timeout|model.*timeout/i.test(text)) {
     return { errorType: "llm_timeout", errorLabel: "AI 模型响应超时" };
   }
+  if (/达到最大迭代次数|maximum iterations|max iterations|未确认完成|Agent 未生成完整项目/i.test(text)) {
+    return { errorType: "generate_failed", errorLabel: "AI 生成未完成" };
+  }
   if (/Prompt is required|empty.*prompt/i.test(text)) {
     return { errorType: "empty_prompt", errorLabel: "请输入你的需求" };
   }
@@ -2568,6 +3509,19 @@ function classifyError(error) {
     return { errorType: "deploy_failed", errorLabel: "部署失败" };
   }
   return { errorType: "unknown", errorLabel: error?.message || "操作失败" };
+}
+
+function formatProjectMemoryForPrompt(memory = {}) {
+  const normalized = normalizeProjectMemory(memory);
+  const lines = [];
+  if (normalized.summary) lines.push(`摘要: ${normalized.summary}`);
+  if (normalized.goal) lines.push(`目标: ${normalized.goal}`);
+  if (normalized.requirements.length) lines.push(`功能需求:\n${normalized.requirements.map(item => `- ${item}`).join("\n")}`);
+  if (normalized.constraints.length) lines.push(`约束:\n${normalized.constraints.map(item => `- ${item}`).join("\n")}`);
+  if (normalized.decisions.length) lines.push(`已确认方案:\n${normalized.decisions.map(item => `- ${item}`).join("\n")}`);
+  if (normalized.open_questions.length) lines.push(`未解决问题:\n${normalized.open_questions.map(item => `- ${item}`).join("\n")}`);
+  if (!lines.length) return "";
+  return `\n\n## 当前项目记忆\n${lines.join("\n")}`;
 }
 
 async function route(req, res) {
@@ -2611,52 +3565,251 @@ async function route(req, res) {
     }
     if (req.method === "GET" && url.pathname === "/api/status") {
       const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
-      json(res, 200, await withDevice(deviceId, () => rawBoardStatus()));
+      json(res, 200, await withDevice(deviceId, () => fastRawBoardStatus()));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/logs") {
+      const limit = Number(url.searchParams.get("limit") || 80);
+      json(res, 200, { ok: true, logs: await readServerLogTail(limit) });
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/verify") {
       const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
       const id = url.searchParams.get("id") || currentBuild?.id || lastDeploy?.id || "";
+      if (!hasBoardCredentials()) {
+        json(res, 200, { ok: true, skipped: true, mode: "offline-simulated", goldenLoop: buildOfflineGoldenLoop(id) });
+        return;
+      }
       const goldenLoop = await withDevice(deviceId, () => verifyGoldenLoop(id));
       json(res, 200, { ok: true, goldenLoop });
       return;
     }
-    if (req.method === "POST" && url.pathname === "/api/generate") {
+    // --- Chat: 对话式规划（不生成代码） ---
+    if (req.method === "POST" && url.pathname === "/api/chat") {
+      const body = await readBody(req);
+      const rawMessages = Array.isArray(body.messages) ? body.messages : [];
+      const conversationId = String(body.conversation_id || "").trim();
+      const modelSettings = normalizeModelSettings(body.modelSettings || {});
+      const projectMemory = conversationId ? conversationStore.getProjectMemory(conversationId) : normalizeProjectMemory();
+
+      if (!modelSettings.enabled) {
+        json(res, 200, {
+          ok: true,
+          intent: "chat",
+          reply: "请先在右上角 Model 里配置可用的大模型。配置后我会先和你对话、梳理需求，只有你确认开始构建时才生成代码。",
+          ready_to_build: false,
+          build_prompt: "",
+          project_memory: projectMemory
+        });
+        return;
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 60000);
+      try {
+        const plan = await planChatWithModel(
+          modelSettings,
+          rawMessages,
+          memoryStore.getAll(),
+          projectMemory,
+          (url, options = {}) => fetch(url, { ...options, signal: controller.signal })
+        );
+        if (conversationId && plan.project_memory) {
+          conversationStore.setProjectMemory(conversationId, plan.project_memory);
+        }
+        clearTimeout(timeout);
+        json(res, 200, { ok: true, ...plan });
+      } catch (err) {
+        clearTimeout(timeout);
+        const classified = classifyError(err);
+        json(res, 500, { ok: false, error: err.message, ...classified });
+      }
+      return;
+    }
+    // --- Clarify: 实时需求细化 ---
+    if (req.method === "POST" && url.pathname === "/api/clarify") {
       const body = await readBody(req);
       const prompt = String(body.prompt || "").trim();
-      if (!prompt) throw new Error("Prompt is required.");
+      if (!prompt) { json(res, 400, { ok: false, error: "Prompt is required." }); return; }
+
+      const modelSettings = normalizeModelSettings(body.modelSettings || {});
+      if (!modelSettings.enabled) { json(res, 200, { ok: true, questions: null, source: "skip" }); return; }
+
       const rawHistory = Array.isArray(body.history) ? body.history : [];
+      const preferences = memoryStore.getAll();
+
+      const result = await analyzeAndClarify(modelSettings, prompt, preferences, rawHistory);
+      json(res, 200, { ok: true, questions: result, source: result ? "llm" : "skip" });
+      return;
+    }
+
+    // --- Preferences: 用户偏好 CRUD ---
+    if (req.method === "GET" && url.pathname === "/api/preferences") {
+      json(res, 200, { ok: true, preferences: memoryStore.getAll() });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/preferences") {
+      const body = await readBody(req);
+      const { key, value, label, category, source } = body;
+      if (!key || !value) { json(res, 400, { ok: false, error: "key and value required" }); return; }
+      memoryStore.set(key, value, { label, category, source: source || "user" });
+      json(res, 200, { ok: true, preferences: memoryStore.getAll() });
+      return;
+    }
+    if (req.method === "DELETE" && url.pathname === "/api/preferences") {
+      const body = await readBody(req);
+      if (body.key) memoryStore.remove(body.key);
+      else if (body.category) memoryStore.removeCategory(body.category);
+      json(res, 200, { ok: true, preferences: memoryStore.getAll() });
+      return;
+    }
+
+    // --- Experience: Agent 经验查询 ---
+    if (req.method === "GET" && url.pathname === "/api/experience") {
+      const taskType = url.searchParams.get("type") || "general";
+      const lessons = experienceStore.getLessons(taskType, 10);
+      const stats = experienceStore.getStats(taskType);
+      json(res, 200, { ok: true, lessons, stats });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/playbooks") {
+      const taskType = url.searchParams.get("type") || "general";
+      const signature = url.searchParams.get("signature") || "";
+      const limit = Number(url.searchParams.get("limit") || 10);
+      const playbooks = playbookStore.findPlaybooks({ taskType, signature, limit });
+      json(res, 200, { ok: true, playbooks });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/playbooks") {
+      const body = await readBody(req);
+      const playbook = playbookStore.recordPlaybook(body || {});
+      json(res, 200, { ok: true, playbook });
+      return;
+    }
+
+    // --- Generate: AI 代码生成 ---
+    if (req.method === "POST" && url.pathname === "/api/generate") {
+      const body = await readBody(req);
+      const rawPrompt = String(body.prompt || "").trim();
+      if (!rawPrompt) throw new Error("Prompt is required.");
+      const rawHistory = Array.isArray(body.history) ? body.history : [];
+      const normalizedHistory = normalizeGenerateHistory(rawHistory);
+      const clarifyAnswers = Array.isArray(body.clarify_answers) ? body.clarify_answers : [];
       const modelSettings = body.modelSettings || {};
+      const conversationId = String(body.conversation_id || "").trim();
+      const projectMemory = conversationId ? conversationStore.getProjectMemory(conversationId) : normalizeProjectMemory();
+      const conversationFiles = conversationId
+        ? conversationStore.loadConversationFiles(conversationId).files
+        : {};
 
       // Compress history
-      const history = await compressHistory(rawHistory, normalizeModelSettings(modelSettings));
+      const history = await compressHistory(normalizedHistory, normalizeModelSettings(modelSettings));
       const settings = normalizeModelSettings(modelSettings);
+
+      // 构建精细化 prompt（合并 clarify 答案 + 用户偏好）
+      const userPreferences = memoryStore.getAll();
+      const prompt = buildRefinedPrompt(`${rawPrompt}${formatProjectMemoryForPrompt(projectMemory)}`, clarifyAnswers, userPreferences);
+
+      // 保存用户选择的偏好到记忆（LLM 自动提取）
+      if (clarifyAnswers.length > 0) {
+        for (const ans of clarifyAnswers) {
+          if (ans.key && ans.answer) {
+            memoryStore.set(ans.key, ans.answer, {
+              label: ans.question || ans.key,
+              category: "clarify",
+              source: "auto_extract",
+            });
+          }
+        }
+      }
 
       if (!settings.enabled) {
         // Fallback to template if no model configured
         const build = await writeGenerated(prompt, modelSettings, []);
+        if (conversationId) {
+          try {
+            conversationStore.saveConversationFiles(conversationId, build.id, build.files);
+          } catch (saveErr) {
+            await appendServerLog("generate.template.conversation_save_failed", {
+              id: build.id,
+              conversationId,
+              error: saveErr.message,
+            });
+          }
+        }
         json(res, 200, {
           ok: true, id: build.id, files: build.files,
           manifest: build.manifest || null, source: "template",
+          spec: build.agentRun?.spec || null,
+          evidence: formatRunEvidence(build.agentRun || {}),
+          buildEvidence: build.buildEvidence || null,
+          verificationMode: boardPassword ? "real-ready" : "local-simulated",
           agentActions: [], thinking: ""
         });
         return;
       }
 
-      // Prepare file store: editing = current files, new = empty
-      const isEditing = history.length > 0 && currentBuild?.files;
-      const fileStore = isEditing
-        ? { ...currentBuild.files }
-        : {};
+      // Prepare file store from this project only. Chat history alone does not
+      // mean the user is editing existing code.
+      const fileStore = { ...conversationFiles };
+      const isEditing = Object.keys(fileStore).some(name => name !== "manifest.json");
+      const agentStartedAt = Date.now();
 
       // Run the coding agent
       console.log(`[generate] Agent starting (${isEditing ? "edit" : "new"} mode)`);
-      const agentResult = await runAgent(settings, prompt, fileStore, history, (action) => {
-        console.log(`[agent] ${action.tool}: ${action.args?.path || action.args?.query || action.args?.summary || ""}`);
+      const agentSettings = {
+        ...settings,
+        maxIterations: positiveInt(process.env.VIBEBOARD_AGENT_MAX_ITERATIONS, DEFAULT_GENERATE_AGENT_MAX_ITERATIONS),
+        maxVerificationAttempts: positiveInt(process.env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS, DEFAULT_GENERATE_AGENT_MAX_VERIFICATION_ATTEMPTS),
+        timeoutMs: positiveInt(process.env.VIBEBOARD_AGENT_TIMEOUT_MS, DEFAULT_GENERATE_AGENT_TIMEOUT_MS),
+        llmTimeoutMs: positiveInt(process.env.VIBEBOARD_AGENT_LLM_TIMEOUT_MS, DEFAULT_GENERATE_AGENT_LLM_TIMEOUT_MS),
+      };
+      await appendServerLog("generate.agent.start", {
+        prompt: prompt.slice(0, 160),
+        isEditing,
+        fileCount: Object.keys(fileStore).length,
+        files: Object.keys(fileStore).slice(0, 12),
+        model: settings.model,
+        provider: settings.provider,
+        maxIterations: agentSettings.maxIterations,
+        maxVerificationAttempts: agentSettings.maxVerificationAttempts,
+        timeoutMs: agentSettings.timeoutMs,
+        llmTimeoutMs: agentSettings.llmTimeoutMs,
       });
+      let agentResult;
+      try {
+        agentResult = await runAgent(agentSettings, prompt, fileStore, history, (action) => {
+          console.log(`[agent] ${action.tool}: ${action.args?.path || action.args?.query || action.args?.summary || ""}`);
+          appendServerLog("generate.agent.action", {
+            tool: action.tool,
+            path: action.args?.path || "",
+            query: action.args?.query || "",
+            summary: action.args?.summary || "",
+          }).catch(() => {});
+        }, userPreferences, experienceStore, { ssh, scp, board: BOARD });
+      } catch (agentErr) {
+        await appendServerLog("generate.agent.failed", {
+          error: agentErr.message,
+          ...structuredErrorFieldsForLog(agentErr),
+          durationMs: Date.now() - agentStartedAt,
+        });
+        throw agentErr;
+      }
 
       if (!agentResult.success) {
-        throw new Error(agentResult.summary || "Agent failed");
+        await appendServerLog("generate.agent.failed", {
+          error: agentResult.summary || "Agent failed",
+          agentError: agentResult.error || null,
+          actionCount: agentResult.actions?.length || 0,
+          limit: agentResult.limit || "",
+          iteration: agentResult.iteration ?? null,
+          durationMs: Date.now() - agentStartedAt,
+        });
+        const error = new Error(agentResult.summary || "Agent failed");
+        if (agentResult.error && typeof agentResult.error === "object") {
+          Object.assign(error, agentResult.error);
+        }
+        throw error;
       }
 
       // Ensure hardware_app.py and manifest exist
@@ -2667,7 +3820,7 @@ async function route(req, res) {
         const spec = createAppSpec(prompt, id);
         agentFiles["hardware_app.py"] = generatedHardwareAppV2(prompt, id, spec);
       }
-      agentFiles["hardware_app.py"] = injectHardwareAppContracts(agentFiles["hardware_app.py"], id);
+      agentFiles["hardware_app.py"] = injectHardwareAppContractsV2(agentFiles["hardware_app.py"], id);
 
       const spec = createAppSpec(prompt, id);
       const manifest = generatedManifestV2(prompt, id, spec, {
@@ -2683,27 +3836,71 @@ async function route(req, res) {
 
       // Write to disk
       await writeGeneratedFiles(GENERATED_DIR, agentFiles);
-      currentBuild = { id, prompt, files: agentFiles, dir: GENERATED_DIR, built: false, deployed: false, manifest };
+      let agentRun = transitionRun(createAgentRun({
+        prompt,
+        mode: "agent",
+        buildId: id,
+        hardwareMode: boardPassword ? "real" : "simulated",
+      }), AGENT_PHASES.CODE, {
+        spec: buildInitialSpec(prompt, { requireBoard: Boolean(boardPassword) }),
+      });
+      agentRun = appendEvidence(agentRun, {
+        phase: AGENT_PHASES.CODE,
+        ok: true,
+        summary: agentResult.summary || "agent code completed",
+        evidence: {
+          whatWorked: agentResult.whatWorked || [],
+          whatFailed: agentResult.whatFailed || [],
+          actionCount: agentResult.actions?.length || 0,
+        },
+        issues: [],
+      });
+      currentBuild = { id, prompt, files: agentFiles, dir: GENERATED_DIR, built: false, deployed: false, manifest, agentRun };
 
       // Auto-build
       try {
         await buildCurrent();
       } catch (buildErr) {
         console.error("[generate] Build error:", buildErr.message);
+        await appendServerLog("generate.agent.build_failed", { id, error: buildErr.message });
+        throw new Error(`Generated app failed validation: ${buildErr.message}`);
       }
+      recordAgentLearning({
+        prompt,
+        agentResult,
+        verificationResult: currentBuild.buildEvidence || null,
+        success: true,
+      });
 
       // Save to conversation
       const convId = body.conversation_id || null;
       if (convId) {
-        conversationStore.saveConversationFiles(convId, id, agentFiles);
+        try {
+          conversationStore.saveConversationFiles(convId, id, agentFiles);
+        } catch (saveErr) {
+          await appendServerLog("generate.agent.conversation_save_failed", {
+            id,
+            conversationId: convId,
+            error: saveErr.message,
+          });
+        }
       }
 
+      await appendServerLog("generate.agent.done", {
+        id,
+        actionCount: agentResult.actions?.length || 0,
+        durationMs: Date.now() - agentStartedAt,
+      });
       json(res, 200, {
         ok: true,
         id,
         files: agentFiles,
         manifest,
         source: "agent",
+        spec: currentBuild.agentRun?.spec || null,
+        evidence: formatRunEvidence(currentBuild.agentRun || {}),
+        buildEvidence: currentBuild.buildEvidence || null,
+        verificationMode: boardPassword ? "real-ready" : "local-simulated",
         agentSummary: agentResult.summary,
         agentActions: agentResult.actions.map(a => ({
           tool: a.tool,
@@ -2718,16 +3915,33 @@ async function route(req, res) {
       const manifest = await buildCurrent();
       // Capture preview screenshot after successful build
       capturePreview().catch(err => console.error("[build] preview capture failed:", err.message));
-      json(res, 200, { ok: true, summary: `${manifest.files.length} files`, manifest });
+      json(res, 200, {
+        ok: true,
+        summary: `${manifest.files.length} files`,
+        manifest,
+        buildEvidence: currentBuild?.buildEvidence || null,
+        evidence: formatRunEvidence(currentBuild?.agentRun || {}),
+      });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/deploy") {
       try {
         const body = await readBody(req);
         const deviceId = deviceIdFrom(body || {}, BOARD.id);
+        if (!hasBoardCredentials()) {
+          if (!currentBuild) await loadGeneratedBuild();
+          if (currentBuild && (!currentBuild.built || !currentBuild.buildEvidence)) await buildCurrent();
+          const result = buildOfflineDeployResult();
+          lastDeploy = result;
+          await appendServerLog("deploy.skipped", { id: currentBuild?.id || "", mode: result.mode });
+          json(res, 200, { ok: true, deviceId, ...result });
+          return;
+        }
         console.log("[deploy] Starting deploy...");
+        await appendServerLog("deploy.start", { id: currentBuild?.id || "", deviceId });
         const result = await withDeployLock(() => withDevice(deviceId, () => deployCurrent()));
         console.log("[deploy] Deploy completed successfully");
+        await appendServerLog("deploy.done", { id: result.id, goldenLoopOk: result.goldenLoop?.ok });
         json(res, 200, { ok: true, deviceId, ...result });
       } catch (error) {
         console.error("[deploy] Error:", error.message);
@@ -2780,6 +3994,11 @@ async function route(req, res) {
       const convId = url.pathname.split("/")[3];
       const { buildId, files } = conversationStore.loadConversationFiles(convId);
       json(res, 200, { ok: true, buildId, files });
+      return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/memory")) {
+      const convId = url.pathname.split("/")[3];
+      json(res, 200, { ok: true, project_memory: conversationStore.getProjectMemory(convId) });
       return;
     }
     if (req.method === "POST" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/messages")) {

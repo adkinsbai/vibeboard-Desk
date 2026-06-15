@@ -59,7 +59,7 @@
           <div class="chat-log" id="chatLog" aria-live="polite">
             <article class="msg agent">
               <div class="avatar">VB</div>
-              <p>告诉我你想在硬件上做什么。我会把需求拆成文件、做最小编译校验，然后通过 SSH 写入右侧连接的泰山派小屏。</p>
+              <p>告诉我你想在硬件上做什么。我会先理解任务、生成文件并完成本地验证；写入真机需要你之后单独确认。</p>
             </article>
           </div>
 
@@ -72,7 +72,7 @@
           <form class="composer" id="composer">
             <label for="promptInput">输入想做的硬件应用</label>
             <textarea id="promptInput" rows="3">做一个显示时间、天气、设备状态和一句 AI 摘要的小屏助手</textarea>
-            <button class="primary-btn wide" id="generateBtn" type="submit">生成 / 编译 / 写入硬件</button>
+            <button class="primary-btn wide" id="generateBtn" type="submit">开始执行任务</button>
           </form>
         </section>
 
@@ -230,6 +230,7 @@
     </div>
   </section>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="app.js"></script>
   <script src="mac-debug.js"></script>
 </body>

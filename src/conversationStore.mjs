@@ -49,6 +49,14 @@ export function createConversationStore(db, saveDb = () => {}) {
           FOREIGN KEY (conversation_id) REFERENCES conversations(id)
         )
       `);
+      db.run(`
+        CREATE TABLE IF NOT EXISTS project_memory (
+          conversation_id TEXT PRIMARY KEY,
+          memory_json TEXT NOT NULL,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+        )
+      `);
     },
 
     listConversations() {
@@ -61,6 +69,7 @@ export function createConversationStore(db, saveDb = () => {}) {
     },
 
     deleteConversation(id) {
+      run(db, saveDb, "DELETE FROM project_memory WHERE conversation_id = ?", [id]);
       run(db, saveDb, "DELETE FROM conversation_files WHERE conversation_id = ?", [id]);
       run(db, saveDb, "DELETE FROM messages WHERE conversation_id = ?", [id]);
       run(db, saveDb, "DELETE FROM conversations WHERE id = ?", [id]);
@@ -115,6 +124,65 @@ export function createConversationStore(db, saveDb = () => {}) {
 
     deleteConversationFiles(conversationId) {
       run(db, saveDb, "DELETE FROM conversation_files WHERE conversation_id = ?", [conversationId]);
+    },
+
+    getProjectMemory(conversationId) {
+      const rows = query(db, "SELECT memory_json FROM project_memory WHERE conversation_id = ?", [conversationId]);
+      if (!rows.length) return defaultProjectMemory();
+      try {
+        return normalizeProjectMemory(JSON.parse(rows[0].memory_json));
+      } catch {
+        return defaultProjectMemory();
+      }
+    },
+
+    setProjectMemory(conversationId, memory = {}) {
+      const normalized = normalizeProjectMemory(memory);
+      const serialized = JSON.stringify(normalized);
+      run(
+        db,
+        saveDb,
+        `INSERT INTO project_memory (conversation_id, memory_json, updated_at)
+         VALUES (?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(conversation_id) DO UPDATE SET memory_json = ?, updated_at = CURRENT_TIMESTAMP`,
+        [conversationId, serialized, serialized]
+      );
+      run(db, saveDb, "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [conversationId]);
+      return normalized;
     }
   };
+}
+
+export function defaultProjectMemory() {
+  return {
+    summary: "",
+    goal: "",
+    requirements: [],
+    constraints: [],
+    open_questions: [],
+    decisions: [],
+    build_prompt: "",
+  };
+}
+
+export function normalizeProjectMemory(memory = {}) {
+  const base = defaultProjectMemory();
+  return {
+    summary: stringValue(memory.summary || base.summary),
+    goal: stringValue(memory.goal || base.goal),
+    requirements: stringList(memory.requirements),
+    constraints: stringList(memory.constraints),
+    open_questions: stringList(memory.open_questions),
+    decisions: stringList(memory.decisions),
+    build_prompt: stringValue(memory.build_prompt || base.build_prompt),
+  };
+}
+
+function stringValue(value) {
+  return String(value || "").trim();
+}
+
+function stringList(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map(item => String(item || "").trim()).filter(Boolean))].slice(0, 20);
 }

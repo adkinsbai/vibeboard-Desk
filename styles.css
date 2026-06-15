@@ -16,7 +16,7 @@
   --red: #ef4444;
   --radius: 6px;
   --mono: "Cascadia Code", "Fira Code", Consolas, monospace;
-  --sans: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
+  --sans: "Segoe UI", "Noto Sans SC", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", system-ui, sans-serif;
   --sidebar-width: 240px;
 }
 
@@ -549,6 +549,25 @@ h2 {
 
 .stage.fail i {
   background: var(--red);
+}
+
+.work-log {
+  display: grid;
+  gap: 4px;
+  max-height: 130px;
+  overflow: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .03);
+}
+
+.work-log-item {
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .prompt-row {
@@ -1564,4 +1583,173 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.evidence-card {
+  background: rgba(56, 189, 248, .06);
+  border-color: rgba(56, 189, 248, .22);
+}
+
+.evidence-mode {
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid rgba(148, 163, 184, .24);
+  border-radius: 999px;
+  color: #cbd5e1;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.evidence-mode.real {
+  border-color: rgba(34, 197, 94, .36);
+  color: #86efac;
+}
+
+.evidence-mode.sim {
+  border-color: rgba(56, 189, 248, .34);
+  color: #7dd3fc;
+}
+
+.evidence-list {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(56, 189, 248, .16);
+  gap: 5px;
+}
+
+.evidence-item {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 24px;
+  color: var(--text-secondary, #94a3b8);
+  font-size: 12px;
+}
+
+.evidence-item b {
+  overflow: hidden;
+  color: #e2e8f0;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-item.pass b { color: #86efac; }
+.evidence-item.fail b { color: #fca5a5; }
+.evidence-item.skip b,
+.evidence-item.pending b { color: #facc15; }
+
+/* ─── Markdown Body ─── */
+.markdown-body {
+  font-family: var(--sans);
+  line-height: 1.65;
+  word-break: break-word;
+}
+.markdown-body h1 { font-size: 18px; margin: 12px 0 8px; font-weight: 700; border-bottom: 1px solid rgba(255,255,255,.1); padding-bottom: 4px; }
+.markdown-body h2 { font-size: 15px; margin: 12px 0 6px; font-weight: 600; }
+.markdown-body h3 { font-size: 14px; margin: 10px 0 4px; font-weight: 600; }
+.markdown-body p { margin: 6px 0; }
+.markdown-body strong { font-weight: 600; color: var(--text, #e2e8f0); }
+.markdown-body em { font-style: italic; opacity: .9; }
+.markdown-body ul, .markdown-body ol { margin: 6px 0; padding-left: 20px; }
+.markdown-body li { margin: 2px 0; }
+.markdown-body blockquote {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent, #6366f1);
+  background: rgba(99,102,241,.08);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--text-secondary, #94a3b8);
+  font-size: 13px;
+}
+.markdown-body code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: rgba(255,255,255,.08);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.markdown-body pre {
+  margin: 8px 0;
+  padding: 10px;
+  background: rgba(0,0,0,.3);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+.markdown-body pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.markdown-body a {
+  color: var(--accent, #6366f1);
+  text-decoration: none;
+}
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid rgba(255,255,255,.1);
+  margin: 12px 0;
+}
+.markdown-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.markdown-body th, .markdown-body td {
+  border: 1px solid rgba(255,255,255,.1);
+  padding: 6px 10px;
+  text-align: left;
+}
+.markdown-body th {
+  background: rgba(255,255,255,.05);
+  font-weight: 600;
+}
+
+/* ─── Inline Actions (buttons in chat) ─── */
+.inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0;
+}
+.inline-actions .btn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid rgba(255,255,255,.12);
+  transition: all .15s;
+  font-family: var(--sans);
+}
+.inline-actions .btn:hover {
+  transform: translateY(-1px);
+}
+.inline-actions .btn-primary {
+  background: var(--accent, #6366f1);
+  color: white;
+  border-color: var(--accent, #6366f1);
+}
+.inline-actions .btn-primary:hover {
+  background: #818cf8;
+}
+.inline-actions .btn-ghost {
+  background: var(--surface-2, rgba(255,255,255,.04));
+  color: var(--text-secondary, #94a3b8);
+}
+.inline-actions .btn-ghost:hover {
+  background: var(--surface-3, rgba(255,255,255,.08));
+  color: var(--text, #e2e8f0);
 }

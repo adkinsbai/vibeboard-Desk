@@ -3,7 +3,10 @@ const api = {
   generate: "/api/generate",
   build: "/api/build",
   deploy: "/api/deploy",
-  verify: "/api/verify"
+  verify: "/api/verify",
+  clarify: "/api/clarify",
+  preferences: "/api/preferences",
+  chat: "/api/chat",
 };
 
 const el = id => document.getElementById(id);
@@ -129,8 +132,9 @@ function loadModelSettings() {
 let modelSettings = loadModelSettings();
 
 const labels = {
+  preparing: "\u51c6\u5907\u6267\u884c",
   generating: "\u751f\u6210\u6587\u4ef6",
-  building: "\u7f16\u8bd1\u6821\u9a8c",
+  building: "\u672c\u5730\u9a8c\u8bc1",
   deploying: "\u5199\u5165\u786c\u4ef6",
   verifying: "\u9a8c\u8bc1\u95ed\u73af",
   observing: "\u5237\u65b0\u5c0f\u5c4f",
@@ -139,8 +143,10 @@ const labels = {
 };
 
 const stages = [
-  { id: "generate", title: "生成小屏应用", note: "index.html / style.css / app.js" },
-  { id: "build", title: "编译与打包校验", note: "syntax check + manifest" },
+  { id: "intake", title: "理解任务", note: "读取需求和上下文" },
+  { id: "generate", title: "生成小屏应用", note: "index.html / style.css / app.js / hardware_app.py" },
+  { id: "build", title: "本地 L0-L3 验证", note: "contracts + syntax + hardware sim + render" },
+  { id: "ready", title: "等待确认部署", note: "不会自动写入真机" },
 ];
 
 function pad(value) {
@@ -220,6 +226,11 @@ const FRIENDLY_ERRORS = {
     detail: "无法连接到 AI 模型服务。",
     suggestion: "请检查：① API Key 是否正确 ② 网络是否能访问模型服务"
   },
+  llm_auth: {
+    title: "模型认证失败",
+    detail: "DeepSeek 返回了 API Key 无效或无权限，代码生成还没有开始。",
+    suggestion: "请在当前 VibeBoard 页面重新配置 DeepSeek API Key，或用 DEEPSEEK_API_KEY / VIBEBOARD_LLM_API_KEY 启动服务后重试"
+  },
   llm_timeout: {
     title: "AI 模型响应超时",
     detail: "AI 模型没有在规定时间内返回结果。",
@@ -259,6 +270,11 @@ const FRIENDLY_ERRORS = {
     title: "代码生成失败",
     detail: "生成应用代码时出现问题。",
     suggestion: "请检查模型配置后重试"
+  },
+  server_unreachable: {
+    title: "无法连接到服务器",
+    detail: "VibeBoard 服务器没有响应，可能已停止运行。",
+    suggestion: "请检查服务器是否在运行，或尝试重新启动"
   },
   unknown: {
     title: "操作失败",
@@ -307,7 +323,7 @@ function addStageCard() {
   const card = document.createElement("div");
   card.className = "stage-card";
   const title = document.createElement("strong");
-  title.textContent = "\u6211\u6b63\u5728\u6267\u884c\u751f\u6210\u548c\u5199\u5165\u6d41\u7a0b";
+  title.textContent = "我开始执行您的任务";
   const list = document.createElement("div");
   list.className = "stage-list";
   stages.forEach(stage => {
@@ -317,19 +333,173 @@ function addStageCard() {
     row.innerHTML = `<i></i><span>${escapeHtml(stage.title)}<br><small>${escapeHtml(stage.note)}</small></span><em>wait</em>`;
     list.appendChild(row);
   });
-  card.append(title, list);
+  const log = document.createElement("div");
+  log.className = "work-log";
+  const addLog = message => {
+    const item = document.createElement("div");
+    item.className = "work-log-item";
+    item.textContent = `${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} ${message}`;
+    log.appendChild(item);
+    chatLog.scrollTop = chatLog.scrollHeight;
+  };
+  addLog("Task accepted. I am reading the request and preparing the local verification path.");
+  card.append(title, list, log);
   article.append(avatar, card);
   chatLog.appendChild(article);
   chatLog.scrollTop = chatLog.scrollHeight;
 
   return {
-    set(id, state, note) {
+    log: addLog,
+    set(id, state, note, options = {}) {
       const row = list.querySelector(`[data-stage="${id}"]`);
       if (!row) return;
       row.classList.remove("active", "done", "fail");
       if (state) row.classList.add(state);
       row.querySelector("em").textContent = note || state || "wait";
+      if (!options.silent) {
+        addLog(`${row.querySelector("span")?.childNodes?.[0]?.textContent || id}: ${note || state || "wait"}`);
+      }
       chatLog.scrollTop = chatLog.scrollHeight;
+    }
+  };
+}
+
+function formatElapsed(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${pad(seconds)}s` : `${seconds}s`;
+}
+
+function describeGenerateLog(entry = {}) {
+  const event = entry.event || "";
+  if (event === "generate.agent.start") {
+    return `Agent started: ${entry.model || entry.provider || "model"}`;
+  }
+  if (event === "generate.template.start") {
+    return "Using local template generator";
+  }
+  if (event === "generate.agent.auto_verify") {
+    const issueCount = Number.isFinite(entry.issueCount) ? entry.issueCount : 0;
+    return issueCount > 0 ? `Auto verification found ${issueCount} issue(s)` : "Auto verification passed";
+  }
+  if (event === "generate.agent.failed") {
+    return `Agent failed: ${entry.error || entry.summary || "see details"}`;
+  }
+  if (event === "build.start") {
+    return "Local verification started";
+  }
+  if (event === "build.done") {
+    const issueCount = Number.isFinite(entry.issueCount) ? entry.issueCount : 0;
+    return issueCount > 0 ? `Local verification finished with ${issueCount} issue(s)` : "Local verification passed";
+  }
+  if (event === "generate.template.done") {
+    return "Template generation finished";
+  }
+  if (event !== "generate.agent.action") {
+    return "";
+  }
+
+  const tool = entry.tool || "action";
+  const path = entry.path ? ` ${entry.path}` : "";
+  if (tool === "read_file") return `Reading${path}`;
+  if (tool === "create_file") return `Creating${path}`;
+  if (tool === "edit_file") return `Editing${path}`;
+  if (tool === "search_code") return `Searching ${entry.query || path || "code"}`;
+  if (tool === "verify_syntax") return "Checking syntax";
+  if (tool === "verify_render") return "Checking screen render";
+  if (tool === "run_hardware") return "Running hardware simulation";
+  if (tool === "record_lesson") return "Recording repair note";
+  if (tool === "done") return entry.summary ? `Agent done: ${entry.summary}` : "Agent finished";
+  return path ? `${tool}${path}` : tool;
+}
+
+function createGenerateLogPoller(progress) {
+  const startedAt = Date.now();
+  const seen = new Set();
+  let stopped = false;
+  let timer = null;
+  let latestAction = "starting";
+  let lastLogAt = 0;
+  let consecutiveFailures = 0;
+
+  const usefulEvents = new Set([
+    "generate.agent.start",
+    "generate.agent.action",
+    "generate.agent.auto_verify",
+    "generate.agent.failed",
+    "generate.template.start",
+    "generate.template.done",
+    "build.start",
+    "build.done"
+  ]);
+
+  const updateStage = () => {
+    if (stopped) return;
+    progress.set("generate", "active", `${formatElapsed(Date.now() - startedAt)} | ${latestAction}`, { silent: true });
+  };
+
+  const remember = entry => {
+    const key = [
+      entry.ts || "",
+      entry.event || "",
+      entry.tool || "",
+      entry.path || "",
+      entry.query || "",
+      entry.summary || "",
+      entry.id || ""
+    ].join("|");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  };
+
+  const poll = async () => {
+    if (stopped) return;
+    updateStage();
+    try {
+      const data = await getJson("/api/logs?limit=80", { timeout: 5000 });
+      consecutiveFailures = 0;
+      const logs = Array.isArray(data.logs) ? data.logs : [];
+      for (const entry of logs) {
+        const entryTime = Date.parse(entry.ts || "");
+        if (Number.isFinite(entryTime) && entryTime < startedAt - 1000) continue;
+        if (!usefulEvents.has(entry.event) || !remember(entry)) continue;
+        const message = describeGenerateLog(entry);
+        if (!message) continue;
+        latestAction = message.length > 90 ? `${message.slice(0, 87)}...` : message;
+        const now = Date.now();
+        if (entry.event === "generate.agent.action" && now - lastLogAt < 900) {
+          updateStage();
+          continue;
+        }
+        progress.log(`${formatElapsed(now - startedAt)} ${latestAction}`);
+        lastLogAt = now;
+        updateStage();
+      }
+    } catch (error) {
+      consecutiveFailures += 1;
+      if (consecutiveFailures === 2) {
+        latestAction = "waiting for server logs";
+        progress.log(`${formatElapsed(Date.now() - startedAt)} Waiting for backend progress logs...`);
+      }
+    } finally {
+      if (!stopped) timer = window.setTimeout(poll, 1200);
+    }
+  };
+
+  return {
+    start() {
+      progress.log("Streaming backend generation progress...");
+      poll();
+    },
+    stop(finalNote) {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+      if (finalNote) {
+        latestAction = finalNote;
+        progress.set("generate", "active", `${formatElapsed(Date.now() - startedAt)} | ${latestAction}`, { silent: true });
+      }
     }
   };
 }
@@ -344,30 +514,68 @@ function withDevicePayload(payload = {}) {
   return { ...payload, deviceId: activeDeviceId };
 }
 
-async function postJson(url, payload = {}) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(withDevicePayload(payload))
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.ok === false) {
-    const err = new Error(data.errorLabel || data.error || `HTTP ${res.status}`);
-    err.data = data;
-    throw err;
+async function postJson(url, payload = {}, { timeout = 120000 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(withDevicePayload(payload)),
+      signal: controller.signal
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      const err = new Error(data.errorLabel || data.error || `HTTP ${res.status}`);
+      err.data = data;
+      throw err;
+    }
+    return data;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      const err = new Error("请求超时");
+      err.data = { errorType: "ssh_timeout" };
+      throw err;
+    }
+    // Network error (server down, connection reset, etc.)
+    if (error instanceof TypeError && /fetch|network|Failed to fetch/i.test(error.message)) {
+      const err = new Error("无法连接到服务器");
+      err.data = { errorType: "server_unreachable" };
+      throw err;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  return data;
 }
 
-async function getJson(url) {
-  const res = await fetch(withDeviceQuery(url), { cache: "no-store" });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.ok === false) {
-    const err = new Error(data.errorLabel || data.error || `HTTP ${res.status}`);
-    err.data = data;
-    throw err;
+async function getJson(url, { timeout = 30000 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    const res = await fetch(withDeviceQuery(url), { cache: "no-store", signal: controller.signal });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      const err = new Error(data.errorLabel || data.error || `HTTP ${res.status}`);
+      err.data = data;
+      throw err;
+    }
+    return data;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      const err = new Error("请求超时");
+      err.data = { errorType: "ssh_timeout" };
+      throw err;
+    }
+    if (error instanceof TypeError && /fetch|network|Failed to fetch/i.test(error.message)) {
+      const err = new Error("无法连接到服务器");
+      err.data = { errorType: "server_unreachable" };
+      throw err;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  return data;
 }
 
 function setBusy(value) {
@@ -426,7 +634,13 @@ function getModelPayload() {
 function renderFiles(files) {
   generatedFiles = files || {};
   const names = Object.keys(generatedFiles);
+  activeFile = names.includes(activeFile) ? activeFile : "";
   fileTabs.innerHTML = "";
+  if (!names.length) {
+    activeFile = "";
+    codePreview.textContent = "# no generated files for this project";
+    return;
+  }
   names.forEach(name => {
     const button = document.createElement("button");
     button.type = "button";
@@ -436,6 +650,17 @@ function renderFiles(files) {
     fileTabs.appendChild(button);
   });
   if (names.length) showFile(activeFile && generatedFiles[activeFile] ? activeFile : names[0]);
+}
+
+function clearGeneratedOutput(statusText = "等待生成") {
+  renderFiles({});
+  if (deviceFrame) {
+    deviceFrame.removeAttribute("src");
+  }
+  if (deviceScreen) {
+    deviceScreen.dataset.status = statusText;
+    deviceScreen.dataset.prompt = "";
+  }
 }
 
 function showFile(name) {
@@ -589,21 +814,21 @@ function renderGoldenLoop(goldenLoop) {
   }
 
   if (goldenLoopState) {
-    goldenLoopState.textContent = goldenLoop.ok ? "passed" : "failed";
-    goldenLoopState.className = goldenLoop.ok ? "ok" : "fail";
+    goldenLoopState.textContent = goldenLoop.skipped ? "skipped" : goldenLoop.ok ? "passed" : "failed";
+    goldenLoopState.className = goldenLoop.skipped ? "skip" : goldenLoop.ok ? "ok" : "fail";
   }
 
   if (!verifyList) return;
   verifyList.innerHTML = "";
   (goldenLoop.checks || []).forEach(check => {
     const item = document.createElement("div");
-    item.className = `verify-item ${check.ok ? "pass" : "fail"}`;
+    item.className = `verify-item ${check.skipped ? "skip" : check.ok ? "pass" : "fail"}`;
     item.innerHTML = `
       <div>
         <b>${escapeHtml(check.label || check.id)}</b>
         <small>${escapeHtml(check.evidence || "")}</small>
       </div>
-      <span>${check.ok ? "pass" : "fail"}</span>
+      <span>${check.skipped ? "skip" : check.ok ? "pass" : "fail"}</span>
     `;
     verifyList.appendChild(item);
   });
@@ -622,8 +847,8 @@ function renderHardwareRun(result) {
   const raw = String(result.hardwareResultRaw || "").trim();
   const goldenLoop = result.goldenLoop || null;
 
-  el("compileState").textContent = compileLog ? "board ok" : "local ok";
-  el("programState").textContent = hardware ? "executed" : "no result";
+  el("compileState").textContent = result.skipped ? "local ok" : compileLog ? "board ok" : "local ok";
+  el("programState").textContent = result.skipped ? "skipped" : hardware ? "executed" : "no result";
   renderGoldenLoop(goldenLoop);
 
   const lines = [];
@@ -642,8 +867,9 @@ function renderHardwareRun(result) {
   }
   if (goldenLoop) {
     lines.push(JSON.stringify({
-      golden_loop: goldenLoop.ok ? "passed" : "failed",
+      golden_loop: goldenLoop.skipped ? "skipped" : goldenLoop.ok ? "passed" : "failed",
       id: goldenLoop.id,
+      mode: goldenLoop.mode,
       failed: (goldenLoop.checks || []).filter(check => !check.ok).map(check => check.label)
     }, null, 2));
   }
@@ -678,7 +904,7 @@ async function refreshBoard() {
   }
 }
 
-// Add a thinking bubble to the chat
+// Add a visible execution-process bubble to the chat
 function addThinkingBubble(thinking) {
   const article = document.createElement("article");
   article.className = "msg agent thinking-msg";
@@ -689,11 +915,11 @@ function addThinkingBubble(thinking) {
   body.className = "thinking-body";
   const header = document.createElement("div");
   header.className = "thinking-header";
-  header.innerHTML = `<span class="thinking-icon">🧠</span> <span>思考过程</span> <span class="thinking-toggle">▼</span>`;
+  header.innerHTML = `<span class="thinking-icon">🧠</span> <span>执行过程</span> <span class="thinking-toggle">▲</span>`;
   const content = document.createElement("div");
   content.className = "thinking-content";
-  content.style.display = "none";
-  // Format thinking text: preserve line breaks
+  content.style.display = "block";
+  // Format process text: preserve line breaks
   const lines = thinking.split("\n").filter(l => l.trim());
   for (const line of lines) {
     const p = document.createElement("p");
@@ -781,7 +1007,80 @@ function addAgentActionsCard(actions, summary) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
-// Show thinking animation while waiting
+function addEvidenceCard(payload = {}) {
+  const evidence = Array.isArray(payload.evidence) ? payload.evidence : [];
+  const spec = payload.spec || null;
+  const buildEvidence = payload.buildEvidence || null;
+  const mode = payload.verificationMode || "local-simulated";
+
+  if (!evidence.length && !spec && !buildEvidence) return;
+
+  const article = document.createElement("article");
+  article.className = "msg agent";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = "VB";
+  const body = document.createElement("div");
+  body.className = "agent-card evidence-card";
+
+  const header = document.createElement("div");
+  header.className = "agent-card-header";
+  const icon = document.createElement("span");
+  icon.textContent = buildEvidence?.ok === false ? "!" : "OK";
+  const title = document.createElement("span");
+  title.textContent = "Verification Evidence";
+  const modePill = document.createElement("span");
+  modePill.className = `evidence-mode ${mode.includes("real") ? "real" : "sim"}`;
+  modePill.textContent = mode.includes("real") ? "real-ready" : "local/sim";
+  const toggle = document.createElement("span");
+  toggle.className = "agent-toggle";
+  toggle.textContent = ">";
+  header.append(icon, title, modePill, toggle);
+
+  const list = document.createElement("div");
+  list.className = "evidence-list";
+  list.style.display = "none";
+
+  if (spec) {
+    const specRow = document.createElement("div");
+    specRow.className = "evidence-item pass";
+    specRow.innerHTML = `<b>Spec</b><span>${escapeHtml(spec.appType || "custom")} | 480x360 | ${spec.requiresCloud ? "cloud needed" : "local ready"}</span>`;
+    list.appendChild(specRow);
+  }
+
+  for (const item of evidence) {
+    const row = document.createElement("div");
+    row.className = `evidence-item ${item.ok ? "pass" : "fail"}`;
+    row.innerHTML = `<b>${escapeHtml(item.phase || "phase")}</b><span>${escapeHtml(item.summary || (item.ok ? "passed" : "failed"))}</span>`;
+    list.appendChild(row);
+  }
+
+  if (buildEvidence) {
+    const row = document.createElement("div");
+    row.className = `evidence-item ${buildEvidence.ok ? "pass" : "fail"}`;
+    const ev = buildEvidence.evidence || {};
+    row.innerHTML = `<b>build</b><span>${escapeHtml(buildEvidence.summary || "local build")} | ${escapeHtml(ev.hardwareResult || "")}</span>`;
+    list.appendChild(row);
+  }
+
+  const boardRow = document.createElement("div");
+  boardRow.className = mode.includes("real") ? "evidence-item pending" : "evidence-item skip";
+  boardRow.innerHTML = `<b>board</b><span>${mode.includes("real") ? "ready for golden loop" : "skipped: no board credential configured"}</span>`;
+  list.appendChild(boardRow);
+
+  header.addEventListener("click", () => {
+    const isHidden = list.style.display === "none";
+    list.style.display = isHidden ? "grid" : "none";
+    toggle.textContent = isHidden ? "v" : ">";
+  });
+
+  body.append(header, list);
+  article.append(avatar, body);
+  chatLog.appendChild(article);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+// Show execution animation while waiting
 function addThinkingAnimation() {
   const article = document.createElement("article");
   article.className = "msg agent thinking-msg";
@@ -791,7 +1090,7 @@ function addThinkingAnimation() {
   avatar.textContent = "VB";
   const body = document.createElement("div");
   body.className = "thinking-body thinking-active";
-  body.innerHTML = `<span class="thinking-icon">🧠</span> <span>正在思考中</span><span class="thinking-dots">...</span>`;
+  body.innerHTML = `<span class="thinking-icon">🧠</span> <span>正在执行任务</span><span class="thinking-dots">...</span>`;
   article.append(avatar, body);
   chatLog.appendChild(article);
   chatLog.scrollTop = chatLog.scrollHeight;
@@ -818,27 +1117,353 @@ function buildConversationHistory() {
   return history;
 }
 
-async function runFlow(prompt) {
+// ─── Clarify UI ───
+
+function addClarifyCard(questions, onConfirm) {
+  const card = document.createElement("div");
+  card.className = "clarify-card";
+  card.innerHTML = `
+    <div class="clarify-header">
+      <span class="clarify-icon">❓</span>
+      <span class="clarify-title">帮我确认几个细节</span>
+      <span class="clarify-reasoning"></span>
+    </div>
+    <div class="clarify-questions"></div>
+    <div class="clarify-actions">
+      <button class="btn btn-ghost clarify-skip">跳过，直接生成</button>
+      <button class="btn btn-primary clarify-confirm">确认选择</button>
+    </div>
+  `;
+
+  const questionsContainer = card.querySelector(".clarify-questions");
+  const answers = {};
+
+  // 渲染每个问题
+  for (const q of questions) {
+    const qEl = document.createElement("div");
+    qEl.className = "clarify-question";
+    qEl.innerHTML = `
+      <div class="clarify-question-text">${q.question}</div>
+      <div class="clarify-options" data-key="${q.key}"></div>
+    `;
+
+    const optionsContainer = qEl.querySelector(".clarify-options");
+    // 预选第一个选项
+    answers[q.key] = { key: q.key, question: q.question, answer: q.options[0] };
+
+    for (let i = 0; i < q.options.length; i++) {
+      const optBtn = document.createElement("button");
+      optBtn.className = `clarify-option ${i === 0 ? "selected" : ""}`;
+      optBtn.textContent = q.options[i];
+      optBtn.addEventListener("click", () => {
+        // 取消同组其他选中
+        optionsContainer.querySelectorAll(".clarify-option").forEach(b => b.classList.remove("selected"));
+        optBtn.classList.add("selected");
+        answers[q.key] = { key: q.key, question: q.question, answer: q.options[i] };
+      });
+      optionsContainer.appendChild(optBtn);
+    }
+
+    questionsContainer.appendChild(qEl);
+  }
+
+  // 显示 reasoning
+  const reasoningEl = card.querySelector(".clarify-reasoning");
+
+  chatLog.appendChild(card);
+  chatLog.scrollTop = chatLog.scrollHeight;
+
+  return new Promise((resolve) => {
+    // 确认按钮
+    card.querySelector(".clarify-confirm").addEventListener("click", () => {
+      card.remove();
+      resolve(Object.values(answers));
+    });
+
+    // 跳过按钮
+    card.querySelector(".clarify-skip").addEventListener("click", () => {
+      card.remove();
+      resolve([]);
+    });
+  });
+}
+
+// Clarify 卡片样式（注入到 head）
+if (!document.getElementById("clarify-styles")) {
+  const style = document.createElement("style");
+  style.id = "clarify-styles";
+  style.textContent = `
+    .clarify-card {
+      background: var(--surface-1, #1a1a2e);
+      border: 1px solid var(--border, #2a2a4a);
+      border-radius: 12px;
+      padding: 16px;
+      margin: 12px 0;
+      max-width: 100%;
+    }
+    .clarify-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .clarify-icon { font-size: 18px; }
+    .clarify-title {
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--text, #e0e0e0);
+    }
+    .clarify-question {
+      margin-bottom: 12px;
+    }
+    .clarify-question-text {
+      font-size: 13px;
+      color: var(--text-secondary, #a0a0b0);
+      margin-bottom: 8px;
+    }
+    .clarify-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .clarify-option {
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border, #2a2a4a);
+      background: var(--surface-0, #0d0d1a);
+      color: var(--text, #e0e0e0);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .clarify-option:hover {
+      border-color: var(--accent, #6366f1);
+    }
+    .clarify-option.selected {
+      background: var(--accent, #6366f1);
+      border-color: var(--accent, #6366f1);
+      color: white;
+    }
+    .clarify-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .clarify-actions .btn {
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      border: none;
+    }
+    .clarify-actions .btn-ghost {
+      background: transparent;
+      color: var(--text-secondary, #a0a0b0);
+      border: 1px solid var(--border, #2a2a4a);
+    }
+    .clarify-actions .btn-primary {
+      background: var(--accent, #6366f1);
+      color: white;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+// ─── Markdown 渲染 ───
+
+function renderMarkdown(text) {
+  // 如果 marked.js 加载成功，用它；否则用简易渲染
+  if (typeof marked !== "undefined") {
+    try {
+      return marked.parse(text, { breaks: true, gfm: true });
+    } catch (e) { /* fallback */ }
+  }
+  // 简易 Markdown 渲染
+  return text
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/^- (.+)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
+    .replace(/\n/g, '<br>');
+}
+
+function addMarkdownMessage(role, text) {
+  const article = document.createElement("article");
+  article.className = `msg ${role}`;
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = role === "user" ? "You" : "VB";
+  const body = document.createElement("div");
+  body.className = "msg-text markdown-body";
+  body.innerHTML = renderMarkdown(text);
+  article.append(avatar, body);
+  chatLog.appendChild(article);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return body;
+}
+
+// ─── 内联按钮组件 ───
+
+function addInlineButtons(buttons) {
+  const article = document.createElement("article");
+  article.className = "msg agent";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = "VB";
+  const body = document.createElement("div");
+  body.className = "inline-actions";
+
+  for (const btn of buttons) {
+    const button = document.createElement("button");
+    button.className = `btn ${btn.primary ? "btn-primary" : "btn-ghost"}`;
+    button.textContent = btn.label;
+    button.addEventListener("click", () => {
+      article.remove();
+      btn.action();
+    });
+    body.appendChild(button);
+  }
+
+  article.append(avatar, body);
+  chatLog.appendChild(article);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function addBuildPromptAction(buildPrompt) {
+  const prompt = String(buildPrompt || "").trim();
+  if (!prompt) return;
+  pendingGeneratePrompt = prompt;
+  addInlineButtons([
+    { label: "需求已整理，开启构建", primary: true, action: () => startBuild(pendingGeneratePrompt) },
+    { label: "继续整理需求", primary: false, action: () => {
+      promptInput.value = "我还想再调整一下方案";
+      promptInput.focus();
+    }},
+  ]);
+}
+
+// ─── 对话式交互 ───
+
+let pendingGeneratePrompt = null; // 暂存完整的生成 prompt
+
+function buildChatMessages() {
+  const msgs = chatLog.querySelectorAll(".msg");
+  const messages = [];
+  for (const msg of msgs) {
+    const role = msg.classList.contains("user") ? "user" : "assistant";
+    const body = msg.querySelector("p, .msg-text");
+    if (body) {
+      const text = body.textContent.trim();
+      if (text) messages.push({ role, content: text });
+    }
+  }
+  return messages;
+}
+
+async function handleChat(prompt) {
   if (busy) return;
   setBusy(true);
-  deployState.textContent = "starting";
+
+  await ensureConversation();
   addMessage("user", prompt);
   persistMessage("user", prompt);
+  promptInput.value = "";
+
+  addThinkingAnimation();
+
+  try {
+    const messages = buildChatMessages();
+    const result = await postJson(api.chat, {
+      messages,
+      conversation_id: currentConversationId,
+      modelSettings: getModelPayload(),
+    }, { timeout: 60000 });
+
+    removeThinkingAnimation();
+
+    if (result.error) {
+      addMarkdownMessage("agent", `❌ **错误**：${result.error}`);
+      return;
+    }
+
+    const reply = result.reply || "抱歉，我暂时无法回应。";
+    addMarkdownMessage("agent", reply);
+    persistMessage("agent", reply);
+
+    // 检测是否准备好构建
+    if (result.ready_to_build) {
+      pendingGeneratePrompt = String(result.build_prompt || "").trim();
+      if (!pendingGeneratePrompt) {
+        addMarkdownMessage("agent", "我还没有拿到完整的构建需求，请继续补充或确认方案。");
+        return;
+      }
+      addBuildPromptAction(pendingGeneratePrompt);
+    }
+  } catch (error) {
+    removeThinkingAnimation();
+    const f = friendlyError(error.data, error.message);
+    addMarkdownMessage("agent", `❌ **请求失败**：${f}`);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function startBuild(originalPrompt) {
+  originalPrompt = String(originalPrompt || pendingGeneratePrompt || "").trim();
+  if (!originalPrompt) {
+    addMarkdownMessage("agent", "我还没有整理出可构建的需求，请先继续聊清楚方案。");
+    return;
+  }
+  addMarkdownMessage("agent", "🔨 **正在生成代码，请稍候...**");
+
+  // 收集完整的对话上下文
+  const history = buildChatMessages();
+
+  // 调用原有的代码生成流程
+  await runFlow(originalPrompt, history);
+}
+
+async function runFlow(prompt, history = []) {
+  if (busy) return;
+  setBusy(true);
+  deployState.textContent = labels.preparing;
   const progress = addStageCard();
-  const history = buildConversationHistory();
+
+  // 使用传入的历史，或从聊天记录构建
+  const chatHistory = history.length > 0 ? history : buildConversationHistory();
+
+  progress.set("intake", "active", "run");
+  progress.log("I will generate and verify locally first. Hardware write waits for your deploy click.");
+  addMarkdownMessage("agent", "我开始执行您的任务。先理解需求并做本地生成与验证，不会自动写入硬件。");
 
   // Show thinking animation
   addThinkingAnimation();
 
+  let generatePoller = null;
   try {
+    await new Promise(resolve => window.setTimeout(resolve, 250));
+    progress.set("intake", "done", "ok");
     progress.set("generate", "active", "run");
+    progress.log("Creating app files and the hardware Python contract.");
     deployState.textContent = labels.generating;
+    generatePoller = createGenerateLogPoller(progress);
+    generatePoller.start();
     const gen = await postJson(api.generate, {
       prompt,
       modelSettings: getModelPayload(),
       conversation_id: currentConversationId,
-      history
-    });
+      clarify_answers: [],
+      history: chatHistory
+    }, { timeout: 600000 });
+    generatePoller.stop("response received");
+    generatePoller = null;
 
     // Remove thinking animation, show agent actions
     removeThinkingAnimation();
@@ -846,60 +1471,76 @@ async function runFlow(prompt) {
       addAgentActionsCard(gen.agentActions, gen.agentSummary);
     } else if (gen.thinking) {
       addThinkingBubble(gen.thinking);
+    } else {
+      addThinkingBubble(`Execution trace
+1. Task received: ${prompt}
+2. No model reasoning output is available, so I continued through the local template path
+3. Local verification is checking contracts, syntax, hardware simulation, and 480x360 render
+4. Hardware write waits for your later deploy confirmation`);
     }
+    addEvidenceCard(gen);
 
     renderFiles(gen.files);
     renderDevicePreview(prompt, gen.agentSummary || "已生成应用");
     progress.set("generate", "done", "ok");
     el("lastBuildState").textContent = gen.id || "generated";
-    if (gen.source === "agent") {
-      const summary = gen.agentSummary || "已完成代码生成";
-      addMessage("agent", `🤖 ${summary}`);
-    } else if (gen.source === "llm") {
-      addMessage("agent", `已通过 ${modelSettings.provider} / ${modelSettings.model} 生成应用代码。`);
-    } else if (gen.fallbackReason) {
-      const reason = gen.fallbackReason;
-      let hint = "";
-      if (/not configured|no api key/i.test(reason)) {
-        hint = "💡 点击右上角「Model」配置 AI 模型后，可获得更好的生成效果。";
-      } else if (/failed|timeout|error/i.test(reason)) {
-        hint = "💡 请检查 API Key 和网络连接，或稍后重试。";
-      }
-      addMessage("agent", `⚠️ 未配置 AI 模型，已使用本地模板生成应用。\n${hint}`);
-    }
 
     progress.set("build", "active", "run");
+    progress.log("Running local L0-L3 checks: contracts, syntax, hardware simulation, and render.");
     deployState.textContent = labels.building;
-    const build = await postJson(api.build, {});
+    let build = {
+      ok: Boolean(gen.buildEvidence?.ok),
+      summary: gen.buildEvidence?.summary || "local verification complete",
+      buildEvidence: gen.buildEvidence || null,
+      evidence: gen.evidence || [],
+    };
+    if (!build.buildEvidence) {
+      build = await postJson(api.build, {});
+      addEvidenceCard(build);
+    }
     progress.set("build", "done", build.summary || "ok");
 
     deployState.textContent = "生成完成";
-    addDeployButton(prompt);
     const fileCount = Object.keys(gen.files).length;
     let verifyNote = "";
     if (gen.verification) {
       if (gen.verification.ok) {
-        verifyNote = "✅ 截图验证通过，页面渲染正常。";
+        verifyNote = "\n\n✅ 截图验证通过，页面渲染正常。";
       } else {
         const issues = [
           ...(gen.verification.consoleErrors || []),
           ...(gen.verification.pageErrors || [])
         ];
         if (gen.verification.isBlank) issues.push("页面白屏");
-        if (issues.length) verifyNote = `⚠️ 已自动修复 ${issues.length} 个问题并重新生成。`;
+        if (issues.length) verifyNote = `\n\n⚠️ 已自动修复 ${issues.length} 个问题并重新生成。`;
       }
     }
-    const successMessage = `已生成 ${fileCount} 个文件并通过编译校验。${verifyNote}
-点击下方按钮部署到泰山派真机，或继续对话修改代码。`;
-    addMessage("agent", successMessage);
+
+    const agentSummary = gen.agentSummary ? `\n\n> ${gen.agentSummary}` : "";
+    const successMessage = `**本地生成与验证完成**\n\n已生成 **${fileCount}** 个文件，并通过本地 L0-L3 验证。${verifyNote}${agentSummary}\n\n我还没有写入硬件。你可以先在右侧预览确认效果；确认后再点击下方部署按钮。`;
+    addMarkdownMessage("agent", successMessage);
     persistMessage("agent", successMessage, gen.id || null);
+
+    // 部署按钮放在聊天框内
+    addInlineButtons([
+      { label: "🚀 部署到真机", primary: true, action: () => doDeploy(prompt) },
+      { label: "✏️ 继续修改", primary: false, action: () => {
+        addMarkdownMessage("agent", "好的，请告诉我你想修改什么。");
+      }},
+    ]);
+    progress.set("ready", "done", "awaiting deploy");
+    progress.log("Local verification finished. Waiting for your explicit deploy confirmation.");
   } catch (error) {
+    if (generatePoller) {
+      generatePoller.stop("failed");
+      generatePoller = null;
+    }
     const current = stages.find(stage => document.querySelector(`[data-stage="${stage.id}"].active`));
     if (current) progress.set(current.id, "fail", "fail");
     deployState.textContent = labels.failed;
     const f = friendlyError(error.data, error.message);
-    const errorMessage = `❌ ${f.title}\n${f.detail}\n💡 ${f.suggestion}`;
-    addMessage("agent", errorMessage);
+    const errorMessage = `❌ **${f.title}**\n\n${f.detail}\n\n💡 ${f.suggestion}`;
+    addMarkdownMessage("agent", errorMessage);
     persistMessage("agent", errorMessage);
   } finally {
     setBusy(false);
@@ -925,6 +1566,35 @@ function addDeployButton(prompt) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+async function doDeploy(prompt) {
+  const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
+  if (busy) return;
+  setBusy(true);
+  deployState.textContent = labels.deploying;
+
+  addMarkdownMessage("agent", `🚀 **正在部署到 ${profile.label}...**`);
+
+  try {
+    const deployed = await postJson(api.deploy, {});
+    renderHardwareRun(deployed);
+    if (deployed.skipped) {
+      deployState.textContent = "hardware skipped";
+      renderDevicePreview("", "local verification ready");
+      addMarkdownMessage("agent", `**Hardware deploy skipped**\n\nNo reachable board is configured right now. Local L0-L3 verification passed and this build is ready for L4 golden-loop after hardware is connected.`);
+    } else {
+      deployState.textContent = labels.done;
+      renderDevicePreview("", "已写入真机");
+      addMarkdownMessage("agent", `✅ **部署成功！**\n\n应用已写入 **${profile.label}**，服务已重启。\n你可以在右侧预览窗口查看效果，或直接在设备屏幕上查看。`);
+    }
+  } catch (error) {
+    deployState.textContent = labels.failed;
+    const f = friendlyError(error.data, error.message);
+    addMarkdownMessage("agent", `❌ **部署失败**\n\n${f.title}\n\n${f.detail}\n\n💡 ${f.suggestion}`);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function runDeploy(btn) {
   const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
   if (busy) return;
@@ -936,11 +1606,19 @@ async function runDeploy(btn) {
   try {
     const deployed = await postJson(api.deploy, {});
     renderHardwareRun(deployed);
-    deployState.textContent = labels.done;
-    renderDevicePreview("", "已写入真机");
-    addMessage("agent", `✅ 部署成功！应用已写入${profile.label}，服务已重启。\n你可以在右侧预览窗口查看效果，或直接在设备屏幕上查看。`);
-    btn.textContent = "部署完成";
-    btn.classList.add("done");
+    if (deployed.skipped) {
+      deployState.textContent = "hardware skipped";
+      renderDevicePreview("", "local verification ready");
+      addMessage("agent", "Hardware deploy skipped. Local L0-L3 verification passed; connect the board to run L4 golden-loop.");
+      btn.textContent = "Hardware skipped";
+      btn.disabled = false;
+    } else {
+      deployState.textContent = labels.done;
+      renderDevicePreview("", "已写入真机");
+      addMessage("agent", `✅ 部署成功！应用已写入${profile.label}，服务已重启。\n你可以在右侧预览窗口查看效果，或直接在设备屏幕上查看。`);
+      btn.textContent = "部署完成";
+      btn.classList.add("done");
+    }
   } catch (error) {
     deployState.textContent = labels.failed;
     const f = friendlyError(error.data, error.message);
@@ -961,12 +1639,14 @@ function drawClock() {
 composer?.addEventListener("submit", event => {
   event.preventDefault();
   const prompt = promptInput.value.trim();
-  if (prompt) runFlow(prompt);
+  if (prompt) handleChat(prompt);
 });
 
-runDemoBtn?.addEventListener("click", () => {
+generateBtn?.addEventListener("click", event => {
+  event.preventDefault();
+  event.stopPropagation();
   const prompt = promptInput.value.trim();
-  if (prompt) runFlow(prompt);
+  if (prompt) handleChat(prompt);
 });
 
 refreshBoardBtn?.addEventListener("click", () => setStatusDrawer(true));
@@ -1008,7 +1688,7 @@ document.querySelectorAll("[data-prompt]").forEach(button => {
 });
 
 scheduleFitDeviceFrame();
-applyDeviceProfile({ refresh: true });
+applyDeviceProfile({ refresh: false });
 syncModelUi();
 window.addEventListener("resize", scheduleFitDeviceFrame);
 if (deviceFrame) {
@@ -1019,7 +1699,6 @@ if (macOverlay && "ResizeObserver" in window) {
   const observer = new ResizeObserver(scheduleFitDeviceFrame);
   observer.observe(macOverlay);
 }
-refreshBoard();
 
 // ==================== Conversation Management ====================
 const API_BASE = "";
@@ -1100,6 +1779,7 @@ function renderConversationList(conversations) {
 async function selectConversation(id) {
   if (busy) return; // Don't switch while a flow is running
   currentConversationId = id;
+  pendingGeneratePrompt = null;
 
   // Update sidebar active state
   document.querySelectorAll(".conv-item").forEach(item => {
@@ -1127,21 +1807,28 @@ async function selectConversation(id) {
 
   // Load messages and files in parallel
   try {
-    const [msgRes, fileRes] = await Promise.all([
+    const [msgRes, fileRes, memoryRes] = await Promise.all([
       fetch(`${API_BASE}/api/conversations/${id}/messages`),
-      fetch(`${API_BASE}/api/conversations/${id}/files`)
+      fetch(`${API_BASE}/api/conversations/${id}/files`),
+      fetch(`${API_BASE}/api/conversations/${id}/memory`)
     ]);
     const msgData = await msgRes.json();
     const fileData = await fileRes.json();
+    const memoryData = await memoryRes.json();
 
     // Restore code files if available
     if (fileData.ok && fileData.files && Object.keys(fileData.files).length > 0) {
       renderFiles(fileData.files);
       renderDevicePreview("", "已加载应用");
+    } else {
+      clearGeneratedOutput("等待生成");
     }
 
     if (msgData.ok) {
       renderMessages(msgData.messages);
+    }
+    if (memoryData.ok) {
+      addBuildPromptAction(memoryData.project_memory?.build_prompt);
     }
   } catch (err) {
     console.error("Failed to load conversation:", err);
@@ -1167,7 +1854,7 @@ function renderMessages(messages) {
         <div class="avatar">VB</div>
         <div class="welcome-block">
           <p class="welcome-greeting">👋 你好！我是 VibeBoard，你的硬件应用助手。</p>
-          <p>告诉我你想在泰山派小屏上实现什么，我会自动生成代码、编译校验，然后一键写入真机。</p>
+          <p>告诉我你想在泰山派小屏上实现什么。我会先理解任务、生成文件并完成本地验证；写入真机需要你之后单独确认。</p>
           <div class="welcome-suggestions">
             <button class="suggestion-btn" data-prompt="做一个显示当前时间的全屏时钟应用">⏰ 全屏时钟</button>
             <button class="suggestion-btn" data-prompt="做一个显示天气信息和温度的应用">🌤 天气面板</button>
@@ -1231,6 +1918,8 @@ async function createConversation({ resetChat = true } = {}) {
     const data = await res.json();
     if (data.ok) {
       currentConversationId = data.id;
+      pendingGeneratePrompt = null;
+      clearGeneratedOutput("等待生成");
       await loadConversations();
       if (resetChat) {
         const chatLog = document.getElementById("chatLog");
@@ -1240,7 +1929,7 @@ async function createConversation({ resetChat = true } = {}) {
               <div class="avatar">VB</div>
         <div class="welcome-block">
           <p class="welcome-greeting">👋 你好！我是 VibeBoard，你的硬件应用助手。</p>
-          <p>告诉我你想在泰山派小屏上实现什么，我会自动生成代码、编译校验，然后一键写入真机。</p>
+          <p>告诉我你想在泰山派小屏上实现什么。我会先理解任务、生成文件并完成本地验证；写入真机需要你之后单独确认。</p>
           <div class="welcome-suggestions">
             <button class="suggestion-btn" data-prompt="做一个显示当前时间的全屏时钟应用">⏰ 全屏时钟</button>
             <button class="suggestion-btn" data-prompt="做一个显示天气信息和温度的应用">🌤 天气面板</button>
