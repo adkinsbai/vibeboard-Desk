@@ -50,6 +50,9 @@ export function parseChatPlan(rawContent, fallbackMemory = {}) {
     return {
       intent: "chat",
       reply: "我没有收到有效回复。请再说一次你的想法。",
+      understanding: [],
+      planned_changes: [],
+      target: "chat",
       ready_to_build: false,
       build_prompt: "",
       project_memory: existingMemory,
@@ -73,6 +76,9 @@ export function parseChatPlan(rawContent, fallbackMemory = {}) {
     return {
       intent: "chat",
       reply: raw,
+      understanding: [],
+      planned_changes: [],
+      target: "chat",
       ready_to_build: false,
       build_prompt: "",
       project_memory: existingMemory,
@@ -90,10 +96,24 @@ export function parseChatPlan(rawContent, fallbackMemory = {}) {
   return {
     intent: readyToBuild ? "build_ready" : intent === "build_ready" ? "clarify" : intent,
     reply: String(parsed.reply || "").trim() || "我已经理解了，请继续补充你的想法。",
+    understanding: stringList(parsed.understanding),
+    planned_changes: stringList(parsed.planned_changes),
+    target: normalizeTarget(parsed.target, readyToBuild),
     ready_to_build: readyToBuild,
     build_prompt: readyToBuild ? buildPrompt : "",
     project_memory: projectMemory,
   };
+}
+
+function normalizeTarget(value, readyToBuild) {
+  const target = String(value || "").trim();
+  if (["chat", "new_project", "edit_current_project"].includes(target)) return target;
+  return readyToBuild ? "new_project" : "chat";
+}
+
+function stringList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map(item => String(item || "").trim()).filter(Boolean).slice(0, 8);
 }
 
 function normalizePlannerMessages(rawMessages) {
@@ -126,6 +146,9 @@ function buildPlannerSystemPrompt(preferences = {}, projectMemory = {}) {
 {
   "intent": "chat" | "clarify" | "build_ready",
   "reply": "给用户看的自然中文回复",
+  "understanding": ["用用户能看懂的话列出你理解到的关键需求"],
+  "planned_changes": ["如果用户确认构建或修改，你准备执行的具体工程动作"],
+  "target": "chat" | "new_project" | "edit_current_project",
   "ready_to_build": true | false,
   "build_prompt": "只有 ready_to_build 为 true 时填写完整、可直接交给代码生成器的需求；否则为空字符串",
   "project_memory": {
@@ -143,6 +166,9 @@ function buildPlannerSystemPrompt(preferences = {}, projectMemory = {}) {
 - 普通聊天、能力询问、解释流程、讨论方案时，intent 为 chat，ready_to_build 为 false。
 - 信息不足、方案还没理清时，intent 为 clarify，reply 里提出必要问题，ready_to_build 为 false。
 - 只有当对话中已经有完整可执行需求，并且用户明确授权开始生成时，intent 才能是 build_ready，ready_to_build 才能为 true。
+- 当用户表达“不满意”“继续修改”“改一下当前预览”等反馈时，先在 reply/understanding/planned_changes 里明确说明你理解到什么、准备如何改；如果需求足够明确，target 应为 edit_current_project，并等待用户点击确认后再构建。
+- ready_to_build 为 true 时，reply 必须包含“我理解你要的是...”和“我准备这样做...”的意思，不能只说“需求已整理”。
+- understanding 至少列出 2 条关键理解；planned_changes 至少列出 2 条具体执行项。信息不足时 planned_changes 可以为空，但 reply 必须追问缺失信息。
 - build_prompt 必须整合上下文，写成完整需求，不能只写“开始吧”或“确认”。
 - 每次回复都要更新 project_memory。它是当前 project 的独立记忆，只能基于当前对话和下面给出的旧记忆整理。
 - 如果用户明确否定、取消、放弃或替换旧目标，必须以最新目标为准，覆盖 summary/goal/requirements/decisions，并清空与旧目标相关的 build_prompt。

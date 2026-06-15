@@ -51,6 +51,7 @@ let generatedFiles = {};
 let activeFile = "";
 let busy = false;
 let conversationInitPromise = null;
+let conversationLoadToken = 0;
 
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
 const DEVICE_STORAGE_KEY = "vibeboard-active-device";
@@ -160,6 +161,10 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function renderPlanList(items) {
+  return `<ul>${items.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
 }
 
 
@@ -753,6 +758,11 @@ function makePreviewUrl(path = "/generated/current/index.html", buildId = Date.n
   return `${url.pathname}${url.search}`;
 }
 
+function makeConversationPreviewUrl(conversationId, buildId = Date.now()) {
+  const encodedId = encodeURIComponent(conversationId || "");
+  return makePreviewUrl(`/api/conversations/${encodedId}/preview/index.html`, buildId);
+}
+
 function applyDeviceProfile({ refresh = true } = {}) {
   const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
   if (deviceSelect) deviceSelect.value = profile.id;
@@ -769,7 +779,7 @@ function applyDeviceProfile({ refresh = true } = {}) {
   }
   scheduleFitDeviceFrame();
   if (refresh) {
-    syncDeviceFrameFromCurrent();
+    syncDeviceFrameFromActiveContext();
     refreshBoard();
   }
 }
@@ -788,6 +798,44 @@ function renderDevicePreview(prompt, statusText) {
     deviceScreen.dataset.status = statusText || "";
     deviceScreen.dataset.prompt = prompt || "";
   }
+}
+
+function renderConversationPreview(conversationId, buildId, statusText) {
+  if (!conversationId) {
+    clearGeneratedOutput(statusText || "等待生成");
+    return;
+  }
+  if (deviceFrame) {
+    deviceFrame.src = makeConversationPreviewUrl(conversationId, buildId || Date.now());
+  }
+  if (deviceScreen) {
+    deviceScreen.dataset.status = statusText || "已加载应用";
+    deviceScreen.dataset.prompt = "";
+  }
+}
+
+function currentGeneratedBuildId() {
+  try {
+    return generatedFiles?.["manifest.json"] ? JSON.parse(generatedFiles["manifest.json"]).id || "" : "";
+  } catch {
+    return "";
+  }
+}
+
+function syncDeviceFrameFromActiveContext() {
+  if (currentConversationId) {
+    if (Object.keys(generatedFiles || {}).length) {
+      renderConversationPreview(
+        currentConversationId,
+        currentGeneratedBuildId() || Date.now(),
+        deviceScreen?.dataset.status || "已加载应用"
+      );
+    } else {
+      clearGeneratedOutput(deviceScreen?.dataset.status || "等待生成");
+    }
+    return;
+  }
+  syncDeviceFrameFromCurrent();
 }
 
 async function syncDeviceFrameFromCurrent() {
@@ -1336,17 +1384,47 @@ function addInlineButtons(buttons) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
-function addBuildPromptAction(buildPrompt) {
+function addBuildPromptAction(buildPrompt, plan = {}) {
   const prompt = String(buildPrompt || "").trim();
   if (!prompt) return;
   pendingGeneratePrompt = prompt;
-  addInlineButtons([
-    { label: "需求已整理，开启构建", primary: true, action: () => startBuild(pendingGeneratePrompt) },
-    { label: "继续整理需求", primary: false, action: () => {
-      promptInput.value = "我还想再调整一下方案";
-      promptInput.focus();
-    }},
-  ]);
+
+  const target = plan.target === "edit_current_project" ? "edit_current_project" : "new_project";
+  const understanding = Array.isArray(plan.understanding) ? plan.understanding.filter(Boolean) : [];
+  const plannedChanges = Array.isArray(plan.planned_changes) ? plan.planned_changes.filter(Boolean) : [];
+  const article = document.createElement("article");
+  article.className = "msg agent";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = "VB";
+  const body = document.createElement("div");
+  body.className = "build-confirmation";
+  const primaryLabel = target === "edit_current_project"
+    ? "确认按这个方案修改当前项目"
+    : "确认按这个方案开始构建";
+  body.innerHTML = `
+    <div class="confirm-copy">
+      <strong>我理解你要的是：</strong>
+      ${renderPlanList(understanding.length ? understanding : ["按当前对话整理出的方案执行。"])}
+      <strong>我准备这样做：</strong>
+      ${renderPlanList(plannedChanges.length ? plannedChanges : ["生成或修改项目文件。", "完成本地验证并保存这个聊天的预览快照。"])}
+    </div>
+    <div class="inline-actions">
+      <button class="btn btn-primary" type="button" data-action="confirm">${escapeHtml(primaryLabel)}</button>
+      <button class="btn btn-ghost" type="button" data-action="revise">继续补充或调整</button>
+    </div>
+  `;
+  body.querySelector('[data-action="confirm"]')?.addEventListener("click", () => {
+    article.remove();
+    startBuild(pendingGeneratePrompt);
+  });
+  body.querySelector('[data-action="revise"]')?.addEventListener("click", () => {
+    promptInput.value = "我还想再调整一下方案";
+    promptInput.focus();
+  });
+  article.append(avatar, body);
+  chatLog.appendChild(article);
+  chatLog.scrollTop = chatLog.scrollHeight;
 }
 
 // ─── 对话式交互 ───
@@ -1372,8 +1450,9 @@ async function handleChat(prompt) {
   setBusy(true);
 
   await ensureConversation();
+  const conversationId = currentConversationId;
   addMessage("user", prompt);
-  persistMessage("user", prompt);
+  persistMessage("user", prompt, null, conversationId);
   promptInput.value = "";
 
   addThinkingAnimation();
@@ -1382,7 +1461,7 @@ async function handleChat(prompt) {
     const messages = buildChatMessages();
     const result = await postJson(api.chat, {
       messages,
-      conversation_id: currentConversationId,
+      conversation_id: conversationId,
       modelSettings: getModelPayload(),
     }, { timeout: 60000 });
 
@@ -1395,7 +1474,7 @@ async function handleChat(prompt) {
 
     const reply = result.reply || "抱歉，我暂时无法回应。";
     addMarkdownMessage("agent", reply);
-    persistMessage("agent", reply);
+    persistMessage("agent", reply, null, conversationId);
 
     // 检测是否准备好构建
     if (result.ready_to_build) {
@@ -1404,7 +1483,7 @@ async function handleChat(prompt) {
         addMarkdownMessage("agent", "我还没有拿到完整的构建需求，请继续补充或确认方案。");
         return;
       }
-      addBuildPromptAction(pendingGeneratePrompt);
+      addBuildPromptAction(pendingGeneratePrompt, result);
     }
   } catch (error) {
     removeThinkingAnimation();
@@ -1427,10 +1506,10 @@ async function startBuild(originalPrompt) {
   const history = buildChatMessages();
 
   // 调用原有的代码生成流程
-  await runFlow(originalPrompt, history);
+  await runFlow(originalPrompt, history, currentConversationId);
 }
 
-async function runFlow(prompt, history = []) {
+async function runFlow(prompt, history = [], conversationId = currentConversationId) {
   if (busy) return;
   setBusy(true);
   deployState.textContent = labels.preparing;
@@ -1458,7 +1537,7 @@ async function runFlow(prompt, history = []) {
     const gen = await postJson(api.generate, {
       prompt,
       modelSettings: getModelPayload(),
-      conversation_id: currentConversationId,
+      conversation_id: conversationId,
       clarify_answers: [],
       history: chatHistory
     }, { timeout: 600000 });
@@ -1480,8 +1559,10 @@ async function runFlow(prompt, history = []) {
     }
     addEvidenceCard(gen);
 
-    renderFiles(gen.files);
-    renderDevicePreview(prompt, gen.agentSummary || "已生成应用");
+    if (!conversationId || conversationId === currentConversationId) {
+      renderFiles(gen.files);
+      renderDevicePreview(prompt, gen.agentSummary || "已生成应用");
+    }
     progress.set("generate", "done", "ok");
     el("lastBuildState").textContent = gen.id || "generated";
 
@@ -1519,7 +1600,7 @@ async function runFlow(prompt, history = []) {
     const agentSummary = gen.agentSummary ? `\n\n> ${gen.agentSummary}` : "";
     const successMessage = `**本地生成与验证完成**\n\n已生成 **${fileCount}** 个文件，并通过本地 L0-L3 验证。${verifyNote}${agentSummary}\n\n我还没有写入硬件。你可以先在右侧预览确认效果；确认后再点击下方部署按钮。`;
     addMarkdownMessage("agent", successMessage);
-    persistMessage("agent", successMessage, gen.id || null);
+    persistMessage("agent", successMessage, gen.id || null, conversationId);
 
     // 部署按钮放在聊天框内
     addInlineButtons([
@@ -1541,7 +1622,7 @@ async function runFlow(prompt, history = []) {
     const f = friendlyError(error.data, error.message);
     const errorMessage = `❌ **${f.title}**\n\n${f.detail}\n\n💡 ${f.suggestion}`;
     addMarkdownMessage("agent", errorMessage);
-    persistMessage("agent", errorMessage);
+    persistMessage("agent", errorMessage, null, conversationId);
   } finally {
     setBusy(false);
   }
@@ -1763,6 +1844,9 @@ function renderConversationList(conversations) {
           // If deleted the current conversation, clear selection
           if (convId === currentConversationId) {
             currentConversationId = null;
+            conversationLoadToken += 1;
+            pendingGeneratePrompt = null;
+            clearGeneratedOutput("等待生成");
             const chatLog = document.getElementById("chatLog");
             if (chatLog) chatLog.innerHTML = '<div class="msg"><p style="color:var(--text-2)">选择或新建一个对话开始</p></div>';
           }
@@ -1780,6 +1864,7 @@ async function selectConversation(id) {
   if (busy) return; // Don't switch while a flow is running
   currentConversationId = id;
   pendingGeneratePrompt = null;
+  const loadToken = ++conversationLoadToken;
 
   // Update sidebar active state
   document.querySelectorAll(".conv-item").forEach(item => {
@@ -1815,11 +1900,12 @@ async function selectConversation(id) {
     const msgData = await msgRes.json();
     const fileData = await fileRes.json();
     const memoryData = await memoryRes.json();
+    if (loadToken !== conversationLoadToken || id !== currentConversationId) return;
 
     // Restore code files if available
     if (fileData.ok && fileData.files && Object.keys(fileData.files).length > 0) {
       renderFiles(fileData.files);
-      renderDevicePreview("", "已加载应用");
+      renderConversationPreview(id, fileData.buildId, "已加载应用");
     } else {
       clearGeneratedOutput("等待生成");
     }
@@ -1828,7 +1914,11 @@ async function selectConversation(id) {
       renderMessages(msgData.messages);
     }
     if (memoryData.ok) {
-      addBuildPromptAction(memoryData.project_memory?.build_prompt);
+      addBuildPromptAction(memoryData.project_memory?.build_prompt, {
+        understanding: memoryData.project_memory?.requirements || [],
+        planned_changes: memoryData.project_memory?.decisions || [],
+        target: fileData.ok && Object.keys(fileData.files || {}).length ? "edit_current_project" : "new_project"
+      });
     }
   } catch (err) {
     console.error("Failed to load conversation:", err);
@@ -1919,6 +2009,7 @@ async function createConversation({ resetChat = true } = {}) {
     if (data.ok) {
       currentConversationId = data.id;
       pendingGeneratePrompt = null;
+      conversationLoadToken += 1;
       clearGeneratedOutput("等待生成");
       await loadConversations();
       if (resetChat) {
@@ -1968,12 +2059,15 @@ async function ensureConversation() {
 }
 
 // Save message to conversation
-async function saveMessage(role, content, buildId = null) {
-  await ensureConversation();
-  if (!currentConversationId) return;
+async function saveMessage(role, content, buildId = null, conversationId = currentConversationId) {
+  if (!conversationId) {
+    await ensureConversation();
+    conversationId = currentConversationId;
+  }
+  if (!conversationId) return;
 
   try {
-    await fetch(`${API_BASE}/api/conversations/${currentConversationId}/messages`, {
+    await fetch(`${API_BASE}/api/conversations/${conversationId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ role, content, build_id: buildId })
@@ -1986,8 +2080,8 @@ async function saveMessage(role, content, buildId = null) {
   }
 }
 
-function persistMessage(role, content, buildId = null) {
-  saveMessage(role, content, buildId).catch(err => {
+function persistMessage(role, content, buildId = null, conversationId = currentConversationId) {
+  saveMessage(role, content, buildId, conversationId).catch(err => {
     console.error("Failed to persist message:", err);
   });
 }

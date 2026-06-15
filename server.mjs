@@ -42,6 +42,7 @@ import {
   formatRunEvidence,
   transitionRun
 } from "./src/agentStateMachine.mjs";
+import { runBuildGraph } from "./src/buildGraph.mjs";
 import {
   buildGoldenLoopResult,
   buildGoldenLoopRemoteCommand,
@@ -158,6 +159,15 @@ const PYTHON_BIN = process.env.VIBEBOARD_PYTHON || (process.platform === "win32"
 let currentBuild = null;
 let activeEndpoint = null;
 let lastDeploy = null;
+let audioState = {
+  mode: "idle",
+  recording: false,
+  playing: false,
+  lastAction: "",
+  lastRecording: "",
+  lastError: "",
+  updatedAt: ""
+};
 const boardStatusCache = new Map();
 const boardStatusRefreshPromises = new Map();
 let deviceContextQueue = Promise.resolve();
@@ -253,6 +263,51 @@ function staticCacheFor(filePath) {
     return "public, max-age=3600";
   }
   return "public, max-age=300";
+}
+
+function responseContentType(filename) {
+  const ext = path.extname(String(filename || "")).toLowerCase();
+  return mimeTypes[ext] || "text/plain; charset=utf-8";
+}
+
+const CONVERSATION_PREVIEW_FILE_NAMES = [...new Set([...GENERATED_FILE_NAMES, "hardware-result.json"])];
+
+function previewFilesForConversation(conversationId) {
+  const { buildId, files } = conversationStore.loadConversationFiles(conversationId);
+  return {
+    buildId,
+    files: Object.fromEntries(
+      Object.entries(files || {}).filter(([filename]) => CONVERSATION_PREVIEW_FILE_NAMES.includes(filename))
+    )
+  };
+}
+
+async function filesWithHardwareResult(files = {}) {
+  const savedFiles = { ...(files || {}) };
+  try {
+    savedFiles["hardware-result.json"] = await fs.readFile(path.join(GENERATED_DIR, "hardware-result.json"), "utf8");
+  } catch {}
+  return savedFiles;
+}
+
+function resolveConversationPreviewFile(pathname) {
+  const match = pathname.match(/^\/api\/conversations\/([^/]+)\/preview(?:\/(.*))?$/);
+  if (!match) return null;
+  const conversationId = decodeURIComponent(match[1] || "");
+  const requested = decodeURIComponent(match[2] || "index.html");
+  const filename = path.posix.normalize(`/${requested}`).slice(1) || "index.html";
+  if (!conversationId || filename.includes("..") || !CONVERSATION_PREVIEW_FILE_NAMES.includes(filename)) {
+    return { error: "Invalid preview path" };
+  }
+  return { conversationId, filename };
+}
+
+function rewriteConversationPreviewHtml(html, conversationId, buildId) {
+  const base = `/api/conversations/${encodeURIComponent(conversationId)}/preview/`;
+  const version = encodeURIComponent(buildId || Date.now());
+  return String(html || "")
+    .replace(/(["'])\.\/style\.css(?:\?[^"']*)?\1/g, `$1${base}style.css?v=${version}$1`)
+    .replace(/(["'])\.\/app\.js(?:\?[^"']*)?\1/g, `$1${base}app.js?v=${version}$1`);
 }
 
 function shQuote(value) {
@@ -547,7 +602,7 @@ function createAppSpec(prompt, id) {
   if (promptHas(text, ["carousel", "slideshow", "photo", "image", "图片", "照片", "轮播", "相册"])) mode = "carousel";
   if (promptHas(text, ["fullscreen clock", "full screen clock", "clock", "全屏时钟", "时钟", "大时钟"])) mode = "clock";
   if (promptHas(text, ["voice", "audio", "record", "speech", "语音", "录音", "麦克风"])) mode = "voice";
-  if (promptHas(text, ["server", "dashboard", "status", "监控", "状态", "面板", "服务器"])) mode = "dashboard";
+  if (mode === "assistant" && promptHas(text, ["server", "dashboard", "status", "监控", "状态", "面板", "服务器"])) mode = "dashboard";
   if (promptHas(text, ["timer", "focus", "countdown", "倒计时", "番茄"])) mode = "timer";
   if (promptHas(text, ["control", "switch", "gpio", "relay", "button", "控制", "开关", "继电器"])) mode = "control";
   if (promptHas(text, ["weather", "天气", "气温", "白底蓝字", "白色", "蓝色", "小屏助手"])) mode = "weather";
@@ -640,7 +695,7 @@ function createAppSpec(prompt, id) {
     subtitle: text.slice(0, 120),
     accent: accents[mode],
     target: "480x360 RK3566 Linux kiosk",
-    hardwareApi: ["/api/status", "./hardware-result.json"],
+    hardwareApi: ["/api/status", "./hardware-result.json", ...AUDIO_APIS],
     widgets: widgetsByMode[mode].map(([widgetId, label, value, hint]) => ({ id: widgetId, label, value, hint })),
     actions: actionsByMode[mode] || [
       { id: "primary", label: mode === "voice" ? "Start" : mode === "timer" ? "Start" : mode === "control" ? "Toggle A" : "Run" },
@@ -705,6 +760,234 @@ function buildOfflineGoldenLoop(buildId = currentBuild?.id || "") {
     checks,
     raw: {},
   };
+}
+
+const AUDIO_RECORDING_DIR = "/tmp/vibeboard-audio";
+const AUDIO_DEFAULT_RECORDING = `${AUDIO_RECORDING_DIR}/recording.wav`;
+const AUDIO_APIS = Object.freeze([
+  "/api/audio/status",
+  "/api/audio/play",
+  "/api/audio/record",
+  "/api/audio/stop"
+]);
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function updateAudioState(next = {}) {
+  audioState = {
+    ...audioState,
+    ...next,
+    updatedAt: nowIso()
+  };
+  return audioState;
+}
+
+function audioCapabilityPayload(extra = {}) {
+  return {
+    ok: true,
+    available_apis: [...AUDIO_APIS],
+    capabilities: {
+      play: true,
+      record: true,
+      stop: true,
+      status: true,
+      playbackCommand: "aplay",
+      recordCommand: "arecord"
+    },
+    state: audioState,
+    ...extra
+  };
+}
+
+function offlineAudioResponse(action, extra = {}) {
+  const state = updateAudioState({
+    mode: action === "record" ? "recording" : action === "play" ? "playing" : "idle",
+    recording: action === "record",
+    playing: action === "play",
+    lastAction: action,
+    lastError: "",
+    ...(extra.recordingPath ? { lastRecording: extra.recordingPath } : {})
+  });
+  return audioCapabilityPayload({
+    mode: "offline-simulated",
+    skipped: true,
+    message: "No board route is currently connected; audio action was simulated locally.",
+    state,
+    ...extra
+  });
+}
+
+function parsePositiveNumber(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function requestedAudioFile(body = {}) {
+  const raw = String(body.file || body.path || AUDIO_DEFAULT_RECORDING).trim();
+  const basename = path.posix.basename(raw || "recording.wav").replace(/[^a-zA-Z0-9._-]/g, "_") || "recording.wav";
+  const withExt = /\.[a-z0-9]+$/i.test(basename) ? basename : `${basename}.wav`;
+  return `${AUDIO_RECORDING_DIR}/${withExt}`;
+}
+
+function remoteAudioStatusCommand() {
+  return String.raw`set -u
+mkdir -p /tmp/vibeboard-audio
+python3 - <<'PY'
+import json, os, shutil, subprocess
+def cmd_exists(name):
+    return shutil.which(name) is not None
+recording = subprocess.run("pgrep -f 'arecord.*vibeboard-audio' >/dev/null 2>&1", shell=True).returncode == 0
+playing = subprocess.run("pgrep -f 'aplay.*vibeboard-audio' >/dev/null 2>&1", shell=True).returncode == 0
+last = "/tmp/vibeboard-audio/recording.wav"
+payload = {
+    "ok": True,
+    "mode": "real",
+    "available_apis": ["/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"],
+    "capabilities": {
+        "play": cmd_exists("aplay"),
+        "record": cmd_exists("arecord"),
+        "stop": True,
+        "status": True,
+        "playbackCommand": "aplay",
+        "recordCommand": "arecord"
+    },
+    "state": {
+        "mode": "recording" if recording else ("playing" if playing else "idle"),
+        "recording": recording,
+        "playing": playing,
+        "lastRecording": last if os.path.exists(last) else "",
+        "lastError": ""
+    }
+}
+print(json.dumps(payload, ensure_ascii=False))
+PY`;
+}
+
+function remoteAudioPlayCommand({ file = AUDIO_DEFAULT_RECORDING, duration = 0.35, frequency = 880 } = {}) {
+  const safeFile = shQuote(file);
+  const safeDuration = parsePositiveNumber(duration, 0.35, 0.05, 3);
+  const safeFrequency = Math.round(parsePositiveNumber(frequency, 880, 120, 2400));
+  return `set -u
+mkdir -p ${shQuote(AUDIO_RECORDING_DIR)}
+file=${safeFile}
+if ! command -v aplay >/dev/null 2>&1; then
+  echo '{"ok":false,"error":"aplay not installed","mode":"real"}'
+  exit 0
+fi
+if [ ! -s "$file" ]; then
+  python3 - <<'PY'
+import math, struct, wave
+path = ${JSON.stringify(file)}
+rate = 16000
+duration = ${safeDuration}
+freq = ${safeFrequency}
+with wave.open(path, "wb") as wav:
+    wav.setnchannels(1)
+    wav.setsampwidth(2)
+    wav.setframerate(rate)
+    for i in range(int(rate * duration)):
+        sample = int(18000 * math.sin(2 * math.pi * freq * i / rate))
+        wav.writeframes(struct.pack("<h", sample))
+PY
+fi
+timeout 4s aplay "$file" >/tmp/vibeboard-audio/aplay.log 2>&1 &
+python3 - <<'PY'
+import json
+print(json.dumps({"ok": True, "mode": "real", "action": "play", "playing": True, "file": ${JSON.stringify(file)}, "available_apis": ["/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"]}, ensure_ascii=False))
+PY`;
+}
+
+function remoteAudioRecordCommand({ file = AUDIO_DEFAULT_RECORDING, duration = 5 } = {}) {
+  const safeFile = shQuote(file);
+  const safeDuration = Math.round(parsePositiveNumber(duration, 5, 1, 30));
+  return `set -u
+mkdir -p ${shQuote(AUDIO_RECORDING_DIR)}
+file=${safeFile}
+if ! command -v arecord >/dev/null 2>&1; then
+  echo '{"ok":false,"error":"arecord not installed","mode":"real"}'
+  exit 0
+fi
+pkill -f 'arecord.*vibeboard-audio' 2>/dev/null || true
+timeout ${safeDuration}s arecord -q -f S16_LE -r 16000 -c 1 "$file" >/tmp/vibeboard-audio/arecord.log 2>&1 &
+python3 - <<'PY'
+import json
+print(json.dumps({"ok": True, "mode": "real", "action": "record", "recording": True, "duration": ${safeDuration}, "file": ${JSON.stringify(file)}, "available_apis": ["/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"]}, ensure_ascii=False))
+PY`;
+}
+
+function remoteAudioStopCommand() {
+  return String.raw`set -u
+pkill -f 'arecord.*vibeboard-audio' 2>/dev/null || true
+pkill -f 'aplay.*vibeboard-audio' 2>/dev/null || true
+python3 - <<'PY'
+import json
+print(json.dumps({"ok": True, "mode": "real", "action": "stop", "recording": False, "playing": False, "available_apis": ["/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"]}, ensure_ascii=False))
+PY`;
+}
+
+function normalizeRemoteAudioResult(raw, fallbackAction = "status") {
+  let parsed = null;
+  try {
+    parsed = parseJsonObject(raw, "audio response");
+  } catch (error) {
+    parsed = { ok: false, error: error.message, raw: String(raw || "") };
+  }
+  const state = updateAudioState({
+    mode: parsed.state?.mode || (parsed.recording ? "recording" : parsed.playing ? "playing" : "idle"),
+    recording: Boolean(parsed.state?.recording ?? parsed.recording),
+    playing: Boolean(parsed.state?.playing ?? parsed.playing),
+    lastAction: parsed.action || fallbackAction,
+    lastRecording: parsed.state?.lastRecording || parsed.file || audioState.lastRecording || "",
+    lastError: parsed.error || ""
+  });
+  return {
+    ...audioCapabilityPayload({
+      mode: parsed.mode || "real",
+      skipped: false,
+      ...parsed
+    }),
+    state
+  };
+}
+
+async function audioStatus() {
+  if (!hasBoardCredentials()) {
+    return audioCapabilityPayload({
+      mode: "offline-simulated",
+      skipped: true,
+      message: "No board route is currently connected; audio APIs are available in simulation mode."
+    });
+  }
+  const raw = await ssh(remoteAudioStatusCommand(), 12000);
+  return normalizeRemoteAudioResult(raw, "status");
+}
+
+async function audioPlay(body = {}) {
+  const file = requestedAudioFile(body);
+  if (!hasBoardCredentials()) return offlineAudioResponse("play", { file });
+  const raw = await ssh(remoteAudioPlayCommand({
+    file,
+    duration: body.duration,
+    frequency: body.frequency
+  }), 12000);
+  return normalizeRemoteAudioResult(raw, "play");
+}
+
+async function audioRecord(body = {}) {
+  const file = requestedAudioFile(body);
+  const duration = parsePositiveNumber(body.duration, 5, 1, 30);
+  if (!hasBoardCredentials()) return offlineAudioResponse("record", { file, duration, recordingPath: file });
+  const raw = await ssh(remoteAudioRecordCommand({ file, duration }), 12000);
+  return normalizeRemoteAudioResult(raw, "record");
+}
+
+async function audioStop() {
+  if (!hasBoardCredentials()) return offlineAudioResponse("stop");
+  const raw = await ssh(remoteAudioStopCommand(), 12000);
+  return normalizeRemoteAudioResult(raw, "stop");
 }
 
 function buildOfflineDeployResult() {
@@ -780,7 +1063,7 @@ function recordAgentLearning({
 function injectHardwareAppContracts(source, buildId) {
   const idJson = JSON.stringify(buildId);
   const sourceB64Json = JSON.stringify(Buffer.from(String(source || ""), "utf8").toString("base64"));
-  
+
   // 检查是否已经有 runtime 字段
   if (source.includes('"runtime"') && source.includes('"executed_on_board"')) {
     // 已经有正确的 runtime 字段，只检查 build_id
@@ -788,7 +1071,7 @@ function injectHardwareAppContracts(source, buildId) {
       return source; // 两个字段都有，不需要注入
     }
   }
-  
+
   // 注入包装器：在脚本执行后，强制添加必需字段
   const wrapper = `
 # --- Golden-loop contract injection (auto-injected) ---
@@ -809,19 +1092,19 @@ def __wrapped_main():
         exec(__script_content, {"__name__": "__main__"})
     finally:
         __sys.stdout = __old_stdout
-    
+
     # 解析原始输出
     __raw_output = __buffer.getvalue().strip()
     try:
         __result = __json.loads(__raw_output)
     except __json.JSONDecodeError:
         __result = {"raw_output": __raw_output}
-    
+
     # 注入必需字段
     __result["build_id"] = __build_id
     __result["runtime"] = "executed_on_board"
     __result["hostname"] = __result.get("hostname", socket.gethostname())
-    
+
     __original_print(__json.dumps(__result, ensure_ascii=False, indent=2))
 
 # 保存原始脚本内容
@@ -829,7 +1112,7 @@ if __name__ == "__main__":
     import socket
     __wrapped_main()
 `;
-  
+
   return wrapper;
 }
 
@@ -879,7 +1162,7 @@ def __vb_wrapped_main():
     result["build_id"] = __vb_build_id
     result["runtime"] = "executed_on_board"
     result["hostname"] = result.get("hostname") or __vb_socket.gethostname()
-    result["available_apis"] = result.get("available_apis") or ["/api/status", "./hardware-result.json"]
+    result["available_apis"] = result.get("available_apis") or ["/api/status", "./hardware-result.json", "/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"]
     print(__vb_json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 if __name__ == "__main__":
@@ -951,12 +1234,26 @@ ${validationRulesText("en").map(rule => `- ${rule}`).join("\n")}
 - Font sizes: titles 16-20px, body 12-14px, small labels 10-11px.
 - Colors: avoid pure white (#fff), prefer #e2e8f0 or similar soft white.
 
+## Visual Quality Baseline
+- Do not produce a plain static CRUD-like screen. Every new app should feel like a polished embedded kiosk experience.
+- Use a composed scene: animated background layers, scanlines or subtle motion, glowing status chips, dense but readable data panels, and clear hardware state.
+- For clock apps, prefer a cyberpunk neon visual direction with a large glowing time display, animated grid/scanline effects, seconds ticker, and hardware status.
+- For weather, carousel, dashboard, timer, voice, and control apps, add distinctive scene styling and motion that fits the domain while keeping the 480x360 layout stable.
+- Keep animations CSS-only or lightweight JavaScript, and ensure text never overflows the fixed 480x360 display.
+
 ## Available Runtime Data (from /api/status)
 - hostname, model, kernel, time, uptime, cpu_temp
 - memory.percent, memory.used_h, memory.total_h
 - disk.percent, disk.used_h, disk.total_h
 - network.wifi, network.addresses[0], network.gateway
 - services.ssh, services.frpc, services.display
+
+## Audio Runtime APIs
+- GET /api/audio/status returns speaker/microphone capability and current recording/playback state.
+- POST /api/audio/play plays the last recording or a generated test tone through the board speaker.
+- POST /api/audio/record starts a bounded microphone recording; body may include { "duration": 5, "file": "recording.wav" }.
+- POST /api/audio/stop stops active recording/playback.
+- In app.js, expose these through window.VibeBoardHardware.audio.status/play/record/stop when the app needs voice, recorder, alarm, sound, or speaker behavior.
 `;
 }
 
@@ -1151,10 +1448,10 @@ function normalizeGeneratedFiles(raw, prompt, id, meta = {}) {
   if (!files["hardware_app.py"]) {
     files["hardware_app.py"] = generatedHardwareAppV2(prompt, id, spec);
   }
-  
+
   // 兜底注入：确保 hardware_app.py 输出包含 golden-loop 必需字段
   files["hardware_app.py"] = injectHardwareAppContractsV2(files["hardware_app.py"], id);
-  
+
   validateGeneratedFileContracts(files, "Model");
 
   const manifest = generatedManifestV2(prompt, id, spec, {
@@ -1178,11 +1475,12 @@ function templateGeneratedFiles(prompt, id, reason = "") {
     fallbackReason: reason,
     target: BOARD.targetStatic
   });
+  const advanced = advancedTemplateFilesV2(prompt, id, spec);
   return {
     files: {
-      "index.html": generatedIndexV2(prompt, id, spec),
-      "style.css": generatedStyleV2(prompt, id, spec),
-      "app.js": generatedAppV2(prompt, id, spec),
+      "index.html": advanced?.["index.html"] || generatedIndexV2(prompt, id, spec),
+      "style.css": advanced?.["style.css"] || generatedStyleV2(prompt, id, spec),
+      "app.js": advanced?.["app.js"] || generatedAppV2(prompt, id, spec),
       "hardware_app.py": generatedHardwareAppV2(prompt, id, spec),
       "manifest.json": JSON.stringify(manifest, null, 2)
     },
@@ -1190,6 +1488,1288 @@ function templateGeneratedFiles(prompt, id, reason = "") {
   };
 }
 
+function advancedTemplateFiles(prompt, id, spec) {
+  if (!["clock", "weather", "carousel"].includes(spec.mode)) return null;
+  const title = spec.mode === "clock"
+    ? "Neon Chrono"
+    : spec.mode === "weather"
+      ? "Skyline Weather"
+      : "Kinetic Gallery";
+  const modeClass = `mode-${spec.mode}`;
+  const chips = spec.mode === "clock"
+    ? ["CYBER CLOCK", "SYNC", "480x360"]
+    : spec.mode === "weather"
+      ? ["SHENZHEN", "LIVE WEATHER", "BOARD"]
+      : ["AUTO SLIDES", "RUNTIME", "GALLERY"];
+  const cards = spec.mode === "carousel"
+    ? `
+      <section class="gallery" aria-label="image carousel">
+        <article class="slide active" data-slide="0"><span>01</span><strong>Neon Street</strong><small>city rain reflections</small></article>
+        <article class="slide" data-slide="1"><span>02</span><strong>Orbit Garden</strong><small>glass and bio-light</small></article>
+        <article class="slide" data-slide="2"><span>03</span><strong>Signal Peak</strong><small>mountain relay dusk</small></article>
+        <article class="slide" data-slide="3"><span>04</span><strong>Night Harbor</strong><small>magenta waves</small></article>
+      </section>
+      <section class="deck">
+        <div><span id="slide">1/4</span><strong id="caption">Neon Street</strong></div>
+        <small id="eventLog">auto cinematic loop</small>
+      </section>`
+    : spec.mode === "weather"
+      ? `
+      <section class="weather-hero">
+        <div>
+          <span>SHENZHEN NOW</span>
+          <strong id="weatherText">天气同步中</strong>
+          <small id="weatherMeta">实时天气</small>
+        </div>
+        <b id="weatherTemp">--°C</b>
+      </section>
+      <section class="metrics">
+        <article><span>CPU</span><strong id="temp">--</strong></article>
+        <article><span>MEM</span><strong id="memory">--</strong></article>
+        <article><span>NET</span><strong id="wifi">--</strong></article>
+        <article><span>IP</span><strong id="ip">--</strong></article>
+      </section>`
+      : `
+      <section class="chrono">
+        <span id="date">--</span>
+        <strong id="time">--:--</strong>
+        <small id="seconds">--</small>
+      </section>
+      <section class="metrics compact">
+        <article><span>CPU</span><strong id="temp">--</strong></article>
+        <article><span>MEM</span><strong id="memory">--</strong></article>
+        <article><span>NET</span><strong id="wifi">--</strong></article>
+      </section>`;
+
+  const index = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibeBoard ${htmlEscape(title)}</title>
+  <link rel="stylesheet" href="./style.css?v=${id}">
+</head>
+<body>
+  <main class="screen ${modeClass}" data-mode="${htmlEscape(spec.mode)}">
+    <div class="aurora" aria-hidden="true"></div>
+    <div class="scanline" aria-hidden="true"></div>
+    <header class="hud">
+      <div>
+        <span id="date">${spec.mode === "clock" ? "--" : title}</span>
+        <strong>${htmlEscape(title)}</strong>
+      </div>
+      <b id="service">Linux API --</b>
+    </header>
+    <section class="chips">
+      ${chips.map(chip => `<span>${htmlEscape(chip)}</span>`).join("\n      ")}
+    </section>
+    ${cards}
+    <footer>
+      <button class="action" type="button" data-action="previous">Prev</button>
+      <span id="eventLog">hardware api waiting</span>
+      <button class="action" type="button" data-action="next">Next</button>
+    </footer>
+  </main>
+  <script src="./app.js?v=${id}"></script>
+</body>
+</html>
+`;
+
+  const style = `:root {
+  color-scheme: dark;
+  --bg: #05030f;
+  --panel: rgba(8, 13, 34, .74);
+  --line: rgba(125, 249, 255, .28);
+  --text: #f8fbff;
+  --muted: #91a8c7;
+  --cyan: #2df8ff;
+  --pink: #ff2bd6;
+  --gold: #ffd166;
+  --green: #43ff91;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  width: 480px;
+  height: 360px;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
+}
+
+button { font: inherit; }
+
+.screen {
+  position: relative;
+  width: 480px;
+  height: 360px;
+  display: grid;
+  grid-template-rows: 46px 28px 1fr 44px;
+  gap: 8px;
+  padding: 10px;
+  overflow: hidden;
+  isolation: isolate;
+  background:
+    linear-gradient(rgba(125,249,255,.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,43,214,.06) 1px, transparent 1px),
+    radial-gradient(circle at 14% 20%, rgba(45,248,255,.33), transparent 24%),
+    radial-gradient(circle at 82% 16%, rgba(255,43,214,.3), transparent 25%),
+    radial-gradient(circle at 58% 90%, rgba(67,255,145,.14), transparent 24%),
+    linear-gradient(135deg, #070817 0%, #13051d 48%, #06111c 100%);
+  background-size: 28px 28px, 28px 28px, auto, auto, auto, auto;
+}
+
+.mode-weather {
+  background:
+    linear-gradient(rgba(45,248,255,.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(7,87,184,.08) 1px, transparent 1px),
+    radial-gradient(circle at 14% 14%, rgba(45,248,255,.34), transparent 24%),
+    radial-gradient(circle at 86% 22%, rgba(255,209,102,.24), transparent 25%),
+    linear-gradient(135deg, #f6fbff 0%, #dff1ff 48%, #cfe7ff 100%);
+  color: #073b7a;
+}
+
+.mode-carousel {
+  background:
+    linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px),
+    radial-gradient(circle at 24% 18%, rgba(255,43,214,.42), transparent 25%),
+    radial-gradient(circle at 78% 34%, rgba(45,248,255,.32), transparent 26%),
+    linear-gradient(135deg, #140618 0%, #071327 54%, #180512 100%);
+}
+
+.aurora {
+  position: absolute;
+  inset: -80px;
+  z-index: -2;
+  opacity: .78;
+  background: conic-gradient(from 180deg, transparent, rgba(45,248,255,.32), rgba(255,43,214,.28), transparent, rgba(67,255,145,.22), transparent);
+  animation: drift 10s linear infinite;
+}
+
+.scanline {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  background: linear-gradient(transparent 0 48%, rgba(255,255,255,.14) 50%, transparent 52% 100%);
+  background-size: 100% 7px;
+  mix-blend-mode: overlay;
+  opacity: .28;
+}
+
+.hud {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.hud span,
+.chips span,
+footer,
+.metrics span,
+.weather-hero span,
+.weather-hero small,
+.deck span,
+.deck small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.1;
+  letter-spacing: 0;
+}
+
+.hud strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--cyan);
+  font-size: 21px;
+  line-height: 1;
+  text-shadow: 0 0 16px rgba(45,248,255,.75);
+}
+
+.mode-weather .hud strong,
+.mode-weather .weather-hero strong,
+.mode-weather .weather-hero b,
+.mode-weather .metrics strong {
+  color: #0757b8;
+  text-shadow: none;
+}
+
+.hud b {
+  max-width: 178px;
+  min-height: 28px;
+  padding: 7px 9px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--cyan);
+  background: rgba(0,0,0,.22);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chips {
+  display: flex;
+  gap: 7px;
+  min-width: 0;
+}
+
+.chips span {
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255,255,255,.08);
+  color: inherit;
+  font-weight: 800;
+}
+
+.chrono {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 24px 118px 42px;
+  align-content: center;
+  justify-items: center;
+  padding-top: 4px;
+}
+
+.chrono span {
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.chrono strong {
+  color: var(--text);
+  font-family: Consolas, "Segoe UI", monospace;
+  font-size: 94px;
+  font-weight: 900;
+  line-height: .95;
+  text-shadow: 0 0 18px rgba(45,248,255,.9), 4px 0 0 rgba(255,43,214,.45);
+  animation: pulseGlow 2.4s ease-in-out infinite;
+}
+
+.chrono small {
+  min-width: 74px;
+  padding: 6px 12px;
+  border: 1px solid rgba(255,43,214,.45);
+  border-radius: 8px;
+  color: var(--pink);
+  background: rgba(255,43,214,.1);
+  font-family: Consolas, monospace;
+  font-size: 25px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.weather-hero {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 136px;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.weather-hero > div,
+.weather-hero > b,
+.metrics article,
+.deck,
+.gallery {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255,255,255,.12);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 12px 28px rgba(0,0,0,.18);
+  backdrop-filter: blur(8px);
+}
+
+.weather-hero > div {
+  padding: 14px;
+}
+
+.weather-hero strong {
+  display: block;
+  margin: 8px 0 6px;
+  overflow: hidden;
+  color: var(--cyan);
+  font-size: 31px;
+  line-height: 1;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.weather-hero > b {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--cyan);
+  font-family: Consolas, monospace;
+  font-size: 36px;
+  line-height: 1;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  min-height: 0;
+}
+
+.metrics.compact {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.metrics article {
+  padding: 9px;
+}
+
+.metrics strong {
+  display: block;
+  margin-top: 8px;
+  overflow: hidden;
+  color: var(--green);
+  font-size: 17px;
+  line-height: 1;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.gallery {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.slide {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: 34px 1fr 34px;
+  padding: 18px;
+  opacity: 0;
+  transform: translateX(16px) scale(1.02);
+  transition: opacity .55s ease, transform .55s ease;
+}
+
+.slide.active {
+  opacity: 1;
+  transform: translateX(0) scale(1);
+}
+
+.slide::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(circle at 20% 30%, rgba(255,255,255,.34), transparent 19%),
+    radial-gradient(circle at 76% 70%, rgba(255,255,255,.24), transparent 17%),
+    linear-gradient(135deg, rgba(45,248,255,.7), rgba(255,43,214,.62));
+}
+
+.slide[data-slide="1"]::before { background: linear-gradient(135deg, rgba(255,209,102,.75), rgba(67,255,145,.62)); }
+.slide[data-slide="2"]::before { background: linear-gradient(135deg, rgba(45,248,255,.68), rgba(7,87,184,.7)); }
+.slide[data-slide="3"]::before { background: linear-gradient(135deg, rgba(255,43,214,.68), rgba(255,91,91,.64)); }
+
+.slide span {
+  color: rgba(255,255,255,.76);
+  font-family: Consolas, monospace;
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.slide strong {
+  align-self: center;
+  overflow: hidden;
+  color: #fff;
+  font-size: 45px;
+  font-weight: 950;
+  line-height: .95;
+  text-shadow: 0 10px 28px rgba(0,0,0,.35);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.slide small {
+  color: rgba(255,255,255,.82);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.deck {
+  display: grid;
+  grid-template-columns: 1fr 148px;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 11px;
+}
+
+.deck strong {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+footer {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 74px 1fr 74px;
+  gap: 8px;
+  align-items: center;
+}
+
+footer span {
+  min-width: 0;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action {
+  min-width: 0;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: linear-gradient(135deg, rgba(45,248,255,.24), rgba(255,43,214,.2));
+  font-size: 11px;
+  font-weight: 900;
+}
+
+@keyframes drift {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulseGlow {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.22); }
+}
+`;
+
+  const app = `const SPEC = ${JSON.stringify(spec)};
+const PROMPT = SPEC.prompt;
+const BUILD_ID = ${JSON.stringify(id)};
+const el = id => document.getElementById(id);
+const slides = Array.from(document.querySelectorAll(".slide"));
+const captions = ["Neon Street", "Orbit Garden", "Signal Peak", "Night Harbor"];
+let current = 0;
+let paused = false;
+
+window.VibeBoardHardware = {
+  async getStatus() {
+    const res = await fetch("/api/status", { cache: "no-store" });
+    if (!res.ok) throw new Error("status " + res.status);
+    return res.json();
+  },
+  async getProgramResult() {
+    const res = await fetch("./hardware-result.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("program " + res.status);
+    return res.json();
+  },
+  async getSnapshot() {
+    const settled = await Promise.allSettled([this.getStatus(), this.getProgramResult()]);
+    return {
+      status: settled[0].status === "fulfilled" ? settled[0].value : null,
+      program: settled[1].status === "fulfilled" ? settled[1].value : null
+    };
+  },
+  audio: {
+    async status() {
+      const res = await fetch("/api/audio/status", { cache: "no-store" });
+      if (!res.ok) throw new Error("audio status " + res.status);
+      return res.json();
+    },
+    async play(options = {}) {
+      const res = await fetch("/api/audio/play", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio play " + res.status);
+      return res.json();
+    },
+    async record(options = {}) {
+      const res = await fetch("/api/audio/record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio record " + res.status);
+      return res.json();
+    },
+    async stop(options = {}) {
+      const res = await fetch("/api/audio/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio stop " + res.status);
+      return res.json();
+    }
+  }
+};
+
+function pad(value) {
+  return String(value).padStart(2, "0");
+}
+
+function setText(id, value) {
+  const node = el(id);
+  if (node) node.textContent = value == null || value === "" ? "--" : String(value);
+}
+
+function drawClock() {
+  const now = new Date();
+  setText("time", pad(now.getHours()) + ":" + pad(now.getMinutes()));
+  setText("seconds", pad(now.getSeconds()));
+  setText("date", now.toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" }));
+}
+
+function showSlide(index) {
+  if (!slides.length) return;
+  current = (index + slides.length) % slides.length;
+  slides.forEach((slide, idx) => slide.classList.toggle("active", idx === current));
+  setText("slide", String(current + 1) + "/" + String(slides.length));
+  setText("caption", captions[current] || "Slide " + String(current + 1));
+}
+
+const weatherText = { 0: "晴朗", 1: "大部晴朗", 2: "局部多云", 3: "阴", 45: "有雾", 61: "小雨", 63: "中雨", 65: "大雨", 80: "阵雨", 95: "雷雨" };
+
+async function refreshWeather() {
+  if (SPEC.mode !== "weather") return;
+  setText("weatherText", "霓虹晴空");
+  setText("weatherTemp", "32°C");
+  setText("weatherMeta", "深圳参考天气");
+  try {
+    const res = await fetch("https://api.open-meteo.com/v1/forecast?latitude=22.5431&longitude=114.0579&current=temperature_2m,weather_code&timezone=Asia%2FShanghai", { cache: "no-store" });
+    if (!res.ok) throw new Error("weather " + res.status);
+    const data = await res.json();
+    const currentWeather = data.current || {};
+    const temp = Number(currentWeather.temperature_2m);
+    const code = Number(currentWeather.weather_code);
+    setText("weatherText", weatherText[code] || "天气已同步");
+    setText("weatherTemp", Number.isFinite(temp) ? Math.round(temp) + "°C" : "--°C");
+    setText("weatherMeta", "深圳实时天气");
+  } catch {
+    setText("weatherText", "霓虹晴空");
+    setText("weatherTemp", "32°C");
+    setText("weatherMeta", "深圳参考天气");
+  }
+}
+
+async function refreshHardware() {
+  try {
+    const snapshot = await window.VibeBoardHardware.getSnapshot();
+    const data = snapshot.status || {};
+    const program = snapshot.program || {};
+    const service = data.services || {};
+    const network = data.network || {};
+    setText("service", service.display || service.ssh || "Linux API ready");
+    setText("eventLog", program.runtime || ("build " + BUILD_ID.slice(0, 12)));
+    setText("wifi", network.wifi || "ready");
+    setText("ip", (network.addresses && network.addresses[0]) || "--");
+    setText("temp", data.cpu_temp == null ? "--" : data.cpu_temp + "°C");
+    setText("memory", data.memory ? Number(data.memory.percent || 0).toFixed(1) + "%" : "--");
+  } catch {
+    setText("service", "offline preview");
+    setText("eventLog", "local cinematic mode");
+    setText("wifi", "local");
+    setText("ip", "preview");
+    setText("temp", "42°C");
+    setText("memory", "36%");
+  }
+}
+
+function handleAction(action) {
+  if (action === "previous") showSlide(current - 1);
+  if (action === "next") showSlide(current + 1);
+  if (action === "refresh") {
+    refreshHardware();
+    refreshWeather();
+  }
+}
+
+document.querySelectorAll(".action").forEach(button => {
+  button.addEventListener("click", () => handleAction(button.dataset.action));
+});
+
+drawClock();
+showSlide(0);
+refreshHardware();
+refreshWeather();
+setInterval(drawClock, 1000);
+setInterval(refreshHardware, 5000);
+setInterval(() => {
+  if (slides.length && !paused) showSlide(current + 1);
+}, 2600);
+console.log("VibeBoard advanced preview ready", BUILD_ID, PROMPT);
+`;
+
+  return {
+    "index.html": index,
+    "style.css": style,
+    "app.js": app,
+  };
+}
+function advancedTemplateFilesV2(prompt, id, spec) {
+  const specialized = advancedTemplateFiles(prompt, id, spec);
+  if (specialized) {
+    if (spec.mode === "clock") {
+      specialized["index.html"] = specialized["index.html"]
+        .replaceAll("Neon Chrono", "Cyber Chrono")
+        .replace('data-action="previous">Prev</button>', 'data-action="refresh">Sync</button>')
+        .replace('data-action="next">Next</button>', 'data-action="refresh">Glow</button>');
+    }
+    if (spec.mode === "weather") {
+      specialized["index.html"] = specialized["index.html"]
+        .replace('data-action="previous">Prev</button>', 'data-action="refresh">Refresh</button>')
+        .replace('data-action="next">Next</button>', 'data-action="refresh">Sync</button>');
+    }
+    if (spec.mode === "carousel") {
+      specialized["index.html"] = specialized["index.html"]
+        .replace('class="gallery"', 'class="gallery carousel-stage"');
+    }
+    return specialized;
+  }
+
+  const titleByMode = {
+    assistant: "AI Mission Deck",
+    voice: "Voice Spectrum",
+    dashboard: "System Nebula",
+    timer: "Focus Reactor",
+    control: "Relay Command"
+  };
+  const chipsByMode = {
+    assistant: ["AI CORE", "LIVE MEMORY", "GPIO READY"],
+    voice: ["VOICE WAVE", "MIC INPUT", "AI REPLY"],
+    dashboard: ["SYSTEM BUS", "LIVE STATUS", "LINUX"],
+    timer: ["FOCUS LOOP", "COUNTDOWN", "PULSE"],
+    control: ["GPIO", "RELAY", "COMMAND"]
+  };
+  const title = titleByMode[spec.mode] || "AI Mission Deck";
+  const chips = chipsByMode[spec.mode] || chipsByMode.assistant;
+  const actions = (spec.actions || []).slice(0, 3);
+  while (actions.length < 3) actions.push({ id: actions.length ? "secondary" : "primary", label: actions.length ? "Pulse" : "Run" });
+  const widgetCards = spec.widgets.slice(0, 4).map(widget => (
+    `<article class="widget" data-widget="${htmlEscape(widget.id)}"><span>${htmlEscape(widget.label)}</span><strong id="${htmlEscape(widget.id)}">${htmlEscape(widget.value)}</strong><small>${htmlEscape(widget.hint)}</small></article>`
+  )).join("\n      ");
+  const actionButtons = actions.map(action => (
+    `<button class="action" type="button" data-action="${htmlEscape(action.id)}">${htmlEscape(action.label)}</button>`
+  )).join("\n          ");
+
+  const index = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibeBoard ${htmlEscape(title)}</title>
+  <link rel="stylesheet" href="./style.css?v=${id}">
+</head>
+<body>
+  <main class="screen mode-${htmlEscape(spec.mode)}" data-mode="${htmlEscape(spec.mode)}">
+    <div class="aurora" aria-hidden="true"></div>
+    <div class="scanline" aria-hidden="true"></div>
+    <div class="cityline" aria-hidden="true"></div>
+    <header class="hud">
+      <div>
+        <span id="date">480x360 RK3566 Linux kiosk</span>
+        <strong>${htmlEscape(title)}</strong>
+      </div>
+      <b id="service">Linux API --</b>
+    </header>
+    <section class="chips">
+      ${chips.map(chip => `<span>${htmlEscape(chip)}</span>`).join("\n      ")}
+    </section>
+    <section class="scene" aria-label="generated app scene">
+      <div class="scene-copy">
+        <span>${htmlEscape(spec.mode.toUpperCase())} SCENE</span>
+        <h1>${htmlEscape(spec.title)}</h1>
+        <p>${htmlEscape(spec.subtitle)}</p>
+      </div>
+      <div class="reactor" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+    </section>
+    <section class="widgets">
+      ${widgetCards}
+    </section>
+    <section class="actions">
+      <div>
+        ${actionButtons}
+      </div>
+      <small id="eventLog">hardware api waiting</small>
+    </section>
+    <footer><span id="clock">--:--</span><span>${id}</span></footer>
+  </main>
+  <script src="./app.js?v=${id}"></script>
+</body>
+</html>
+`;
+
+  const style = `:root {
+  color-scheme: dark;
+  --bg: #05030f;
+  --panel: rgba(8, 13, 34, .72);
+  --line: rgba(125, 249, 255, .26);
+  --text: #f8fbff;
+  --muted: #91a8c7;
+  --cyan: #2df8ff;
+  --pink: #ff2bd6;
+  --green: #43ff91;
+  --gold: #ffd166;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  width: 480px;
+  height: 360px;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
+}
+
+button { font: inherit; }
+
+.screen {
+  position: relative;
+  width: 480px;
+  height: 360px;
+  display: grid;
+  grid-template-rows: 46px 28px 118px 78px 44px 18px;
+  gap: 7px;
+  padding: 10px;
+  overflow: hidden;
+  isolation: isolate;
+  background:
+    linear-gradient(rgba(125,249,255,.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,43,214,.06) 1px, transparent 1px),
+    radial-gradient(circle at 14% 18%, rgba(45,248,255,.32), transparent 24%),
+    radial-gradient(circle at 82% 18%, rgba(255,43,214,.27), transparent 25%),
+    radial-gradient(circle at 62% 88%, rgba(67,255,145,.14), transparent 26%),
+    linear-gradient(135deg, #070817 0%, #13051d 48%, #06111c 100%);
+  background-size: 28px 28px, 28px 28px, auto, auto, auto, auto;
+}
+
+.mode-dashboard {
+  background:
+    linear-gradient(rgba(255,209,102,.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(45,248,255,.06) 1px, transparent 1px),
+    radial-gradient(circle at 18% 24%, rgba(255,209,102,.34), transparent 25%),
+    radial-gradient(circle at 84% 72%, rgba(45,248,255,.24), transparent 28%),
+    linear-gradient(135deg, #08111d 0%, #1a1320 52%, #061922 100%);
+}
+
+.mode-control {
+  background:
+    linear-gradient(rgba(255,43,214,.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(67,255,145,.06) 1px, transparent 1px),
+    radial-gradient(circle at 18% 18%, rgba(255,43,214,.34), transparent 26%),
+    radial-gradient(circle at 82% 70%, rgba(67,255,145,.24), transparent 28%),
+    linear-gradient(135deg, #140612 0%, #061513 58%, #190918 100%);
+}
+
+.mode-timer {
+  background:
+    linear-gradient(rgba(167,139,250,.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(45,248,255,.06) 1px, transparent 1px),
+    radial-gradient(circle at 22% 20%, rgba(167,139,250,.36), transparent 26%),
+    radial-gradient(circle at 78% 76%, rgba(255,209,102,.2), transparent 28%),
+    linear-gradient(135deg, #10091e 0%, #071327 54%, #130f08 100%);
+}
+
+.mode-voice {
+  background:
+    linear-gradient(rgba(56,189,248,.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,43,214,.06) 1px, transparent 1px),
+    radial-gradient(circle at 20% 24%, rgba(56,189,248,.35), transparent 26%),
+    radial-gradient(circle at 80% 70%, rgba(255,43,214,.2), transparent 28%),
+    linear-gradient(135deg, #07111f 0%, #0c071b 58%, #061522 100%);
+}
+
+.aurora {
+  position: absolute;
+  inset: -80px;
+  z-index: -2;
+  opacity: .74;
+  background: conic-gradient(from 180deg, transparent, rgba(45,248,255,.32), rgba(255,43,214,.28), transparent, rgba(67,255,145,.22), transparent);
+  animation: drift 10s linear infinite;
+}
+
+.scanline {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  background: linear-gradient(transparent 0 48%, rgba(255,255,255,.14) 50%, transparent 52% 100%);
+  background-size: 100% 7px;
+  mix-blend-mode: overlay;
+  opacity: .26;
+}
+
+.cityline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 38px;
+  z-index: -1;
+  height: 54px;
+  opacity: .42;
+  background:
+    linear-gradient(90deg, transparent 0 18px, rgba(45,248,255,.28) 18px 32px, transparent 32px 48px),
+    linear-gradient(180deg, transparent 0 22px, rgba(255,43,214,.2) 22px 54px);
+  background-size: 48px 54px, 100% 54px;
+  filter: drop-shadow(0 0 12px rgba(45,248,255,.5));
+}
+
+.hud {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.hud span,
+.chips span,
+.scene span,
+.scene p,
+.widget span,
+.widget small,
+.actions small,
+footer {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.1;
+  letter-spacing: 0;
+}
+
+.hud strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--cyan);
+  font-size: 21px;
+  line-height: 1;
+  text-shadow: 0 0 16px rgba(45,248,255,.75);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud b {
+  max-width: 178px;
+  min-height: 28px;
+  padding: 7px 9px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--cyan);
+  background: rgba(0,0,0,.22);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chips {
+  display: flex;
+  gap: 7px;
+  min-width: 0;
+}
+
+.chips span {
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255,255,255,.08);
+  color: inherit;
+  font-weight: 800;
+}
+
+.scene,
+.widget {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 12px 28px rgba(0,0,0,.18);
+  backdrop-filter: blur(8px);
+}
+
+.scene {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 124px;
+  gap: 8px;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.scene-copy {
+  min-width: 0;
+  z-index: 1;
+}
+
+h1 {
+  max-width: 276px;
+  margin: 8px 0 6px;
+  overflow: hidden;
+  color: var(--cyan);
+  font-size: 29px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 0 16px rgba(45,248,255,.68);
+}
+
+p {
+  display: -webkit-box;
+  max-width: 276px;
+  margin: 0;
+  overflow: hidden;
+  line-height: 1.35;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.reactor {
+  position: relative;
+  width: 106px;
+  height: 106px;
+  align-self: center;
+  justify-self: end;
+}
+
+.reactor i {
+  position: absolute;
+  inset: 0;
+  border: 2px solid rgba(45,248,255,.42);
+  border-radius: 50%;
+  box-shadow: 0 0 18px rgba(45,248,255,.36), inset 0 0 18px rgba(255,43,214,.22);
+  animation: orbit 4s linear infinite;
+}
+
+.reactor i:nth-child(2) {
+  inset: 16px;
+  border-color: rgba(255,43,214,.52);
+  animation-duration: 2.7s;
+  animation-direction: reverse;
+}
+
+.reactor i:nth-child(3) {
+  inset: 36px;
+  border-color: rgba(67,255,145,.52);
+  animation-duration: 1.8s;
+}
+
+.meter {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 10px;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  height: 18px;
+}
+
+.meter i {
+  display: block;
+  border-radius: 4px;
+  background: linear-gradient(90deg, rgba(45,248,255,.62), rgba(255,43,214,.42));
+  transform-origin: bottom;
+  animation: meter 1.3s ease-in-out infinite;
+}
+
+.meter i:nth-child(2) { animation-delay: .16s; }
+.meter i:nth-child(3) { animation-delay: .31s; }
+.meter i:nth-child(4) { animation-delay: .47s; }
+.meter i:nth-child(5) { animation-delay: .62s; }
+
+.widgets {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 7px;
+}
+
+.widget {
+  padding: 8px;
+}
+
+.widget strong {
+  display: block;
+  margin: 7px 0 4px;
+  overflow: hidden;
+  color: var(--green);
+  font-size: 17px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.widget small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.actions div {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 7px;
+}
+
+.action {
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: linear-gradient(135deg, rgba(45,248,255,.24), rgba(255,43,214,.2));
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.action.active {
+  border-color: var(--green);
+  box-shadow: 0 0 16px rgba(67,255,145,.45);
+}
+
+.actions small,
+footer span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+@keyframes drift {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes orbit {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes meter {
+  0%, 100% { transform: scaleY(.35); opacity: .58; }
+  50% { transform: scaleY(1); opacity: 1; }
+}
+`;
+
+  const app = `const SPEC = ${JSON.stringify(spec)};
+const PROMPT = SPEC.prompt;
+const BUILD_ID = ${JSON.stringify(id)};
+const el = id => document.getElementById(id);
+let secondsLeft = 25 * 60;
+let cycles = 0;
+
+window.VibeBoardHardware = {
+  async getStatus() {
+    const res = await fetch("/api/status", { cache: "no-store" });
+    if (!res.ok) throw new Error("status " + res.status);
+    return res.json();
+  },
+  async getProgramResult() {
+    const res = await fetch("./hardware-result.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("program " + res.status);
+    return res.json();
+  },
+  async getSnapshot() {
+    const settled = await Promise.allSettled([this.getStatus(), this.getProgramResult()]);
+    return {
+      status: settled[0].status === "fulfilled" ? settled[0].value : null,
+      program: settled[1].status === "fulfilled" ? settled[1].value : null
+    };
+  },
+  audio: {
+    async status() {
+      const res = await fetch("/api/audio/status", { cache: "no-store" });
+      if (!res.ok) throw new Error("audio status " + res.status);
+      return res.json();
+    },
+    async play(options = {}) {
+      const res = await fetch("/api/audio/play", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio play " + res.status);
+      return res.json();
+    },
+    async record(options = {}) {
+      const res = await fetch("/api/audio/record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio record " + res.status);
+      return res.json();
+    },
+    async stop(options = {}) {
+      const res = await fetch("/api/audio/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio stop " + res.status);
+      return res.json();
+    }
+  }
+};
+
+function pad(value) {
+  return String(value).padStart(2, "0");
+}
+
+function setText(id, value) {
+  const node = el(id);
+  if (node) node.textContent = value == null || value === "" ? "--" : String(value);
+}
+
+function drawClock() {
+  const now = new Date();
+  setText("clock", pad(now.getHours()) + ":" + pad(now.getMinutes()));
+}
+
+function tickTimer() {
+  if (SPEC.mode !== "timer") return;
+  const minutes = Math.floor(secondsLeft / 60);
+  const seconds = secondsLeft % 60;
+  setText("remaining", pad(minutes) + ":" + pad(seconds));
+  setText("cycles", String(cycles));
+  secondsLeft -= 1;
+  if (secondsLeft < 0) {
+    cycles += 1;
+    secondsLeft = 25 * 60;
+  }
+}
+
+function animateVoice() {
+  if (SPEC.mode !== "voice") return;
+  const level = 34 + Math.round(Math.random() * 62);
+  setText("level", level + "%");
+  setText("transcript", level > 72 ? "捕捉到语音" : "监听中");
+  setText("response", level > 72 ? "准备回应" : "等待指令");
+}
+
+async function refreshHardware() {
+  try {
+    const snapshot = await window.VibeBoardHardware.getSnapshot();
+    const data = snapshot.status || {};
+    const program = snapshot.program || {};
+    const service = data.services || {};
+    const network = data.network || {};
+    setText("service", service.display || service.ssh || "Linux API ready");
+    setText("eventLog", program.runtime || ("build " + BUILD_ID.slice(0, 12)));
+    setText("wifi", network.wifi || "ready");
+    setText("ip", (network.addresses && network.addresses[0]) || "--");
+    setText("temp", data.cpu_temp == null ? "--" : data.cpu_temp + "°C");
+    setText("memory", data.memory ? Number(data.memory.percent || 0).toFixed(1) + "%" : "--");
+    setText("load", data.loadavg || "0.18");
+    setText("runtime", program.runtime || "executed");
+    setText("serviceState", service.display || "active");
+  } catch {
+    setText("service", "offline preview");
+    setText("eventLog", "local cinematic mode");
+    setText("wifi", "local");
+    setText("ip", "preview");
+    setText("temp", "42°C");
+    setText("memory", "36%");
+    setText("load", "0.18");
+    setText("runtime", "simulated");
+    setText("serviceState", "active");
+  }
+}
+
+async function handleAction(action, button) {
+  if (action === "primary") {
+    if (SPEC.mode === "voice") {
+      const result = await window.VibeBoardHardware.audio.record({ duration: 8 });
+      setText("level", result.mode === "offline-simulated" ? "simulated" : "recording");
+      setText("transcript", "录音中");
+      setText("eventLog", result.message || "microphone recording");
+    } else {
+      setText("eventLog", "command pulse accepted");
+      setText("switchA", "on");
+    }
+  }
+  if (action === "secondary") {
+    if (SPEC.mode === "voice") {
+      const result = await window.VibeBoardHardware.audio.stop();
+      setText("level", "ready");
+      setText("transcript", "录音已停止");
+      setText("eventLog", result.message || "audio stopped");
+    } else {
+      setText("eventLog", "secondary command toggled");
+      setText("switchB", "on");
+    }
+    if (SPEC.mode === "timer") {
+      secondsLeft = 25 * 60;
+      tickTimer();
+    }
+  }
+  if (action === "refresh") {
+    if (SPEC.mode === "voice") {
+      const result = await window.VibeBoardHardware.audio.play();
+      setText("response", result.message || "speaker playback");
+      setText("eventLog", result.mode === "offline-simulated" ? "simulated playback" : "speaker playback");
+    } else {
+      refreshHardware();
+    }
+  }
+  if (button) button.classList.toggle("active");
+}
+
+document.querySelectorAll(".action").forEach(button => {
+  button.addEventListener("click", () => handleAction(button.dataset.action, button));
+});
+
+drawClock();
+tickTimer();
+animateVoice();
+refreshHardware();
+setInterval(drawClock, 1000);
+setInterval(tickTimer, 1000);
+setInterval(animateVoice, 1300);
+setInterval(refreshHardware, 5000);
+console.log("VibeBoard advanced preview ready", BUILD_ID, PROMPT);
+`;
+
+  return {
+    "index.html": index,
+    "style.css": style,
+    "app.js": app
+  };
+}
 
 const HISTORY_WINDOW = 10; // keep last N messages uncompressed
 const HISTORY_LOOKBACK = 20; // how many old messages to summarize
@@ -2205,6 +3785,40 @@ window.VibeBoardHardware = {
       status: settled[0].status === "fulfilled" ? settled[0].value : null,
       program: settled[1].status === "fulfilled" ? settled[1].value : null
     };
+  },
+  audio: {
+    async status() {
+      const res = await fetch("/api/audio/status", { cache: "no-store" });
+      if (!res.ok) throw new Error("audio status " + res.status);
+      return res.json();
+    },
+    async play(options = {}) {
+      const res = await fetch("/api/audio/play", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio play " + res.status);
+      return res.json();
+    },
+    async record(options = {}) {
+      const res = await fetch("/api/audio/record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio record " + res.status);
+      return res.json();
+    },
+    async stop(options = {}) {
+      const res = await fetch("/api/audio/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio stop " + res.status);
+      return res.json();
+    }
   }
 };
 
@@ -2281,6 +3895,40 @@ window.VibeBoardHardware = {
       status: settled[0].status === "fulfilled" ? settled[0].value : null,
       program: settled[1].status === "fulfilled" ? settled[1].value : null
     };
+  },
+  audio: {
+    async status() {
+      const res = await fetch("/api/audio/status", { cache: "no-store" });
+      if (!res.ok) throw new Error("audio status " + res.status);
+      return res.json();
+    },
+    async play(options = {}) {
+      const res = await fetch("/api/audio/play", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio play " + res.status);
+      return res.json();
+    },
+    async record(options = {}) {
+      const res = await fetch("/api/audio/record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio record " + res.status);
+      return res.json();
+    },
+    async stop(options = {}) {
+      const res = await fetch("/api/audio/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options)
+      });
+      if (!res.ok) throw new Error("audio stop " + res.status);
+      return res.json();
+    }
   }
 };
 
@@ -2654,7 +4302,7 @@ result = {
     "network": network_interfaces(),
     "loadavg": read_first("/proc/loadavg"),
     "cwd": os.getcwd(),
-    "available_apis": ["/api/status", "./hardware-result.json"]
+    "available_apis": ["/api/status", "./hardware-result.json", "/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"]
 }
 
 print(json.dumps(result, ensure_ascii=False, sort_keys=True))
@@ -3568,6 +5216,29 @@ async function route(req, res) {
       json(res, 200, await withDevice(deviceId, () => fastRawBoardStatus()));
       return;
     }
+    if (req.method === "GET" && url.pathname === "/api/audio/status") {
+      const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
+      json(res, 200, await withDevice(deviceId, () => audioStatus()));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/audio/play") {
+      const body = await readBody(req);
+      const deviceId = deviceIdFrom(body || {}, BOARD.id);
+      json(res, 200, await withDevice(deviceId, () => audioPlay(body || {})));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/audio/record") {
+      const body = await readBody(req);
+      const deviceId = deviceIdFrom(body || {}, BOARD.id);
+      json(res, 200, await withDevice(deviceId, () => audioRecord(body || {})));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/audio/stop") {
+      const body = await readBody(req).catch(() => ({}));
+      const deviceId = deviceIdFrom(body || {}, BOARD.id);
+      json(res, 200, await withDevice(deviceId, () => audioStop()));
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/api/logs") {
       const limit = Number(url.searchParams.get("limit") || 80);
       json(res, 200, { ok: true, logs: await readServerLogTail(limit) });
@@ -3723,40 +5394,11 @@ async function route(req, res) {
         }
       }
 
-      if (!settings.enabled) {
-        // Fallback to template if no model configured
-        const build = await writeGenerated(prompt, modelSettings, []);
-        if (conversationId) {
-          try {
-            conversationStore.saveConversationFiles(conversationId, build.id, build.files);
-          } catch (saveErr) {
-            await appendServerLog("generate.template.conversation_save_failed", {
-              id: build.id,
-              conversationId,
-              error: saveErr.message,
-            });
-          }
-        }
-        json(res, 200, {
-          ok: true, id: build.id, files: build.files,
-          manifest: build.manifest || null, source: "template",
-          spec: build.agentRun?.spec || null,
-          evidence: formatRunEvidence(build.agentRun || {}),
-          buildEvidence: build.buildEvidence || null,
-          verificationMode: boardPassword ? "real-ready" : "local-simulated",
-          agentActions: [], thinking: ""
-        });
-        return;
-      }
-
       // Prepare file store from this project only. Chat history alone does not
       // mean the user is editing existing code.
       const fileStore = { ...conversationFiles };
       const isEditing = Object.keys(fileStore).some(name => name !== "manifest.json");
       const agentStartedAt = Date.now();
-
-      // Run the coding agent
-      console.log(`[generate] Agent starting (${isEditing ? "edit" : "new"} mode)`);
       const agentSettings = {
         ...settings,
         maxIterations: positiveInt(process.env.VIBEBOARD_AGENT_MAX_ITERATIONS, DEFAULT_GENERATE_AGENT_MAX_ITERATIONS),
@@ -3764,151 +5406,188 @@ async function route(req, res) {
         timeoutMs: positiveInt(process.env.VIBEBOARD_AGENT_TIMEOUT_MS, DEFAULT_GENERATE_AGENT_TIMEOUT_MS),
         llmTimeoutMs: positiveInt(process.env.VIBEBOARD_AGENT_LLM_TIMEOUT_MS, DEFAULT_GENERATE_AGENT_LLM_TIMEOUT_MS),
       };
-      await appendServerLog("generate.agent.start", {
-        prompt: prompt.slice(0, 160),
+
+      const buildResult = await runBuildGraph({
+        prompt,
+        rawPrompt,
+        settings,
+        agentSettings,
+        modelSettings,
+        fileStore,
+        history,
+        userPreferences,
+        conversationId,
         isEditing,
-        fileCount: Object.keys(fileStore).length,
-        files: Object.keys(fileStore).slice(0, 12),
-        model: settings.model,
-        provider: settings.provider,
-        maxIterations: agentSettings.maxIterations,
-        maxVerificationAttempts: agentSettings.maxVerificationAttempts,
-        timeoutMs: agentSettings.timeoutMs,
-        llmTimeoutMs: agentSettings.llmTimeoutMs,
-      });
-      let agentResult;
-      try {
-        agentResult = await runAgent(agentSettings, prompt, fileStore, history, (action) => {
-          console.log(`[agent] ${action.tool}: ${action.args?.path || action.args?.query || action.args?.summary || ""}`);
-          appendServerLog("generate.agent.action", {
-            tool: action.tool,
-            path: action.args?.path || "",
-            query: action.args?.query || "",
-            summary: action.args?.summary || "",
-          }).catch(() => {});
-        }, userPreferences, experienceStore, { ssh, scp, board: BOARD });
-      } catch (agentErr) {
-        await appendServerLog("generate.agent.failed", {
-          error: agentErr.message,
-          ...structuredErrorFieldsForLog(agentErr),
-          durationMs: Date.now() - agentStartedAt,
-        });
-        throw agentErr;
-      }
-
-      if (!agentResult.success) {
-        await appendServerLog("generate.agent.failed", {
-          error: agentResult.summary || "Agent failed",
-          agentError: agentResult.error || null,
-          actionCount: agentResult.actions?.length || 0,
-          limit: agentResult.limit || "",
-          iteration: agentResult.iteration ?? null,
-          durationMs: Date.now() - agentStartedAt,
-        });
-        const error = new Error(agentResult.summary || "Agent failed");
-        if (agentResult.error && typeof agentResult.error === "object") {
-          Object.assign(error, agentResult.error);
-        }
-        throw error;
-      }
-
-      // Ensure hardware_app.py and manifest exist
-      const id = buildId();
-      const agentFiles = agentResult.files;
-
-      if (!agentFiles["hardware_app.py"]) {
-        const spec = createAppSpec(prompt, id);
-        agentFiles["hardware_app.py"] = generatedHardwareAppV2(prompt, id, spec);
-      }
-      agentFiles["hardware_app.py"] = injectHardwareAppContractsV2(agentFiles["hardware_app.py"], id);
-
-      const spec = createAppSpec(prompt, id);
-      const manifest = generatedManifestV2(prompt, id, spec, {
-        generator: "vibeboard-agent-v1",
-        title: prompt.slice(0, 40),
-        source: "agent",
-        model: settings.model,
-        provider: settings.provider,
-        notes: agentResult.summary,
-        target: BOARD.targetStatic
-      });
-      agentFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
-
-      // Write to disk
-      await writeGeneratedFiles(GENERATED_DIR, agentFiles);
-      let agentRun = transitionRun(createAgentRun({
-        prompt,
-        mode: "agent",
-        buildId: id,
-        hardwareMode: boardPassword ? "real" : "simulated",
-      }), AGENT_PHASES.CODE, {
-        spec: buildInitialSpec(prompt, { requireBoard: Boolean(boardPassword) }),
-      });
-      agentRun = appendEvidence(agentRun, {
-        phase: AGENT_PHASES.CODE,
-        ok: true,
-        summary: agentResult.summary || "agent code completed",
-        evidence: {
-          whatWorked: agentResult.whatWorked || [],
-          whatFailed: agentResult.whatFailed || [],
-          actionCount: agentResult.actions?.length || 0,
-        },
-        issues: [],
-      });
-      currentBuild = { id, prompt, files: agentFiles, dir: GENERATED_DIR, built: false, deployed: false, manifest, agentRun };
-
-      // Auto-build
-      try {
-        await buildCurrent();
-      } catch (buildErr) {
-        console.error("[generate] Build error:", buildErr.message);
-        await appendServerLog("generate.agent.build_failed", { id, error: buildErr.message });
-        throw new Error(`Generated app failed validation: ${buildErr.message}`);
-      }
-      recordAgentLearning({
-        prompt,
-        agentResult,
-        verificationResult: currentBuild.buildEvidence || null,
-        success: true,
-      });
-
-      // Save to conversation
-      const convId = body.conversation_id || null;
-      if (convId) {
-        try {
-          conversationStore.saveConversationFiles(convId, id, agentFiles);
-        } catch (saveErr) {
-          await appendServerLog("generate.agent.conversation_save_failed", {
-            id,
-            conversationId: convId,
-            error: saveErr.message,
+      }, {
+        agentGenerate: async () => {
+          console.log(`[generate] Agent starting (${isEditing ? "edit" : "new"} mode)`);
+          await appendServerLog("generate.agent.start", {
+            prompt: prompt.slice(0, 160),
+            isEditing,
+            fileCount: Object.keys(fileStore).length,
+            files: Object.keys(fileStore).slice(0, 12),
+            model: settings.model,
+            provider: settings.provider,
+            maxIterations: agentSettings.maxIterations,
+            maxVerificationAttempts: agentSettings.maxVerificationAttempts,
+            timeoutMs: agentSettings.timeoutMs,
+            llmTimeoutMs: agentSettings.llmTimeoutMs,
           });
-        }
-      }
 
-      await appendServerLog("generate.agent.done", {
-        id,
-        actionCount: agentResult.actions?.length || 0,
-        durationMs: Date.now() - agentStartedAt,
+          let agentResult;
+          try {
+            agentResult = await runAgent(agentSettings, prompt, fileStore, history, (action) => {
+              console.log(`[agent] ${action.tool}: ${action.args?.path || action.args?.query || action.args?.summary || ""}`);
+              appendServerLog("generate.agent.action", {
+                tool: action.tool,
+                path: action.args?.path || "",
+                query: action.args?.query || "",
+                summary: action.args?.summary || "",
+              }).catch(() => {});
+            }, userPreferences, experienceStore, { ssh, scp, board: BOARD });
+          } catch (agentErr) {
+            await appendServerLog("generate.agent.failed", {
+              error: agentErr.message,
+              ...structuredErrorFieldsForLog(agentErr),
+              durationMs: Date.now() - agentStartedAt,
+            });
+            throw agentErr;
+          }
+
+          if (!agentResult.success) {
+            await appendServerLog("generate.agent.failed", {
+              error: agentResult.summary || "Agent failed",
+              agentError: agentResult.error || null,
+              actionCount: agentResult.actions?.length || 0,
+              limit: agentResult.limit || "",
+              iteration: agentResult.iteration ?? null,
+              durationMs: Date.now() - agentStartedAt,
+            });
+            const error = new Error(agentResult.summary || "Agent failed");
+            if (agentResult.error && typeof agentResult.error === "object") {
+              Object.assign(error, agentResult.error);
+            }
+            throw error;
+          }
+
+          const id = buildId();
+          const agentFiles = agentResult.files;
+
+          if (!agentFiles["hardware_app.py"]) {
+            const spec = createAppSpec(prompt, id);
+            agentFiles["hardware_app.py"] = generatedHardwareAppV2(prompt, id, spec);
+          }
+          agentFiles["hardware_app.py"] = injectHardwareAppContractsV2(agentFiles["hardware_app.py"], id);
+
+          const spec = createAppSpec(prompt, id);
+          const manifest = generatedManifestV2(prompt, id, spec, {
+            generator: "vibeboard-agent-v1",
+            title: prompt.slice(0, 40),
+            source: "agent",
+            model: settings.model,
+            provider: settings.provider,
+            notes: agentResult.summary,
+            target: BOARD.targetStatic
+          });
+          agentFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
+
+          await writeGeneratedFiles(GENERATED_DIR, agentFiles);
+          let agentRun = transitionRun(createAgentRun({
+            prompt,
+            mode: "agent",
+            buildId: id,
+            hardwareMode: boardPassword ? "real" : "simulated",
+          }), AGENT_PHASES.CODE, {
+            spec: buildInitialSpec(prompt, { requireBoard: Boolean(boardPassword) }),
+          });
+          agentRun = appendEvidence(agentRun, {
+            phase: AGENT_PHASES.CODE,
+            ok: true,
+            summary: agentResult.summary || "agent code completed",
+            evidence: {
+              whatWorked: agentResult.whatWorked || [],
+              whatFailed: agentResult.whatFailed || [],
+              actionCount: agentResult.actions?.length || 0,
+            },
+            issues: [],
+          });
+          currentBuild = { id, prompt, files: agentFiles, dir: GENERATED_DIR, built: false, deployed: false, manifest, agentRun };
+
+          try {
+            await buildCurrent();
+          } catch (buildErr) {
+            console.error("[generate] Build error:", buildErr.message);
+            await appendServerLog("generate.agent.build_failed", { id, error: buildErr.message });
+            throw new Error(`Generated app failed validation: ${buildErr.message}`);
+          }
+
+          recordAgentLearning({
+            prompt,
+            agentResult,
+            verificationResult: currentBuild.buildEvidence || null,
+            success: true,
+          });
+
+          await appendServerLog("generate.agent.done", {
+            id,
+            actionCount: agentResult.actions?.length || 0,
+            durationMs: Date.now() - agentStartedAt,
+          });
+
+          return {
+            ok: true,
+            id,
+            files: agentFiles,
+            manifest,
+            source: "agent",
+            spec: currentBuild.agentRun?.spec || null,
+            evidence: formatRunEvidence(currentBuild.agentRun || {}),
+            buildEvidence: currentBuild.buildEvidence || null,
+            verificationMode: boardPassword ? "real-ready" : "local-simulated",
+            agentSummary: agentResult.summary,
+            agentActions: agentResult.actions.map(a => ({
+              tool: a.tool,
+              path: a.args?.path,
+              query: a.args?.query,
+              summary: a.args?.summary
+            }))
+          };
+        },
+        templateGenerate: async () => {
+          const build = await writeGenerated(prompt, modelSettings, []);
+          return {
+            ok: true,
+            id: build.id,
+            files: build.files,
+            manifest: build.manifest || null,
+            source: "template",
+            spec: build.agentRun?.spec || null,
+            evidence: formatRunEvidence(build.agentRun || {}),
+            buildEvidence: build.buildEvidence || null,
+            verificationMode: boardPassword ? "real-ready" : "local-simulated",
+            agentActions: [],
+            thinking: ""
+          };
+        },
+        saveSnapshot: async (state) => {
+          if (!conversationId) return;
+          try {
+            conversationStore.saveConversationFiles(
+              conversationId,
+              state.result.id,
+              await filesWithHardwareResult(state.result.files)
+            );
+          } catch (saveErr) {
+            await appendServerLog(`generate.${state.result.source}.conversation_save_failed`, {
+              id: state.result.id,
+              conversationId,
+              error: saveErr.message,
+            });
+          }
+        }
       });
-      json(res, 200, {
-        ok: true,
-        id,
-        files: agentFiles,
-        manifest,
-        source: "agent",
-        spec: currentBuild.agentRun?.spec || null,
-        evidence: formatRunEvidence(currentBuild.agentRun || {}),
-        buildEvidence: currentBuild.buildEvidence || null,
-        verificationMode: boardPassword ? "real-ready" : "local-simulated",
-        agentSummary: agentResult.summary,
-        agentActions: agentResult.actions.map(a => ({
-          tool: a.tool,
-          path: a.args?.path,
-          query: a.args?.query,
-          summary: a.args?.summary
-        }))
-      });
+
+      json(res, 200, buildResult);
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/build") {
@@ -3994,6 +5673,30 @@ async function route(req, res) {
       const convId = url.pathname.split("/")[3];
       const { buildId, files } = conversationStore.loadConversationFiles(convId);
       json(res, 200, { ok: true, buildId, files });
+      return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.includes("/preview")) {
+      const resolved = resolveConversationPreviewFile(url.pathname);
+      if (!resolved || resolved.error) {
+        json(res, 400, { ok: false, error: resolved?.error || "Invalid preview path" });
+        return;
+      }
+      const { buildId, files } = previewFilesForConversation(resolved.conversationId);
+      if (!Object.keys(files).length || !(resolved.filename in files)) {
+        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+        res.end("Conversation preview not found");
+        return;
+      }
+      const content = resolved.filename === "index.html"
+        ? rewriteConversationPreviewHtml(files[resolved.filename], resolved.conversationId, buildId)
+        : files[resolved.filename];
+      const body = Buffer.from(String(content || ""), "utf8");
+      res.writeHead(200, {
+        "Content-Type": responseContentType(resolved.filename),
+        "Content-Length": body.length,
+        "Cache-Control": "no-store"
+      });
+      res.end(body);
       return;
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/memory")) {

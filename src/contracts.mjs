@@ -9,6 +9,10 @@ export const GENERATED_FILES = Object.freeze([
 export const REQUIRED_RUNTIME_APIS = Object.freeze([
   "/api/status",
   "./hardware-result.json",
+  "/api/audio/status",
+  "/api/audio/play",
+  "/api/audio/record",
+  "/api/audio/stop",
 ]);
 
 export const SCREEN_CONTRACT = Object.freeze({
@@ -16,7 +20,8 @@ export const SCREEN_CONTRACT = Object.freeze({
   height: 360,
   overflow: "hidden",
   theme: "dark",
-  input: ["KEY1", "KEY2", "KEY3"],
+    input: ["KEY1", "KEY2", "KEY3"],
+    audio: ["speaker", "microphone"],
 });
 
 export const HARDWARE_PROFILE = Object.freeze({
@@ -25,7 +30,12 @@ export const HARDWARE_PROFILE = Object.freeze({
   os: "Debian Linux",
   python: "3.x",
   staticTarget: "/home/linaro/workspace/taishan-screen/static",
-  service: "taishan-screen.service",
+    service: "taishan-screen.service",
+    audio: {
+      playback: "aplay",
+      recording: "arecord",
+      api: ["/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"],
+    },
 });
 
 export const APP_CONTRACT_SNIPPETS = Object.freeze([

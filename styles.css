@@ -1753,3 +1753,35 @@ pre {
   background: var(--surface-3, rgba(255,255,255,.08));
   color: var(--text, #e2e8f0);
 }
+
+.build-confirmation {
+  display: grid;
+  gap: 10px;
+  max-width: 100%;
+}
+
+.confirm-copy {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 8px;
+  background: rgba(255,255,255,.035);
+}
+
+.confirm-copy strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.confirm-copy ul {
+  margin: 0 0 4px 0;
+  padding-left: 18px;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.confirm-copy li {
+  overflow-wrap: anywhere;
+}

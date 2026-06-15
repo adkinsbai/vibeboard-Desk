@@ -575,6 +575,33 @@ await test("chat planner requires build_prompt for build_ready", async () => {
   assert(valid.project_memory.requirements.includes("显示当前时间"), "valid build plan should preserve project memory");
 });
 
+await test("chat planner preserves understanding and planned changes for confirmation UI", async () => {
+  const { parseChatPlan } = await import(pathToFileURL(path.join(ROOT, "src", "chatPlanner.mjs")).href);
+  const plan = parseChatPlan(JSON.stringify({
+    intent: "build_ready",
+    reply: "我理解你要把当前天气面板改成白底蓝字，我准备调整布局和样式。确认后我会修改当前项目。",
+    understanding: ["用户不满意当前视觉效果", "当前项目要改成白底蓝字的天气面板"],
+    planned_changes: ["修改 CSS 色彩系统", "保留天气数据逻辑并调整布局"],
+    target: "edit_current_project",
+    ready_to_build: true,
+    build_prompt: "修改当前天气面板：白底蓝字，保留天气数据逻辑，调整布局。",
+    project_memory: {
+      summary: "修改天气面板视觉",
+      goal: "把当前天气面板改成白底蓝字",
+      requirements: ["白底蓝字", "保留天气数据逻辑"],
+      constraints: ["480x360"],
+      open_questions: [],
+      decisions: ["修改当前项目而不是新建"],
+      build_prompt: "修改当前天气面板：白底蓝字，保留天气数据逻辑，调整布局。",
+    },
+  }));
+
+  assert(plan.ready_to_build === true, `expected ready plan, got ${JSON.stringify(plan)}`);
+  assert(plan.target === "edit_current_project", "planner should preserve edit target");
+  assert(plan.understanding.length === 2, "planner should return understanding list");
+  assert(plan.planned_changes.includes("修改 CSS 色彩系统"), "planner should return concrete planned changes");
+});
+
 await test("chat planner preserves project memory on non-json reply", async () => {
   const { parseChatPlan } = await import(pathToFileURL(path.join(ROOT, "src", "chatPlanner.mjs")).href);
   const plan = parseChatPlan("我可以先帮你梳理需求。", {
@@ -661,6 +688,34 @@ await test("chat planner switches project memory when user replaces the goal", a
 
   assert(requestBody.messages[0].content.includes("不做 1，改做 2"), "planner prompt should include explicit replacement rule");
   assert(requestBody.messages[0].content.includes("不要因为旧记忆里有 build_prompt 就返回 build_ready"), "planner prompt should forbid old build_prompt reuse");
+});
+
+await test("build graph runs template path and returns trace", async () => {
+  const { runBuildGraph } = await import(pathToFileURL(path.join(ROOT, "src", "buildGraph.mjs")).href);
+  const result = await runBuildGraph({
+    prompt: "offline graph test",
+    settings: { enabled: false },
+    conversationId: "project-a",
+    isEditing: false,
+  }, {
+    templateGenerate: async () => ({
+      ok: true,
+      id: "build-a",
+      files: { "index.html": "<html></html>" },
+      source: "template",
+      agentActions: [],
+    }),
+    saveSnapshot: async state => {
+      state.snapshotSaved = state.result.id === "build-a";
+    },
+  });
+
+  const nodes = result.buildGraph.map(item => item.node);
+  assert(result.ok === true, `expected ok result, got ${JSON.stringify(result)}`);
+  assert(result.id === "build-a", "build graph should preserve template result");
+  assert(nodes.includes("prepare"), "build graph should include prepare node");
+  assert(nodes.includes("template_generate"), "build graph should include template node");
+  assert(nodes.includes("save_snapshot"), "build graph should include snapshot node");
 });
 
 await test("agent accepts complete text-only final answer after local verification", async () => {
