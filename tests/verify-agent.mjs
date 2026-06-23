@@ -1798,6 +1798,31 @@ await test("asset library extracts lightweight document profiles for agent conte
   assert(context.includes("document-profile: Spreadsheet metrics.xlsx"), "agent context should expose xlsx document profile");
 });
 
+await test("asset library recognizes design source files as visual direction", async () => {
+  const { normalizeIncomingAssets, formatAssetContext, summarizeAssets } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const tokens = Buffer.from(JSON.stringify({
+    color: { primary: { value: "#12f7d6" }, background: { value: "#08111f" } },
+    component: "hero card button metric panel",
+  }), "utf8").toString("base64");
+  const fig = Buffer.from([0x46, 0x49, 0x47, 0x00, 0x01]).toString("base64");
+  const result = normalizeIncomingAssets([
+    { name: "brand-system.tokens", mime: "application/json", encoding: "base64", content: tokens },
+    { name: "dashboard-ui.fig", mime: "application/octet-stream", encoding: "base64", content: fig },
+  ]);
+  const summary = summarizeAssets(result.assets);
+  const context = formatAssetContext(result.assets);
+
+  assert(result.assets.length === 2, `expected 2 design assets, got ${JSON.stringify(result)}`);
+  assert(result.assets.every(asset => asset.kind === "design"), `design assets should be classified, got ${JSON.stringify(result.assets.map(asset => asset.kind))}`);
+  assert(summary.byKind.design === 2, `summary should count design assets, got ${JSON.stringify(summary.byKind)}`);
+  assert(summary.designBrief.designProfiles.some(item => item.includes("brand-system.tokens") && item.includes("#12f7d6")), `design profile should expose token colors, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.designProfiles.some(item => item.includes("dashboard-ui.fig") && item.includes("figma")), `figma source should be profiled, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.productIntents.some(item => item.includes("design-system-led")), `design assets should influence product intent, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.layoutPlan.some(item => item.includes("design source cues")), `design assets should influence layout plan, got ${JSON.stringify(summary.designBrief)}`);
+  assert(context.includes("design-profile: Design brand-system.tokens"), "agent context should expose design token profile");
+  assert(context.includes("design-profile: Design dashboard-ui.fig"), "agent context should expose figma profile");
+});
+
 await test("asset library expands single GZ text assets", async () => {
   const { normalizeIncomingAssets } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
   const gz = zlib.gzipSync(Buffer.from("480x360 data dashboard status metrics", "utf8"));
