@@ -296,6 +296,8 @@ export function classifyAsset({ name = "", mime = "", ext = path.posix.extname(n
 }
 
 export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview = "" }) {
+  const compact = textPreview ? compactText(textPreview) : "";
+  const insights = extractAssetInsights({ name, mime, kind, ext, text: compact });
   const summary = {
     name,
     mime,
@@ -306,13 +308,14 @@ export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview 
     use: suggestedUse(kind, ext),
     signals: [],
     textPreview: "",
+    insights,
   };
 
-  if (textPreview) {
-    const compact = compactText(textPreview);
+  if (compact) {
     summary.textPreview = compact.slice(0, 1200);
     summary.signals = extractTextSignals(compact);
   }
+  summary.signals = uniqueStrings([...summary.signals, ...insights.signals]);
 
   if (kind === "archive") {
     summary.signals.push("Archive uploaded. Supported ZIP, TAR, TGZ, and GZ files are unpacked into separate analyzed assets.");
@@ -493,6 +496,7 @@ export function summarizeAssets(assets = []) {
       use: asset.summary?.use || suggestedUse(asset.kind, path.posix.extname(asset.name).toLowerCase()),
       signals: (asset.summary?.signals || []).slice(0, 4),
       textPreview: asset.summary?.textPreview || "",
+      insights: compactPublicInsights(asset.summary?.insights || {}),
     })),
   };
 }
@@ -511,10 +515,19 @@ export function formatAssetContext(assets = []) {
     for (const priority of summary.designBrief.priorities.slice(0, 6)) lines.push(`  priority: ${priority}`);
     for (const reference of summary.designBrief.references.slice(0, 4)) lines.push(`  reference: ${reference}`);
     for (const constraint of summary.designBrief.constraints.slice(0, 4)) lines.push(`  constraint: ${constraint}`);
+    for (const color of summary.designBrief.palette.slice(0, 6)) lines.push(`  palette: ${color}`);
+    for (const component of summary.designBrief.components.slice(0, 6)) lines.push(`  component: ${component}`);
+    for (const cta of summary.designBrief.ctas.slice(0, 4)) lines.push(`  cta: ${cta}`);
+    for (const field of summary.designBrief.dataFields.slice(0, 8)) lines.push(`  data-field: ${field}`);
+    for (const media of summary.designBrief.mediaPlan.slice(0, 5)) lines.push(`  media-plan: ${media}`);
+    for (const interaction of summary.designBrief.interactions.slice(0, 5)) lines.push(`  interaction: ${interaction}`);
   }
   for (const item of summary.items) {
     lines.push(`- ${item.name} (${item.kind}, ${item.size} bytes): ${item.use}`);
     for (const signal of item.signals.slice(0, 2)) lines.push(`  signal: ${signal}`);
+    for (const color of (item.insights?.colors || []).slice(0, 3)) lines.push(`  color: ${color}`);
+    for (const cta of (item.insights?.ctas || []).slice(0, 2)) lines.push(`  cta: ${cta}`);
+    for (const field of (item.insights?.dataFields || []).slice(0, 4)) lines.push(`  data-field: ${field}`);
     if (item.textPreview) lines.push(`  preview: ${item.textPreview.slice(0, 240)}`);
   }
   return `\n\n${lines.join("\n")}`;
@@ -768,6 +781,7 @@ function compactText(value) {
 
 function buildAssetDesignBrief(assets = [], byKind = {}) {
   const signals = assets.flatMap(asset => asset.summary?.signals || []);
+  const insights = mergeAssetInsights(assets.map(asset => asset.summary?.insights || {}));
   const previews = assets
     .map(asset => asset.summary?.textPreview || "")
     .filter(Boolean)
@@ -810,6 +824,22 @@ function buildAssetDesignBrief(assets = [], byKind = {}) {
   if (signals.some(signal => signal.includes("visual identity")) || /(brand|logo|palette|品牌|色彩|视觉)/i.test(previews)) {
     priorities.push("Preserve brand identity signals such as palette, logo usage, typography, and visual tone.");
   }
+  if (insights.colors.length) {
+    priorities.push(`Apply extracted palette cues such as ${insights.colors.slice(0, 5).join(", ")} with enough contrast for the small screen.`);
+    references.push(`Palette cues were extracted from uploaded text/components: ${insights.colors.slice(0, 8).join(", ")}.`);
+  }
+  if (insights.components.length) {
+    priorities.push(`Adapt detected component structure (${insights.components.slice(0, 6).join(", ")}) into a polished 480x360 layout.`);
+  }
+  if (insights.ctas.length) {
+    priorities.push(`Surface primary calls to action such as ${insights.ctas.slice(0, 4).join(", ")} as concise button or status states.`);
+  }
+  if (insights.dataFields.length) {
+    priorities.push(`Use extracted data fields (${insights.dataFields.slice(0, 8).join(", ")}) as dashboard labels, cards, or telemetry rows.`);
+  }
+  if (insights.interactions.length) {
+    references.push(`Interaction cues: ${insights.interactions.slice(0, 6).join(", ")}.`);
+  }
   if (signals.some(signal => signal.includes("dashboard")) || /(dashboard|metric|sensor|status|数据|指标|监控)/i.test(previews)) {
     priorities.push("Prefer glanceable dashboard layout with strong hierarchy for status, metrics, and alerts.");
   }
@@ -828,6 +858,12 @@ function buildAssetDesignBrief(assets = [], byKind = {}) {
     priorities: uniqueStrings(priorities).slice(0, 8),
     references: uniqueStrings(references).slice(0, 8),
     constraints,
+    palette: insights.colors.slice(0, 10),
+    components: insights.components.slice(0, 10),
+    ctas: insights.ctas.slice(0, 8),
+    dataFields: insights.dataFields.slice(0, 12),
+    mediaPlan: buildMediaPlan(byKind, insights).slice(0, 8),
+    interactions: insights.interactions.slice(0, 10),
   };
 }
 
@@ -841,6 +877,139 @@ function extractTextSignals(text) {
   if (/(video|motion|animation|动画|视频|动效)/i.test(text)) signals.push("Mentions motion or video behavior.");
   if (lower.includes("480") || lower.includes("360")) signals.push("Mentions target screen dimensions.");
   return signals.slice(0, 6);
+}
+
+function extractAssetInsights({ name = "", mime = "", kind = "", ext = "", text = "" } = {}) {
+  const source = String(text || "");
+  const lowerName = String(name || "").toLowerCase();
+  const colors = extractColors(source);
+  const components = extractComponents(source);
+  const ctas = extractCtas(source);
+  const dataFields = extractDataFields(source, ext);
+  const interactions = extractInteractions(source);
+  const signals = [];
+
+  if (colors.length) signals.push(`Extracted palette cues: ${colors.slice(0, 5).join(", ")}.`);
+  if (components.length) signals.push(`Detected UI structure: ${components.slice(0, 5).join(", ")}.`);
+  if (ctas.length) signals.push(`Detected CTA/copy cues: ${ctas.slice(0, 4).join(", ")}.`);
+  if (dataFields.length) signals.push(`Detected data fields: ${dataFields.slice(0, 6).join(", ")}.`);
+  if (interactions.length) signals.push(`Detected interaction cues: ${interactions.slice(0, 5).join(", ")}.`);
+  if (kind === "image" || /(hero|photo|logo|cover|banner|product|icon|照片|图片|封面|产品|图标)/i.test(lowerName)) {
+    signals.push("Image naming suggests direct visual placement, branding, or product hero use.");
+  }
+  if (kind === "font") signals.push("Font asset can inform typography hierarchy if converted into local CSS safely.");
+  if (kind === "video") signals.push("Video asset should be represented as thumbnail, loop, timeline, or motion state on the 480x360 UI.");
+  if (kind === "audio") signals.push("Audio asset should map to a playback/status/voice feedback control if useful.");
+  if (String(mime || "").includes("json") || ext === ".json") signals.push("JSON asset can seed structured dashboard content.");
+
+  return {
+    colors,
+    components,
+    ctas,
+    dataFields,
+    interactions,
+    signals: uniqueStrings(signals).slice(0, 8),
+  };
+}
+
+function extractColors(text = "") {
+  const colors = [];
+  const raw = String(text || "");
+  for (const match of raw.matchAll(/#[0-9a-fA-F]{3,8}\b/g)) colors.push(match[0]);
+  for (const match of raw.matchAll(/\b(?:rgb|rgba|hsl|hsla)\(\s*[^)]+\)/gi)) colors.push(match[0].replace(/\s+/g, " "));
+  const named = raw.match(/\b(?:cyan|teal|blue|navy|purple|violet|magenta|pink|red|orange|amber|yellow|green|lime|black|white|gray|grey|slate|indigo|gold|silver|bronze|emerald|rose|sky)\b/gi) || [];
+  colors.push(...named.map(item => item.toLowerCase()));
+  const chinese = raw.match(/(?:青色|蓝色|紫色|粉色|红色|橙色|黄色|绿色|黑色|白色|灰色|金色|银色|品牌色|主色|辅助色)/g) || [];
+  colors.push(...chinese);
+  return uniqueStrings(colors).slice(0, 16);
+}
+
+function extractComponents(text = "") {
+  const raw = String(text || "");
+  const components = [];
+  for (const match of raw.matchAll(/<\s*(section|article|main|header|footer|nav|aside|button|canvas|video|audio|img|form|input|select|table|ul|ol|li|card|dialog)\b/gi)) {
+    components.push(match[1].toLowerCase());
+  }
+  const classMatches = raw.matchAll(/\bclass\s*=\s*["']([^"']{1,120})["']/gi);
+  for (const match of classMatches) {
+    const names = String(match[1] || "").split(/\s+/).filter(Boolean);
+    for (const name of names) {
+      if (/(card|hero|panel|toolbar|button|metric|status|chart|player|control|nav|grid|list|tile|modal|badge)/i.test(name)) {
+        components.push(name.toLowerCase());
+      }
+    }
+  }
+  const words = raw.match(/\b(?:hero|card|panel|toolbar|button|metric|status|chart|player|timeline|grid|list|tile|badge|modal|carousel|slider)\b/gi) || [];
+  components.push(...words.map(item => item.toLowerCase()));
+  return uniqueStrings(components).slice(0, 18);
+}
+
+function extractCtas(text = "") {
+  const raw = String(text || "");
+  const ctas = [];
+  for (const match of raw.matchAll(/<button[^>]*>([^<]{1,40})<\/button>/gi)) ctas.push(compactText(match[1]));
+  for (const match of raw.matchAll(/\b(?:cta|button|按钮|操作|action)\s*[:=：]\s*["']?([^"',\n\r。；;]{1,40})/gi)) ctas.push(compactText(match[1]));
+  const quoted = raw.match(/(?:立即开始|开始体验|播放|暂停|部署|查看详情|购买|连接设备|刷新|确认|Start|Play|Pause|Deploy|Details|Connect|Refresh|Confirm|Buy Now|Try Now)/g) || [];
+  ctas.push(...quoted);
+  return uniqueStrings(ctas).slice(0, 12);
+}
+
+function extractDataFields(text = "", ext = "") {
+  const raw = String(text || "");
+  const fields = [];
+  for (const match of raw.matchAll(/["']?([A-Za-z_][\w.-]{1,32}|[\u4e00-\u9fff]{2,12})["']?\s*:/g)) {
+    fields.push(match[1]);
+  }
+  if ([".csv", ".tsv"].includes(ext)) {
+    const firstLine = raw.split(/\r?\n/).find(line => line.trim()) || "";
+    const delimiter = ext === ".tsv" ? "\t" : ",";
+    for (const field of firstLine.split(delimiter)) fields.push(compactText(field).slice(0, 32));
+  }
+  const labeled = raw.match(/\b(?:temperature|humidity|speed|battery|status|price|volume|progress|score|count|total|cpu|memory|latency|温度|湿度|速度|电量|状态|价格|音量|进度|评分|数量|总数|内存|延迟)\b/gi) || [];
+  fields.push(...labeled);
+  return uniqueStrings(fields).filter(field => field.length >= 2).slice(0, 24);
+}
+
+function extractInteractions(text = "") {
+  const raw = String(text || "");
+  const interactions = [];
+  const matches = raw.match(/\b(?:click|tap|hover|drag|swipe|scroll|play|pause|record|stop|toggle|select|filter|refresh|deploy|confirm|点击|轻触|滑动|播放|暂停|录音|停止|切换|选择|筛选|刷新|部署|确认)\b/gi) || [];
+  interactions.push(...matches.map(item => item.toLowerCase()));
+  if (/<audio\b/i.test(raw)) interactions.push("audio playback");
+  if (/<video\b/i.test(raw)) interactions.push("video playback");
+  if (/<canvas\b/i.test(raw)) interactions.push("canvas visualization");
+  if (/<form\b|<input\b|<select\b/i.test(raw)) interactions.push("form controls");
+  return uniqueStrings(interactions).slice(0, 16);
+}
+
+function mergeAssetInsights(insightList = []) {
+  return {
+    colors: uniqueStrings(insightList.flatMap(item => item.colors || [])).slice(0, 16),
+    components: uniqueStrings(insightList.flatMap(item => item.components || [])).slice(0, 18),
+    ctas: uniqueStrings(insightList.flatMap(item => item.ctas || [])).slice(0, 12),
+    dataFields: uniqueStrings(insightList.flatMap(item => item.dataFields || [])).slice(0, 24),
+    interactions: uniqueStrings(insightList.flatMap(item => item.interactions || [])).slice(0, 16),
+  };
+}
+
+function compactPublicInsights(insights = {}) {
+  return {
+    colors: uniqueStrings(insights.colors || []).slice(0, 8),
+    components: uniqueStrings(insights.components || []).slice(0, 8),
+    ctas: uniqueStrings(insights.ctas || []).slice(0, 6),
+    dataFields: uniqueStrings(insights.dataFields || []).slice(0, 8),
+    interactions: uniqueStrings(insights.interactions || []).slice(0, 8),
+  };
+}
+
+function buildMediaPlan(byKind = {}, insights = {}) {
+  const plan = [];
+  if (byKind.image) plan.push("Use image assets as product hero, icon strip, texture, or compact slideshow with local paths.");
+  if (byKind.video) plan.push("Use video assets as motion thumbnails, poster frames, timeline states, or very short local clips when contract-safe.");
+  if (byKind.audio) plan.push("Expose audio assets as play/pause/status cues through the existing hardware audio APIs when relevant.");
+  if (byKind.font) plan.push("Use font assets for typography direction while keeping fallback fonts readable on 480x360.");
+  if (insights.ctas?.length) plan.push(`Map CTA text into concise hardware-friendly controls: ${insights.ctas.slice(0, 4).join(", ")}.`);
+  return uniqueStrings(plan);
 }
 
 function uniqueStrings(values = []) {

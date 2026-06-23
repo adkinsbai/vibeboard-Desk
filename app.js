@@ -2022,12 +2022,24 @@ function renderAssetSummary(summary = {}) {
 
 function assetSummaryTooltip(summary = {}, kinds = "") {
   const lines = [`${summary.count || 0} assets`, kinds].filter(Boolean);
-  const priorities = Array.isArray(summary.designBrief?.priorities)
-    ? summary.designBrief.priorities.slice(0, 4)
-    : [];
+  const brief = summary.designBrief || {};
+  const priorities = Array.isArray(brief.priorities) ? brief.priorities.slice(0, 4) : [];
   if (priorities.length) {
     lines.push("Design brief:");
     for (const item of priorities) lines.push(`- ${item}`);
+  }
+  const palette = Array.isArray(brief.palette) ? brief.palette.slice(0, 6) : [];
+  if (palette.length) lines.push(`Palette: ${palette.join(", ")}`);
+  const components = Array.isArray(brief.components) ? brief.components.slice(0, 6) : [];
+  if (components.length) lines.push(`Components: ${components.join(", ")}`);
+  const ctas = Array.isArray(brief.ctas) ? brief.ctas.slice(0, 4) : [];
+  if (ctas.length) lines.push(`CTA: ${ctas.join(", ")}`);
+  const dataFields = Array.isArray(brief.dataFields) ? brief.dataFields.slice(0, 6) : [];
+  if (dataFields.length) lines.push(`Data: ${dataFields.join(", ")}`);
+  const mediaPlan = Array.isArray(brief.mediaPlan) ? brief.mediaPlan.slice(0, 3) : [];
+  if (mediaPlan.length) {
+    lines.push("Media plan:");
+    for (const item of mediaPlan) lines.push(`- ${item}`);
   }
   return lines.join("\n");
 }
@@ -2048,8 +2060,18 @@ async function uploadAssetFiles(fileList) {
     const priorities = Array.isArray(result.summary?.designBrief?.priorities)
       ? result.summary.designBrief.priorities.slice(0, 3)
       : [];
-    const brief = priorities.length
-      ? `\n\n**Assets 设计简报**\n${priorities.map(item => `- ${item}`).join("\n")}`
+    const designBrief = result.summary?.designBrief || {};
+    const insightLines = [
+      ...(Array.isArray(designBrief.palette) && designBrief.palette.length ? [`调色板：${designBrief.palette.slice(0, 6).join(", ")}`] : []),
+      ...(Array.isArray(designBrief.components) && designBrief.components.length ? [`组件结构：${designBrief.components.slice(0, 6).join(", ")}`] : []),
+      ...(Array.isArray(designBrief.ctas) && designBrief.ctas.length ? [`操作文案：${designBrief.ctas.slice(0, 4).join(", ")}`] : []),
+      ...(Array.isArray(designBrief.dataFields) && designBrief.dataFields.length ? [`数据字段：${designBrief.dataFields.slice(0, 6).join(", ")}`] : []),
+    ];
+    const brief = priorities.length || insightLines.length
+      ? `\n\n**Assets 设计简报**\n${[
+        ...priorities.map(item => `- ${item}`),
+        ...insightLines.map(item => `- ${item}`),
+      ].join("\n")}`
       : "";
     addMarkdownMessage("agent", `已解析 ${uploaded} 个资产${rejected ? `，${rejected} 个未导入` : ""}。${kinds ? `类型：${kinds}。` : ""}${brief}`);
   } catch (error) {

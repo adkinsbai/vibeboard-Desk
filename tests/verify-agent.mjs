@@ -1654,9 +1654,12 @@ await test("asset library rejects unsafe ZIP entry paths", async () => {
 await test("asset library expands TGZ bundles and builds a product design brief", async () => {
   const { normalizeIncomingAssets, formatAssetContext, summarizeAssets } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
   const tar = makeTar([
-    { name: "brief/brand.md", content: "品牌 palette cyan logo motion dashboard 480x360 音乐 氛围" },
-    { name: "components/player.html", content: "<section><audio src=\"theme.mp3\"></audio><button>Play</button></section>" },
+    { name: "brief/brand.md", content: "品牌 palette cyan #12f7d6 logo motion dashboard 480x360 音乐 氛围 CTA: 立即开始" },
+    { name: "components/player.html", content: "<section class=\"hero player-card\"><audio src=\"theme.mp3\"></audio><button>Play</button><button>Connect Device</button></section>" },
+    { name: "data/metrics.json", content: "{\"temperature\": 26, \"battery\": 88, \"status\": \"online\", \"volume\": 64}" },
     { name: "media/theme.mp3", content: Buffer.from([0x49, 0x44, 0x33, 0x03]) },
+    { name: "media/loop.webm", content: Buffer.from([0x1a, 0x45, 0xdf, 0xa3]) },
+    { name: "images/product.png", content: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
   ]);
   const tgz = zlib.gzipSync(tar);
   const result = normalizeIncomingAssets([
@@ -1670,12 +1673,26 @@ await test("asset library expands TGZ bundles and builds a product design brief"
   assert(names.includes("product-kit.tgz"), "archive itself should be retained");
   assert(names.includes("product-kit/brief/brand.md"), `brief should be extracted, got ${names.join(",")}`);
   assert(names.includes("product-kit/components/player.html"), "component should be extracted from tgz");
+  assert(names.includes("product-kit/data/metrics.json"), "JSON data should be extracted from tgz");
   assert(names.includes("product-kit/media/theme.mp3"), "audio should be extracted from tgz");
+  assert(names.includes("product-kit/media/loop.webm"), "video should be extracted from tgz");
+  assert(names.includes("product-kit/images/product.png"), "image should be extracted from tgz");
   assert(summary.byKind.audio === 1, `audio should be classified, got ${JSON.stringify(summary.byKind)}`);
+  assert(summary.byKind.video === 1, `video should be classified, got ${JSON.stringify(summary.byKind)}`);
+  assert(summary.byKind.image === 1, `image should be classified, got ${JSON.stringify(summary.byKind)}`);
   assert(summary.designBrief.priorities.some(item => item.includes("audio") || item.includes("音频")), `design brief should mention audio, got ${JSON.stringify(summary.designBrief)}`);
   assert(summary.designBrief.priorities.some(item => item.includes("dashboard")), "design brief should infer dashboard priority from text");
+  assert(summary.designBrief.palette.includes("#12f7d6"), `design brief should expose palette cues, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.components.some(item => item.includes("player")), `design brief should expose component cues, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.ctas.some(item => /Play|立即开始|Connect/.test(item)), `design brief should expose CTA cues, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.dataFields.includes("temperature"), `design brief should expose JSON fields, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.mediaPlan.some(item => item.includes("audio") || item.includes("video") || item.includes("image")), `design brief should include media plan, got ${JSON.stringify(summary.designBrief)}`);
   assert(context.includes("Inferred product design brief from assets"), "agent context should include product design brief");
   assert(context.includes("priority:"), "agent context should expose priorities");
+  assert(context.includes("palette: #12f7d6"), "agent context should expose palette lines");
+  assert(context.includes("component:"), "agent context should expose component lines");
+  assert(context.includes("data-field: temperature"), "agent context should expose data field lines");
+  assert(context.includes("media-plan:"), "agent context should expose media plan lines");
 });
 
 await test("asset library expands single GZ text assets", async () => {
