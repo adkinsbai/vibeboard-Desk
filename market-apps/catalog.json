@@ -2,6 +2,118 @@
   "ok": true,
   "apps": [
     {
+      "id": "vb-pingu-penguin-pod",
+      "name": "Pingu Penguin Pod",
+      "description": "An authorized cute penguin desktop pet for VibeBoard: ice room, local reference assets, keyboard care rituals, and a tiny diary moment.",
+      "preview_url": "market-apps/vb-pingu-penguin-pod/preview.png",
+      "author": "VibeBoard",
+      "downloads": 0,
+      "created_at": "2026-06-23 15:30:00",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "hardware-result.json",
+        "manifest.json",
+        "assets/ice-room.webp",
+        "assets/pingu-cutout.webp",
+        "assets/pingu-reference.webp",
+        "assets/pingu-sprite-atlas.webp",
+        "assets/pingu-sprite-atlas.json",
+        "assets/pet-spec.json"
+      ],
+      "source": "static"
+    },
+    {
+      "id": "vb-micro-life-pod",
+      "name": "桌面微型生命舱",
+      "description": "一个高保真桌面生命舱：GPT-image-2 场景资产、小生命表情、雨窗、灯光和夜晚日记。Space 喂食回应，方向键切房间，1/2/3 触发灯光、天气和记忆。",
+      "preview_url": "market-apps/vb-micro-life-pod/preview.png",
+      "author": "VibeBoard",
+      "downloads": 0,
+      "created_at": "2026-06-22 12:00:00",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json",
+        "assets/room-day.webp",
+        "assets/room-night.webp",
+        "assets/creature-atlas.webp"
+      ],
+      "source": "static"
+    },
+    {
+      "id": "vb-cyber-weather-shrine",
+      "name": "赛博天气神龛",
+      "description": "雨滴、云层、霓虹和雷声组成的天气小世界，Space 切城市，方向键浏览天气指标。",
+      "preview_url": "market-apps/vb-cyber-weather-shrine/preview.png",
+      "author": "VibeBoard",
+      "downloads": 0,
+      "created_at": "2026-06-22 12:00:00",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ],
+      "source": "static"
+    },
+    {
+      "id": "vb-lofi-visual-radio",
+      "name": "Lo-fi 音乐可视化电台",
+      "description": "离线 WebAudio 合成电台，带音乐可视化和 Linux 蓝牙状态提示，不包含未授权流行歌曲。",
+      "preview_url": "market-apps/vb-lofi-visual-radio/preview.png",
+      "author": "VibeBoard",
+      "downloads": 0,
+      "created_at": "2026-06-22 12:00:00",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ],
+      "source": "static"
+    },
+    {
+      "id": "vb-mechanical-ai-console",
+      "name": "机械仪表盘式 AI 助手",
+      "description": "复古飞船控制台式本地助手，用示波器、磁带转轮和打字机动画呈现扫描建议。",
+      "preview_url": "market-apps/vb-mechanical-ai-console/preview.png",
+      "author": "VibeBoard",
+      "downloads": 0,
+      "created_at": "2026-06-22 12:00:00",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ],
+      "source": "static"
+    },
+    {
+      "id": "vb-pocket-arcade",
+      "name": "桌面小型游戏机",
+      "description": "三合一小型游戏机：像素赛车、太空躲避和钓鱼，方向键移动，Space 动作，Enter 菜单。",
+      "preview_url": "market-apps/vb-pocket-arcade/preview.png",
+      "author": "VibeBoard",
+      "downloads": 0,
+      "created_at": "2026-06-22 12:00:00",
+      "files": [
+        "index.html",
+        "style.css",
+        "app.js",
+        "hardware_app.py",
+        "manifest.json"
+      ],
+      "source": "static"
+    },
+    {
       "id": "eeb6c316-2e4e-48f6-b737-e75ea10562ed",
       "name": "天气瓶",
       "description": "一个运行在泰山派 RK3566 上的硬件应用，通过 VibeBoard 平台生成。",

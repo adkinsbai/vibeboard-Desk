@@ -16,11 +16,26 @@ It separates offline L0-L3 acceptance from the later L4 real-board golden loop.
 Run from `C:\tmp\vibeboard-linux-prototype`.
 
 ```powershell
-npm run check
-npm run verify:agent
+npm run verify:all
 ```
 
-Start or restart the local service:
+The full offline validation expands to:
+
+```powershell
+npm run check
+npm run verify:agent
+npm run verify:offline
+npm run verify:digital-life
+```
+
+Expected result:
+
+- `npm run check`: exits 0 and checks `server.mjs`, `app.js`, Digital Life browser scripts, `src/*.mjs`, and `tests/*.mjs`.
+- `npm run verify:agent`: exits 0 with all agent/build/contract tests passing.
+- `npm run verify:offline`: JSON output with `"ok": true`, `"deployMode": "offline-simulated"`, and `"verifyMode": "offline-simulated"`.
+- `npm run verify:digital-life`: exits 0 with affect and Digital Life HTTP smoke checks passing.
+
+If you need to inspect the app manually, start or restart the local service:
 
 ```powershell
 $conn = Get-NetTCPConnection -LocalPort 8789 -State Listen -ErrorAction SilentlyContinue
@@ -30,18 +45,6 @@ if ($conn) {
 }
 Start-Process -WindowStyle Hidden -FilePath node -ArgumentList 'server.mjs' -WorkingDirectory 'C:\tmp\vibeboard-linux-prototype'
 ```
-
-Then run:
-
-```powershell
-npm run verify:offline
-```
-
-Expected result:
-
-- `npm run check`: exits 0.
-- `npm run verify:agent`: `10 passed, 0 skipped, 0 failed`.
-- `npm run verify:offline`: JSON output with `"ok": true`, `"deployMode": "offline-simulated"`, and `"verifyMode": "offline-simulated"`.
 
 ## Manual UI Smoke
 

@@ -32,7 +32,7 @@ export function buildGoldenLoopRemoteCommand({ targetStatic, service }) {
     "printf '__SECTION__:service\\n'",
     "systemctl is-active \"$service\" 2>/dev/null || true",
     "printf '\\n__SECTION__:http_index_id\\n'",
-    "curl -fsS http://127.0.0.1:8765/app.js 2>/dev/null | grep -o 'vb-[a-z0-9]*-[a-f0-9]*' | head -1 || true",
+    "{ curl -fsS http://127.0.0.1:8765/ 2>/dev/null; printf '\\n'; curl -fsS http://127.0.0.1:8765/index.html 2>/dev/null; printf '\\n'; curl -fsS http://127.0.0.1:8765/app.js 2>/dev/null; printf '\\n'; curl -fsS http://127.0.0.1:8765/manifest.json 2>/dev/null; } | grep -o 'vb-[a-z0-9]*-[a-f0-9]*' | head -1 || true",
     "printf '\\n__SECTION__:static_index_id\\n'",
     "grep -o 'vb-[a-z0-9]*-[a-f0-9]*' \"$target/index.html\" \"$target/app.js\" 2>/dev/null | head -1 || true",
     "printf '\\n__SECTION__:manifest\\n'",

@@ -9,6 +9,7 @@
 ## 目录
 
 - [项目简介](#项目简介)
+- [最新更新](#最新更新)
 - [系统架构](#系统架构)
 - [核心功能](#核心功能)
 - [快速开始](#快速开始)
@@ -39,6 +40,21 @@ VibeBoard 是一个 **AI + 硬件** 的端到端应用生成平台。用户在 W
 - 嵌入式 UI 开发：为小屏设备生成专用界面
 - 教学演示：展示 AI 如何与硬件交互
 - IoT 应用：天气、时钟、设备监控等桌面小应用
+
+---
+
+## 最新更新
+
+当前版本把 VibeBoard 从单次生成 Demo 升级成了可持续工作的硬件应用工作台：
+
+- **统一 Agent 生成链路**：聊天、需求澄清、项目记忆、代码生成、文件快照、L0-L3 本地验证和部署确认被串成同一个 Agent/Build Runtime 流程。
+- **硬件契约前置**：每个 Generated App 必须包含 `index.html`、`style.css`、`app.js`、`hardware_app.py`、`manifest.json`，并通过 480×360 布局、相对资源、`hardware-result.json`、`/api/status`、音频 API 等契约检查。
+- **灰色版真机部署修复**：`taishan-gray` 默认使用 `linaro` 账号，支持默认 SSH key 或密码认证；Windows 下大包上传改为 stdin 通道，避免 `spawn ENAMETOOLONG`；Golden Loop 会同时检查 HTTP、静态文件、manifest、板端程序、服务和 kiosk 几何。
+- **真实 L4 验证通过**：灰色版 build `vb-mqqmu8pt-d296c7` 已部署到 `taishan-gray`，`/api/verify?id=vb-mqqmu8pt-d296c7&deviceId=taishan-gray` 返回 `goldenLoop.ok: true`。
+- **持久对话与项目快照**：刷新页面后会自动恢复最近对话、消息、项目文件和预览状态；没有内容时设备预览保持纯黑屏，避免空 iframe 白屏。
+- **应用市场扩展**：内置静态市场应用、预览图、二进制资源资产、数据库发布/部署流程，支持从市场一键部署回硬件。
+- **Digital Life Companion**：新增独立 `/digital-life.html` 页面和本地优先的 companion runtime，包含长期记忆、情绪/认知/自主性循环、presence、硬件/音频 API 和 UI smoke 测试。
+- **验证栈升级**：`npm run check` 会扫描主程序、前端脚本、`src/*.mjs`、Digital Life 和测试文件；`npm run verify:all` 汇总 Agent、offline 和 Digital Life 验证。
 
 ---
 
@@ -146,8 +162,8 @@ VibeBoard 是一个 **AI + 硬件** 的端到端应用生成平台。用户在 W
 
 ```bash
 # 克隆仓库
-git clone https://github.com/adkinsbai/vibeboard.git
-cd vibeboard
+git clone https://github.com/adkinsbai/vibeboard-Desk.git
+cd vibeboard-Desk
 
 # 安装依赖
 npm install
@@ -165,6 +181,14 @@ npm start
 ```bash
 # 设置板子密码（必须）
 export VIBEBOARD_BOARD_PASSWORD="your-board-password"
+
+# 可选：如果本机默认 SSH key 已授权到板子，可不设置密码
+# 灰色版默认使用 linaro@150.158.146.192:6278
+
+# 可选：覆盖灰色版路由
+export VIBEBOARD_BOARD_USER="linaro"
+export VIBEBOARD_BOARD_HOST="150.158.146.192"
+export VIBEBOARD_BOARD_PORT="6278"
 
 # 可选：自定义 LLM Provider
 export VIBEBOARD_LLM_PROVIDER="openai"

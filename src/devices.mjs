@@ -24,7 +24,8 @@ export const DEVICE_PROFILES = {
     host: "150.158.146.192",
     port: "6278",
     frpHost: "150.158.146.192",
-    frpPort: "6278"
+    frpPort: "6278",
+    user: "linaro"
   },
   "taishan-black": {
     id: "taishan-black",

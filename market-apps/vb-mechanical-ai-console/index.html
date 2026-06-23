@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=480,height=360,initial-scale=1">
+  <title>Mechanical AI Console</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main id="screen" aria-label="Mechanical AI Console">
+    <canvas id="stage" width="480" height="360"></canvas>
+    <section id="hud" aria-live="polite">
+      <div class="brand">
+        <span id="modeLabel">Mechanical AI Console</span>
+        <strong id="valueLabel">BOOT</strong>
+      </div>
+      <div id="metricRail"></div>
+    </section>
+    <section id="caption"></section>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>

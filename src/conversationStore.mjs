@@ -1,5 +1,25 @@
 import crypto from "node:crypto";
 
+import {
+  declaredAssetPathsFromFiles,
+  deserializeFileMap,
+  serializeFileMap,
+} from "./assetContract.mjs";
+import { CONVERSATION_SNAPSHOT_FILE_NAMES } from "./contracts.mjs";
+
+export const CONVERSATION_FILE_NAMES = new Set(CONVERSATION_SNAPSHOT_FILE_NAMES);
+
+export function filterConversationFiles(files = {}) {
+  const decoded = deserializeFileMap(files);
+  const declaredAssets = new Set(declaredAssetPathsFromFiles(decoded));
+  const filtered = {};
+  for (const [filename, content] of Object.entries(decoded || {})) {
+    if (!CONVERSATION_FILE_NAMES.has(filename) && !declaredAssets.has(filename)) continue;
+    filtered[filename] = content;
+  }
+  return filtered;
+}
+
 function query(db, sql, params = []) {
   const stmt = db.prepare(sql);
   if (params.length) stmt.bind(params);
@@ -14,6 +34,25 @@ function query(db, sql, params = []) {
 function run(db, saveDb, sql, params = []) {
   db.run(sql, params);
   saveDb();
+}
+
+function runStep(db, sql, params = []) {
+  db.run(sql, params);
+}
+
+function runTransaction(db, saveDb, task) {
+  db.run("BEGIN TRANSACTION");
+  try {
+    const result = task();
+    db.run("COMMIT");
+    saveDb();
+    return result;
+  } catch (error) {
+    try {
+      db.run("ROLLBACK");
+    } catch {}
+    throw error;
+  }
 }
 
 export function createConversationStore(db, saveDb = () => {}) {
@@ -69,10 +108,12 @@ export function createConversationStore(db, saveDb = () => {}) {
     },
 
     deleteConversation(id) {
-      run(db, saveDb, "DELETE FROM project_memory WHERE conversation_id = ?", [id]);
-      run(db, saveDb, "DELETE FROM conversation_files WHERE conversation_id = ?", [id]);
-      run(db, saveDb, "DELETE FROM messages WHERE conversation_id = ?", [id]);
-      run(db, saveDb, "DELETE FROM conversations WHERE id = ?", [id]);
+      runTransaction(db, saveDb, () => {
+        runStep(db, "DELETE FROM project_memory WHERE conversation_id = ?", [id]);
+        runStep(db, "DELETE FROM conversation_files WHERE conversation_id = ?", [id]);
+        runStep(db, "DELETE FROM messages WHERE conversation_id = ?", [id]);
+        runStep(db, "DELETE FROM conversations WHERE id = ?", [id]);
+      });
     },
 
     listMessages(conversationId) {
@@ -83,33 +124,35 @@ export function createConversationStore(db, saveDb = () => {}) {
       const role = message.role;
       const content = message.content;
       const buildId = message.build_id || null;
-      run(
-        db,
-        saveDb,
-        "INSERT INTO messages (conversation_id, role, content, build_id) VALUES (?, ?, ?, ?)",
-        [conversationId, role, content, buildId]
-      );
-      if (role === "user") {
-        const msgCount = query(db, "SELECT COUNT(*) as count FROM messages WHERE conversation_id = ?", [conversationId]);
-        if (msgCount[0]?.count === 1) {
-          const title = String(content || "").slice(0, 50) + (String(content || "").length > 50 ? "..." : "");
-          run(db, saveDb, "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [title, conversationId]);
+      runTransaction(db, saveDb, () => {
+        runStep(
+          db,
+          "INSERT INTO messages (conversation_id, role, content, build_id) VALUES (?, ?, ?, ?)",
+          [conversationId, role, content, buildId]
+        );
+        if (role === "user") {
+          const msgCount = query(db, "SELECT COUNT(*) as count FROM messages WHERE conversation_id = ?", [conversationId]);
+          if (msgCount[0]?.count === 1) {
+            const title = String(content || "").slice(0, 50) + (String(content || "").length > 50 ? "..." : "");
+            runStep(db, "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [title, conversationId]);
+          }
         }
-      }
+      });
     },
 
     saveConversationFiles(conversationId, buildId, files) {
-      // Clear old files for this conversation
-      run(db, saveDb, "DELETE FROM conversation_files WHERE conversation_id = ?", [conversationId]);
-      // Save new files
-      for (const [filename, content] of Object.entries(files || {})) {
-        run(
-          db,
-          saveDb,
-          "INSERT INTO conversation_files (conversation_id, build_id, filename, content) VALUES (?, ?, ?, ?)",
-          [conversationId, buildId, filename, content]
-        );
-      }
+      const safeFiles = filterConversationFiles(files);
+      const serialized = serializeFileMap(safeFiles);
+      runTransaction(db, saveDb, () => {
+        runStep(db, "DELETE FROM conversation_files WHERE conversation_id = ?", [conversationId]);
+        for (const [filename, content] of Object.entries(serialized)) {
+          runStep(
+            db,
+            "INSERT INTO conversation_files (conversation_id, build_id, filename, content) VALUES (?, ?, ?, ?)",
+            [conversationId, buildId, filename, typeof content === "string" ? content : JSON.stringify(content)]
+          );
+        }
+      });
     },
 
     loadConversationFiles(conversationId) {
@@ -117,9 +160,17 @@ export function createConversationStore(db, saveDb = () => {}) {
       if (rows.length === 0) return { buildId: null, files: {} };
       const files = {};
       for (const row of rows) {
-        files[row.filename] = row.content;
+        if (CONVERSATION_FILE_NAMES.has(row.filename)) {
+          files[row.filename] = row.content;
+          continue;
+        }
+        const content = parseStoredFileContent(row.content);
+        const candidate = { ...files, [row.filename]: content };
+        if (declaredAssetPathsFromFiles(candidate).includes(row.filename)) {
+          files[row.filename] = content;
+        }
       }
-      return { buildId: rows[0].build_id, files };
+      return { buildId: rows[0].build_id, files: deserializeFileMap(files) };
     },
 
     deleteConversationFiles(conversationId) {
@@ -139,15 +190,16 @@ export function createConversationStore(db, saveDb = () => {}) {
     setProjectMemory(conversationId, memory = {}) {
       const normalized = normalizeProjectMemory(memory);
       const serialized = JSON.stringify(normalized);
-      run(
-        db,
-        saveDb,
-        `INSERT INTO project_memory (conversation_id, memory_json, updated_at)
-         VALUES (?, ?, CURRENT_TIMESTAMP)
-         ON CONFLICT(conversation_id) DO UPDATE SET memory_json = ?, updated_at = CURRENT_TIMESTAMP`,
-        [conversationId, serialized, serialized]
-      );
-      run(db, saveDb, "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [conversationId]);
+      runTransaction(db, saveDb, () => {
+        runStep(
+          db,
+          `INSERT INTO project_memory (conversation_id, memory_json, updated_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(conversation_id) DO UPDATE SET memory_json = ?, updated_at = CURRENT_TIMESTAMP`,
+          [conversationId, serialized, serialized]
+        );
+        runStep(db, "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [conversationId]);
+      });
       return normalized;
     }
   };
@@ -185,4 +237,19 @@ function stringValue(value) {
 function stringList(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map(item => String(item || "").trim()).filter(Boolean))].slice(0, 20);
+}
+
+function parseStoredFileContent(value) {
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      (parsed.__vibeboardFileEncoding === "base64" || parsed.type === "Buffer")
+    ) {
+      return parsed;
+    }
+  } catch {}
+  return value;
 }

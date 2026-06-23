@@ -56,6 +56,8 @@ let conversationLoadToken = 0;
 
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
 const DEVICE_STORAGE_KEY = "vibeboard-active-device";
+const CONVERSATION_STORAGE_KEY = "vibeboard-current-conversation";
+const BLANK_DEVICE_FRAME_HTML = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;}*{box-sizing:border-box;}</style></head><body></body></html>';
 const deviceProfiles = {
   "taishan-transparent": {
     id: "taishan-transparent",
@@ -660,9 +662,7 @@ function renderFiles(files) {
 
 function clearGeneratedOutput(statusText = "等待生成") {
   renderFiles({});
-  if (deviceFrame) {
-    deviceFrame.removeAttribute("src");
-  }
+  showBlankDeviceFrame();
   if (deviceScreen) {
     deviceScreen.dataset.status = statusText;
     deviceScreen.dataset.prompt = "";
@@ -764,6 +764,19 @@ function makeConversationPreviewUrl(conversationId, buildId = Date.now()) {
   return makePreviewUrl(`/api/conversations/${encodedId}/preview/index.html`, buildId);
 }
 
+function showBlankDeviceFrame() {
+  if (!deviceFrame) return;
+  deviceFrame.removeAttribute("src");
+  deviceFrame.srcdoc = BLANK_DEVICE_FRAME_HTML;
+  scheduleFitDeviceFrame();
+}
+
+function setDeviceFrameSrc(src) {
+  if (!deviceFrame || !src) return;
+  deviceFrame.removeAttribute("srcdoc");
+  deviceFrame.src = src;
+}
+
 function applyDeviceProfile({ refresh = true } = {}) {
   const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
   if (deviceSelect) deviceSelect.value = profile.id;
@@ -793,7 +806,7 @@ function renderDevicePreview(prompt, statusText) {
     } catch {}
     if (!buildId) buildId = Date.now();
     const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
-    deviceFrame.src = makePreviewUrl(profile.previewPath, buildId);
+    setDeviceFrameSrc(makePreviewUrl(profile.previewPath, buildId));
   }
   if (deviceScreen) {
     deviceScreen.dataset.status = statusText || "";
@@ -807,7 +820,7 @@ function renderConversationPreview(conversationId, buildId, statusText) {
     return;
   }
   if (deviceFrame) {
-    deviceFrame.src = makeConversationPreviewUrl(conversationId, buildId || Date.now());
+    setDeviceFrameSrc(makeConversationPreviewUrl(conversationId, buildId || Date.now()));
   }
   if (deviceScreen) {
     deviceScreen.dataset.status = statusText || "已加载应用";
@@ -844,11 +857,12 @@ async function syncDeviceFrameFromCurrent() {
   const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
   try {
     const res = await fetch("/generated/current/manifest.json", { cache: "no-store" });
+    if (!res.ok) throw new Error(`missing generated app manifest: ${res.status}`);
     const manifest = await res.json();
     const buildId = manifest.id || Date.now();
-    deviceFrame.src = makePreviewUrl(profile.previewPath, buildId);
+    setDeviceFrameSrc(makePreviewUrl(profile.previewPath, buildId));
   } catch {
-    deviceFrame.src = makePreviewUrl(profile.previewPath, Date.now());
+    showBlankDeviceFrame();
   }
 }
 
@@ -1794,6 +1808,15 @@ const API_BASE = "";
 
 let currentConversationId = null;
 
+function rememberConversation(id) {
+  if (id) localStorage.setItem(CONVERSATION_STORAGE_KEY, id);
+  else localStorage.removeItem(CONVERSATION_STORAGE_KEY);
+}
+
+function rememberedConversationId() {
+  return localStorage.getItem(CONVERSATION_STORAGE_KEY) || "";
+}
+
 // Sidebar toggle
 const sidebarToggle = document.getElementById("sidebarToggle");
 const sidebar = document.getElementById("sidebar");
@@ -1810,11 +1833,22 @@ async function loadConversations() {
     const res = await fetch(`${API_BASE}/api/conversations`);
     const data = await res.json();
     if (data.ok) {
-      renderConversationList(data.conversations);
+      const conversations = data.conversations || [];
+      renderConversationList(conversations);
+      if (conversations.length) restoreCurrentConversation(conversations);
+      else syncDeviceFrameFromCurrent();
     }
   } catch (err) {
     console.error("Failed to load conversations:", err);
   }
+}
+
+function restoreCurrentConversation(conversations = []) {
+  if (busy || currentConversationId || !conversations.length) return;
+  const savedId = rememberedConversationId();
+  const remembered = conversations.find(conv => conv.id === savedId);
+  const target = remembered || conversations[0];
+  if (target?.id) selectConversation(target.id);
 }
 
 // Render conversation list
@@ -1852,6 +1886,7 @@ function renderConversationList(conversations) {
           // If deleted the current conversation, clear selection
           if (convId === currentConversationId) {
             currentConversationId = null;
+            rememberConversation(null);
             conversationLoadToken += 1;
             pendingGeneratePrompt = null;
             clearGeneratedOutput("等待生成");
@@ -1871,6 +1906,7 @@ function renderConversationList(conversations) {
 async function selectConversation(id) {
   if (busy) return; // Don't switch while a flow is running
   currentConversationId = id;
+  rememberConversation(id);
   pendingGeneratePrompt = null;
   const loadToken = ++conversationLoadToken;
 
@@ -2016,6 +2052,7 @@ async function createConversation({ resetChat = true } = {}) {
     const data = await res.json();
     if (data.ok) {
       currentConversationId = data.id;
+      rememberConversation(data.id);
       pendingGeneratePrompt = null;
       conversationLoadToken += 1;
       clearGeneratedOutput("等待生成");

@@ -4,7 +4,19 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { validateFileContracts } from "../src/contracts.mjs";
+import {
+  AGENT_WRITABLE_FILE_NAMES,
+  CONVERSATION_SNAPSHOT_FILE_NAMES,
+  HARDWARE_APP_CONTRACT,
+  HARDWARE_RESULT_FILE,
+  REQUIRED_RUNTIME_APIS,
+  hardwareContractPromptText,
+  validateFileContracts,
+  validateHardwareResultContract,
+} from "../src/contracts.mjs";
+import {
+  serializeFileMap,
+} from "../src/assetContract.mjs";
 import { failResult, okResult, mergeResults, SEVERITY } from "../src/toolResult.mjs";
 import { createPlaybookStore, signatureFromIssues } from "../src/playbookStore.mjs";
 
@@ -131,9 +143,85 @@ print(json.dumps(payload))
   };
 }
 
+function validGeneratedFilesWithAsset() {
+  const files = validGeneratedFiles();
+  const manifest = JSON.parse(files["manifest.json"]);
+  manifest.assets = ["assets/pet.json", "assets/sprite.webp"];
+  manifest.files = [...manifest.files, ...manifest.assets];
+  files["manifest.json"] = JSON.stringify(manifest, null, 2);
+  files["app.js"] = files["app.js"].replace(
+    "screen.textContent = JSON.stringify({ status, program });",
+    "const pet = await fetch('./assets/pet.json').then(r => r.json()).catch(() => ({ mood: 'missing' }));\n  screen.textContent = JSON.stringify({ status, program, pet });",
+  );
+  files["assets/pet.json"] = JSON.stringify({ mood: "calm", frames: 8 });
+  files["assets/sprite.webp"] = Buffer.from([82, 73, 70, 70, 26, 0, 0, 0, 87, 69, 66, 80]);
+  return files;
+}
+
+function createMarketRows(initialRows = []) {
+  const rows = initialRows.map(row => ({
+    conversation_id: null,
+    description: "",
+    preview_url: "",
+    author: "user",
+    downloads: 0,
+    created_at: "2026-06-22T00:00:00.000Z",
+    ...row,
+  }));
+
+  return {
+    rows,
+    query(sql, params = []) {
+      const normalized = String(sql).replace(/\s+/g, " ").trim();
+      if (normalized.startsWith("SELECT id, conversation_id")) {
+        return rows.map(({ id, conversation_id, name, description, preview_url, author, downloads, created_at }) => ({
+          id,
+          conversation_id,
+          name,
+          description,
+          preview_url,
+          author,
+          downloads,
+          created_at,
+        }));
+      }
+      if (normalized.startsWith("SELECT * FROM market_apps WHERE id = ?")) {
+        return rows.filter(row => row.id === params[0]).map(row => ({ ...row }));
+      }
+      throw new Error(`Unexpected market query: ${normalized}`);
+    },
+    run(sql, params = []) {
+      const normalized = String(sql).replace(/\s+/g, " ").trim();
+      if (normalized.startsWith("INSERT INTO market_apps")) {
+        const [id, conversation_id, name, description, code, preview_url, author] = params;
+        rows.push({
+          id,
+          conversation_id,
+          name,
+          description,
+          code,
+          preview_url,
+          author,
+          downloads: 0,
+          created_at: "2026-06-22T00:00:00.000Z",
+        });
+        return;
+      }
+      if (normalized.startsWith("UPDATE market_apps SET downloads")) {
+        const row = rows.find(item => item.id === params[0]);
+        if (row) row.downloads += 1;
+        return;
+      }
+      throw new Error(`Unexpected market run: ${normalized}`);
+    },
+  };
+}
+
 async function writeFiles(dir, files) {
   for (const [filename, content] of Object.entries(files)) {
-    await fs.writeFile(path.join(dir, filename), content, "utf8");
+    const filePath = path.join(dir, filename);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, content);
   }
 }
 
@@ -385,6 +473,38 @@ await test("contracts reject missing required hardware/frontend hooks", () => {
   return `${issues.length} issues detected`;
 });
 
+await test("hardware app contract centralizes embedded rules", () => {
+  assert(HARDWARE_APP_CONTRACT.screen.width === 480, "screen width should be fixed at 480");
+  assert(HARDWARE_APP_CONTRACT.screen.height === 360, "screen height should be fixed at 360");
+  assert(HARDWARE_APP_CONTRACT.hardware.touch === false, "hardware should be no-touch");
+  assert(REQUIRED_RUNTIME_APIS.includes("/api/status"), "runtime APIs should include /api/status");
+  assert(REQUIRED_RUNTIME_APIS.includes(`./${HARDWARE_RESULT_FILE}`), "runtime APIs should include hardware-result.json");
+  assert(AGENT_WRITABLE_FILE_NAMES.includes("hardware_app.py"), "agent writable files should include hardware_app.py");
+  assert(!AGENT_WRITABLE_FILE_NAMES.includes("_run.sh"), "agent writable files should reject helper scripts");
+  assert(CONVERSATION_SNAPSHOT_FILE_NAMES.includes(HARDWARE_RESULT_FILE), "conversation snapshots should keep hardware result");
+  const prompt = hardwareContractPromptText("en");
+  assert(prompt.includes("480x360"), "prompt contract should include screen size");
+  assert(prompt.includes("Runtime data"), "prompt contract should include runtime data rules");
+});
+
+await test("gray board profile uses the deployable linaro account", async () => {
+  const { createBoardConfig } = await import(pathToFileURL(path.join(ROOT, "src", "devices.mjs")).href);
+  const gray = createBoardConfig("taishan-gray", {});
+  assert(gray.user === "linaro", `gray board should default to linaro, got ${gray.user}`);
+  assert(gray.port === "6278", `gray board should keep FRP port 6278, got ${gray.port}`);
+});
+
+await test("hardware result contract rejects missing runtime APIs", () => {
+  const issues = validateHardwareResultContract({
+    build_id: "vb-test-contract",
+    runtime: "executed_on_board",
+    available_apis: ["/api/status"],
+  }, {
+    expectedBuildId: "vb-test-contract",
+  });
+  assert(issues.some(issue => issue.code === "HARDWARE_RESULT_API_MISSING"), "expected missing hardware-result API issue");
+});
+
 await test("toolResult keeps blocking failures non-ok", () => {
   const good = okResult("contract", "contract ok");
   const bad = failResult("syntax", "bad js", [{ code: "BAD_JS", message: "Invalid JavaScript" }]);
@@ -430,12 +550,611 @@ await test("valid generated fixture satisfies contracts", () => {
   assert(issues.length === 0, `expected no contract issues, got ${JSON.stringify(issues)}`);
 });
 
+await test("declared passive assets satisfy generated app contracts", () => {
+  const files = validGeneratedFilesWithAsset();
+  const issues = validateFileContracts(files, "Asset app");
+  assert(issues.length === 0, `expected declared assets to pass, got ${JSON.stringify(issues)}`);
+});
+
+await test("asset contracts reject active files and undeclared references", () => {
+  const files = validGeneratedFiles();
+  const manifest = JSON.parse(files["manifest.json"]);
+  manifest.assets = ["assets/skin.html", "../escape.png", "assets/good.png"];
+  files["manifest.json"] = JSON.stringify(manifest, null, 2);
+  files["app.js"] += "\nfetch('./assets/missing.json');\n";
+  files["assets/good.png"] = Buffer.from([1, 2, 3]);
+  files["assets/logic.js"] = "console.log('active')";
+
+  const issues = validateFileContracts(files, "Unsafe asset app");
+  assert(issues.some(issue => issue.code === "ASSET_PATH_INVALID"), `expected invalid manifest asset issue, got ${JSON.stringify(issues)}`);
+  assert(issues.some(issue => issue.code === "ASSET_REFERENCE_UNDECLARED"), `expected undeclared reference issue, got ${JSON.stringify(issues)}`);
+  assert(issues.some(issue => issue.code === "UNSUPPORTED_FILE" && issue.evidence?.fileName === "assets/logic.js"), `expected active asset file rejection, got ${JSON.stringify(issues)}`);
+});
+
 await test("valid generated fixture runs local syntax checks", async () => {
   await withTempDir("vibeboard-valid-", async dir => {
-    const files = validGeneratedFiles();
+    const files = validGeneratedFilesWithAsset();
     await writeFiles(dir, files);
     await execFileP(NODE_BIN, ["--check", path.join(dir, "app.js")]);
     await execFileP(PYTHON_BIN, ["-m", "py_compile", path.join(dir, "hardware_app.py")]);
+  });
+});
+
+await test("generated workspace read/write preserves declared binary assets", async () => {
+  const { writeGeneratedFiles, readGeneratedFiles } = await import(pathToFileURL(path.join(ROOT, "src", "buildArtifact.mjs")).href);
+  await withTempDir("vibeboard-assets-rw-", async dir => {
+    const files = validGeneratedFilesWithAsset();
+    await fs.mkdir(path.join(dir, "assets"), { recursive: true });
+    await fs.writeFile(path.join(dir, "assets", "stale.webp"), Buffer.from([9, 9, 9]));
+
+    await writeGeneratedFiles(dir, files);
+    const loaded = await readGeneratedFiles(dir, HARDWARE_APP_CONTRACT.generatedFiles);
+    const staleExists = await fs.stat(path.join(dir, "assets", "stale.webp")).then(() => true).catch(() => false);
+
+    assert(Buffer.isBuffer(loaded["assets/pet.json"]), "declared JSON asset should be loaded through the binary asset path");
+    assert(loaded["assets/pet.json"].toString("utf8") === files["assets/pet.json"], "declared JSON asset contents should round-trip");
+    assert(Buffer.isBuffer(loaded["assets/sprite.webp"]), "binary asset should be loaded as Buffer");
+    assert(loaded["assets/sprite.webp"].equals(files["assets/sprite.webp"]), "binary asset contents should round-trip");
+    assert(staleExists === false, "writing a new generated workspace should clear stale assets");
+  });
+});
+
+await test("build intelligence summary translates verification into hardware fit", async () => {
+  const { createBuildIntelligenceSummary } = await import(pathToFileURL(path.join(ROOT, "src", "buildIntelligence.mjs")).href);
+  const summary = createBuildIntelligenceSummary({
+    build: { id: "vb-test-valid" },
+    manifest: { id: "vb-test-valid" },
+    verification: {
+      ok: true,
+      summary: "L0-L3 local verification passed",
+      issues: [],
+      evidence: {
+        nodeCheck: "passed",
+        pythonCompile: "passed",
+        hardwareRun: "passed",
+      },
+    },
+    hardwareResult: {
+      build_id: "vb-test-valid",
+      runtime: "executed_on_board",
+      available_apis: ["/api/status", "./hardware-result.json"],
+    },
+    board: { label: "Taishan Gray", targetStatic: "/tmp/vibeboard-static" },
+    pythonBin: PYTHON_BIN,
+  });
+
+  assert(summary.confidence === "local_verified", `expected local_verified, got ${JSON.stringify(summary)}`);
+  assert(summary.deviceFit.includes("480x360"), "summary should describe screen fit");
+  assert(summary.deviceFit.includes("KEY1"), "summary should describe physical keys");
+  assert(summary.hardwareChecks.every(check => check.status === "passed"), `expected passed checks, got ${JSON.stringify(summary.hardwareChecks)}`);
+  assert(summary.nextBestAction === "deploy_to_board", "verified build should recommend deploy_to_board");
+  assert(summary.userMoment.includes("hardware script ran"), "summary should include a user-readable hardware moment");
+});
+
+await test("preview runtime reuses an existing build screenshot", async () => {
+  const { createPreviewRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "previewRuntime.mjs")).href);
+  await withTempDir("vibeboard-preview-runtime-", async dir => {
+    const previewsDir = path.join(dir, "previews");
+    await fs.mkdir(previewsDir, { recursive: true });
+    const build = { id: "vb-preview-existing" };
+    const previewPath = path.join(previewsDir, `${build.id}.png`);
+    await fs.writeFile(previewPath, Buffer.alloc(32, 1));
+    let spawnCalled = false;
+    const runtime = createPreviewRuntime({
+      rootDir: dir,
+      previewsDir,
+      port: 8789,
+      nodeBin: NODE_BIN,
+      spawnProcess: () => {
+        spawnCalled = true;
+        throw new Error("spawn should not be called for existing previews");
+      },
+    });
+
+    const result = await runtime.ensureBuildPreview(build);
+    assert(result.ok === true, `existing preview should be ok: ${JSON.stringify(result)}`);
+    assert(result.existing === true, "existing preview should be marked as reused");
+    assert(result.previewUrl === `/api/previews/${build.id}.png`, "existing preview should return market preview URL");
+    assert(build.previewPath === previewPath, "build should receive previewPath");
+    assert(spawnCalled === false, "existing preview should avoid screenshot process");
+  });
+});
+
+await test("market runtime publishes current build with a persisted preview URL", async () => {
+  const { createMarketRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "marketRuntime.mjs")).href);
+  const files = validGeneratedFiles();
+  const marketRows = createMarketRows();
+  let captureCalled = false;
+  const runtime = createMarketRuntime({
+    generatedFileNames: HARDWARE_APP_CONTRACT.generatedFiles,
+    query: marketRows.query,
+    run: marketRows.run,
+    loadStaticMarketApps: async () => [{
+      id: "static-demo",
+      name: "Static Demo",
+      description: "static app",
+      preview_url: "/market-apps/static-demo.png",
+      author: "VibeBoard",
+      downloads: 0,
+      created_at: "2026-06-22T00:00:00.000Z",
+    }],
+    readStaticMarketCode: async () => ({}),
+    mergeMarketApps: (dbApps, staticApps) => [...dbApps, ...staticApps],
+    readGeneratedFiles: async () => {
+      throw new Error("publish should prefer current build files");
+    },
+    writeGeneratedFiles: async () => {
+      throw new Error("publish should not write generated files");
+    },
+    generatedDir: "generated/current",
+    getCurrentBuild: () => ({ id: "vb-market-publish", files }),
+    capturePreview: async () => {
+      captureCalled = true;
+      return {
+        ok: true,
+        buildId: "vb-market-publish",
+        previewUrl: "/api/previews/vb-market-publish.png",
+      };
+    },
+    loadGeneratedBuild: async () => {
+      throw new Error("publish should not reload generated build");
+    },
+    buildCurrent: async () => {
+      throw new Error("publish should not build");
+    },
+    deployCurrent: async () => ({ id: "unused" }),
+    withDeployLock: async fn => fn(),
+    withDevice: async (_deviceId, fn) => fn(),
+    deviceIdFrom: (_body, fallback) => fallback,
+    getBoard: () => ({ id: "board-default" }),
+    idFactory: () => "market-runtime-publish",
+  });
+
+  const published = await runtime.publishApp({
+    conversation_id: "conv-market",
+    name: "Market Runtime App",
+    description: "Captures the current build preview.",
+  });
+  const listed = await runtime.listApps();
+  const saved = marketRows.rows[0];
+  const savedCode = JSON.parse(saved.code);
+
+  assert(published.ok === true, `expected publish ok, got ${JSON.stringify(published)}`);
+  assert(captureCalled === true, "publish should capture a preview for the current build");
+  assert(published.preview_url === "/api/previews/vb-market-publish.png", "publish should return preview URL");
+  assert(saved.preview_url === published.preview_url, "publish should persist preview URL in market app");
+  assert(saved.conversation_id === "conv-market", "publish should persist source conversation");
+  assert(savedCode["app.js"] === files["app.js"], "publish should snapshot current generated app files");
+  assert(listed.apps.some(app => app.id === "market-runtime-publish" && app.source === "database"), "list should include database app source");
+  assert(listed.apps.some(app => app.id === "static-demo"), "list should still include static market apps");
+});
+
+await test("market runtime snapshots and restores declared binary assets", async () => {
+  const { createMarketRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "marketRuntime.mjs")).href);
+  const files = validGeneratedFilesWithAsset();
+  const marketRows = createMarketRows();
+  let writtenFiles = null;
+  const runtime = createMarketRuntime({
+    generatedFileNames: HARDWARE_APP_CONTRACT.generatedFiles,
+    query: marketRows.query,
+    run: marketRows.run,
+    loadStaticMarketApps: async () => [],
+    readStaticMarketCode: async () => ({}),
+    mergeMarketApps: (dbApps, staticApps) => [...dbApps, ...staticApps],
+    readGeneratedFiles: async () => {
+      throw new Error("publish should prefer current build files");
+    },
+    writeGeneratedFiles: async (_dir, nextFiles) => {
+      writtenFiles = { ...nextFiles };
+    },
+    generatedDir: "generated/current",
+    getCurrentBuild: () => ({ id: "vb-asset-publish", files }),
+    capturePreview: async () => ({ ok: true, previewUrl: "/api/previews/vb-asset-publish.png" }),
+    loadGeneratedBuild: async () => ({ id: "vb-asset-publish" }),
+    buildCurrent: async () => {},
+    deployCurrent: async () => ({ id: "deploy-asset-market" }),
+    withDeployLock: async fn => fn(),
+    withDevice: async (_deviceId, fn) => fn(),
+    deviceIdFrom: (_body, fallback) => fallback,
+    getBoard: () => ({ id: "board-default" }),
+    idFactory: () => "market-runtime-asset",
+    log: { log: () => {} },
+  });
+
+  await runtime.publishApp({ name: "Asset Market App" });
+  const savedCode = JSON.parse(marketRows.rows[0].code);
+  assert(savedCode["assets/sprite.webp"]?.__vibeboardFileEncoding === "base64", "published binary asset should be base64 encoded");
+
+  const deployed = await runtime.deployApp("market-runtime-asset", {});
+  assert(deployed.ok === true, `expected deploy ok, got ${JSON.stringify(deployed)}`);
+  assert(Buffer.isBuffer(writtenFiles["assets/sprite.webp"]), "market deploy should restore binary assets as Buffer");
+  assert(writtenFiles["assets/sprite.webp"].equals(files["assets/sprite.webp"]), "restored binary asset should match original");
+  assert(writtenFiles["assets/pet.json"] === files["assets/pet.json"], "text asset should be restored unchanged");
+});
+
+await test("market runtime rejects publish when preview capture fails", async () => {
+  const { createMarketRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "marketRuntime.mjs")).href);
+  const marketRows = createMarketRows();
+  const runtime = createMarketRuntime({
+    generatedFileNames: HARDWARE_APP_CONTRACT.generatedFiles,
+    query: marketRows.query,
+    run: marketRows.run,
+    loadStaticMarketApps: async () => [],
+    readStaticMarketCode: async () => ({}),
+    mergeMarketApps: (dbApps, staticApps) => [...dbApps, ...staticApps],
+    readGeneratedFiles: async () => {
+      throw new Error("publish should prefer current build files");
+    },
+    writeGeneratedFiles: async () => {
+      throw new Error("publish failure should not write generated files");
+    },
+    generatedDir: "generated/current",
+    getCurrentBuild: () => ({ id: "vb-preview-failure", files: validGeneratedFiles() }),
+    capturePreview: async () => ({
+      ok: false,
+      buildId: "vb-preview-failure",
+      error: "screenshot process failed",
+      previewUrl: "",
+    }),
+    loadGeneratedBuild: async () => {
+      throw new Error("publish failure should not reload generated build");
+    },
+    buildCurrent: async () => {
+      throw new Error("publish failure should not build");
+    },
+    deployCurrent: async () => ({ id: "unused" }),
+    withDeployLock: async fn => fn(),
+    withDevice: async (_deviceId, fn) => fn(),
+    deviceIdFrom: (_body, fallback) => fallback,
+    getBoard: () => ({ id: "board-default" }),
+    idFactory: () => "market-runtime-preview-failure",
+  });
+
+  let failed = null;
+  try {
+    await runtime.publishApp({ name: "No Screenshot App" });
+  } catch (error) {
+    failed = error;
+  }
+
+  assert(failed?.statusCode === 502, `preview capture failure should be a 502, got ${failed?.statusCode}`);
+  assert(failed.previewReport?.error === "screenshot process failed", "preview failure should keep previewReport diagnostics");
+  assert(marketRows.rows.length === 0, "publish should not persist an app without a preview URL");
+});
+
+await test("market runtime rejects publish without app name as bad input", async () => {
+  const { createMarketRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "marketRuntime.mjs")).href);
+  const marketRows = createMarketRows();
+  const runtime = createMarketRuntime({
+    generatedFileNames: HARDWARE_APP_CONTRACT.generatedFiles,
+    query: marketRows.query,
+    run: marketRows.run,
+    loadStaticMarketApps: async () => [],
+    readStaticMarketCode: async () => ({}),
+    mergeMarketApps: (dbApps, staticApps) => [...dbApps, ...staticApps],
+    readGeneratedFiles: async () => ({}),
+    writeGeneratedFiles: async () => {},
+    generatedDir: "generated/current",
+    getCurrentBuild: () => ({ id: "vb-name-required", files: validGeneratedFiles() }),
+    capturePreview: async () => {
+      throw new Error("name validation should run before preview capture");
+    },
+    loadGeneratedBuild: async () => {},
+    buildCurrent: async () => {},
+    deployCurrent: async () => ({ id: "unused" }),
+    withDeployLock: async fn => fn(),
+    withDevice: async (_deviceId, fn) => fn(),
+    deviceIdFrom: (_body, fallback) => fallback,
+    getBoard: () => ({ id: "board-default" }),
+  });
+
+  let failed = null;
+  try {
+    await runtime.publishApp({ name: "   " });
+  } catch (error) {
+    failed = error;
+  }
+
+  assert(failed?.statusCode === 400, `missing app name should be a 400, got ${failed?.statusCode}`);
+  assert(marketRows.rows.length === 0, "publish should not persist invalid input");
+});
+
+await test("market runtime deploys database app through build and deploy seams", async () => {
+  const { createMarketRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "marketRuntime.mjs")).href);
+  const codeFiles = {
+    ...validGeneratedFilesWithAsset(),
+    [HARDWARE_RESULT_FILE]: "{\"stale\":true}",
+    "notes.txt": "not part of the hardware generated workspace",
+  };
+  const marketRows = createMarketRows([{
+    id: "market-db-app",
+    name: "Stored App",
+    code: JSON.stringify(codeFiles),
+  }]);
+  const calls = [];
+  let writtenFiles = null;
+  const runtime = createMarketRuntime({
+    generatedFileNames: HARDWARE_APP_CONTRACT.generatedFiles,
+    query: marketRows.query,
+    run: marketRows.run,
+    loadStaticMarketApps: async () => [],
+    readStaticMarketCode: async () => {
+      throw new Error("database app deploy should not read static code");
+    },
+    mergeMarketApps: (dbApps, staticApps) => [...dbApps, ...staticApps],
+    readGeneratedFiles: async () => ({}),
+    writeGeneratedFiles: async (dir, files) => {
+      calls.push(`write:${dir}`);
+      writtenFiles = { ...files };
+    },
+    generatedDir: "generated/current",
+    getCurrentBuild: () => null,
+    capturePreview: async () => ({ ok: false }),
+    loadGeneratedBuild: async () => {
+      calls.push("load");
+      return { id: "vb-test-valid" };
+    },
+    buildCurrent: async () => {
+      calls.push("build");
+    },
+    deployCurrent: async () => {
+      calls.push("deploy");
+      return { id: "deploy-market-db" };
+    },
+    withDeployLock: async fn => {
+      calls.push("lock");
+      return fn();
+    },
+    withDevice: async (deviceId, fn) => {
+      calls.push(`device:${deviceId}`);
+      return fn();
+    },
+    deviceIdFrom: (body, fallback) => body.deviceId || fallback,
+    getBoard: () => ({ id: "board-default" }),
+    log: { log: () => {} },
+  });
+
+  const deployed = await runtime.deployApp("market-db-app", { deviceId: "board-b" });
+  const actualFiles = Object.keys(writtenFiles || {}).sort().join(",");
+  const expectedFiles = [...HARDWARE_APP_CONTRACT.generatedFiles, "assets/pet.json", "assets/sprite.webp"].sort().join(",");
+
+  assert(deployed.ok === true, `expected deploy ok, got ${JSON.stringify(deployed)}`);
+  assert(deployed.deviceId === "board-b", "deploy should preserve requested device id");
+  assert(deployed.deployId === "deploy-market-db", "deploy should expose deploy result id");
+  assert(actualFiles === expectedFiles, `market deploy should write only generated files and declared assets, got ${actualFiles}`);
+  assert(!writtenFiles[HARDWARE_RESULT_FILE], "market deploy should not restore stale hardware-result.json");
+  assert(!writtenFiles["notes.txt"], "market deploy should ignore non-contract files");
+  assert(Buffer.isBuffer(writtenFiles["assets/sprite.webp"]), "market deploy should keep binary asset buffers");
+  assert(marketRows.rows[0].downloads === 1, "database app deploy should increment downloads");
+  assert(calls.join(">") === "lock>device:board-b>write:generated/current>load>build>deploy", `unexpected deploy order: ${calls.join(">")}`);
+});
+
+await test("market runtime deploys static fallback and reports missing apps", async () => {
+  const { createMarketRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "marketRuntime.mjs")).href);
+  const marketRows = createMarketRows();
+  let staticCodeId = null;
+  let writeCount = 0;
+  const runtime = createMarketRuntime({
+    generatedFileNames: HARDWARE_APP_CONTRACT.generatedFiles,
+    query: marketRows.query,
+    run: marketRows.run,
+    loadStaticMarketApps: async () => [{ id: "static-market-app", name: "Static Market App" }],
+    readStaticMarketCode: async appId => {
+      staticCodeId = appId;
+      return validGeneratedFiles();
+    },
+    mergeMarketApps: (dbApps, staticApps) => [...dbApps, ...staticApps],
+    readGeneratedFiles: async () => ({}),
+    writeGeneratedFiles: async () => {
+      writeCount += 1;
+    },
+    generatedDir: "generated/current",
+    getCurrentBuild: () => null,
+    capturePreview: async () => ({ ok: false }),
+    loadGeneratedBuild: async () => ({ id: "vb-test-valid" }),
+    buildCurrent: async () => {},
+    deployCurrent: async () => ({ id: "deploy-static-market" }),
+    withDeployLock: async fn => fn(),
+    withDevice: async (_deviceId, fn) => fn(),
+    deviceIdFrom: (_body, fallback) => fallback,
+    getBoard: () => ({ id: "board-default" }),
+    log: { log: () => {} },
+  });
+
+  const deployed = await runtime.deployApp("static-market-app", {});
+  let missing = null;
+  try {
+    await runtime.deployApp("missing-market-app", {});
+  } catch (error) {
+    missing = error;
+  }
+
+  assert(deployed.ok === true, `expected static deploy ok, got ${JSON.stringify(deployed)}`);
+  assert(deployed.deployId === "deploy-static-market", "static deploy should expose deploy result id");
+  assert(staticCodeId === "static-market-app", "static deploy should load static app code by id");
+  assert(writeCount === 1, `only successful static deploy should write files, got ${writeCount}`);
+  assert(marketRows.rows.length === 0, "static deploy should not create database rows");
+  assert(missing?.statusCode === 404, "missing market app should report 404");
+});
+
+await test("static market catalog reads manifest-declared assets", async () => {
+  const { readStaticMarketCode } = await import(pathToFileURL(path.join(ROOT, "src", "marketCatalog.mjs")).href);
+  await withTempDir("vibeboard-static-market-assets-", async dir => {
+    const appDir = path.join(dir, "asset-static-app");
+    const files = validGeneratedFilesWithAsset();
+    await writeFiles(appDir, files);
+
+    const loaded = await readStaticMarketCode(dir, "asset-static-app", HARDWARE_APP_CONTRACT.generatedFiles);
+    assert(loaded["app.js"] === files["app.js"], "static market reader should load generated app source");
+    assert(Buffer.isBuffer(loaded["assets/pet.json"]), "static market reader should load declared JSON asset as Buffer");
+    assert(loaded["assets/pet.json"].toString("utf8") === files["assets/pet.json"], "static market JSON asset should match source");
+    assert(Buffer.isBuffer(loaded["assets/sprite.webp"]), "static market reader should load declared binary asset");
+    assert(loaded["assets/sprite.webp"].equals(files["assets/sprite.webp"]), "static market binary asset should match source");
+  });
+});
+
+await test("desk deployer uploads and copies declared assets", async () => {
+  const {
+    buildDeployRemoteCommand,
+    buildDeployUploadEntries,
+  } = await import(pathToFileURL(path.join(ROOT, "src", "deskDeployer.mjs")).href);
+  const board = {
+    releaseRoot: "/tmp/vibeboard/releases",
+    backupRoot: "/tmp/vibeboard/backups",
+    targetStatic: "/home/linaro/static",
+    appRoot: "/home/linaro/app",
+    service: "taishan-screen.service",
+  };
+  const build = {
+    id: "vb-deploy-assets",
+    dir: "/local/generated",
+    files: validGeneratedFilesWithAsset(),
+  };
+  const entries = buildDeployUploadEntries({
+    currentBuild: build,
+    board,
+    runtimeDir: "/local/runtime",
+  });
+  const remotePaths = entries.map(entry => entry.remotePath);
+  const command = buildDeployRemoteCommand({ board, buildId: build.id });
+
+  assert(remotePaths.includes("/tmp/vibeboard/releases/vb-deploy-assets/assets/pet.json"), `expected pet asset upload, got ${remotePaths.join(",")}`);
+  assert(remotePaths.includes("/tmp/vibeboard/releases/vb-deploy-assets/assets/sprite.webp"), `expected sprite asset upload, got ${remotePaths.join(",")}`);
+  assert(command.includes("rm -rf \"$target/assets\""), "deploy command should remove stale target assets");
+  assert(command.includes("cp -a \"$release/assets/.\" \"$target/assets/\""), "deploy command should copy release assets to target");
+});
+
+await test("build runtime runs local hardware build and records evidence", async () => {
+  const { createBuildRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "buildRuntime.mjs")).href);
+  await withTempDir("vibeboard-build-runtime-", async dir => {
+    const files = validGeneratedFilesWithAsset();
+    const logs = [];
+    await writeFiles(dir, files);
+    const currentBuild = {
+      id: "vb-test-valid",
+      prompt: "valid generated app smoke test",
+      files: { ...files },
+      dir,
+      built: false,
+      deployed: false,
+      manifest: JSON.parse(files["manifest.json"]),
+      agentRun: { phase: "code", evidence: [], failures: [] },
+    };
+    const runtime = createBuildRuntime({
+      appendServerLog: async (event, detail) => {
+        logs.push({ event, detail });
+      },
+      execFileP,
+      verifyAllLocal: async (verificationFiles, options) => {
+        assert(options.dir === dir, "build runtime should verify the generated directory");
+        assert(options.pythonBin === PYTHON_BIN, "build runtime should pass configured Python bin");
+        assert(verificationFiles[HARDWARE_RESULT_FILE]?.includes('"build_id": "vb-test-valid"'), "verification should receive hardware result JSON");
+        assert(Buffer.isBuffer(verificationFiles["assets/sprite.webp"]), "build runtime should pass declared binary assets to verification");
+        return { ok: true, issues: [], evidence: { verifier: "stub" }, summary: "stub ok" };
+      },
+      createAppSpec: (prompt, id) => ({
+        prompt,
+        id,
+        mode: "test",
+        target: "480x360 RK3566 Linux kiosk",
+        hardwareApi: REQUIRED_RUNTIME_APIS,
+      }),
+      generatedManifest: (prompt, id, spec) => ({
+        id,
+        prompt,
+        target: spec.target,
+        files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"],
+      }),
+      getCurrentBuild: () => currentBuild,
+      getBoard: () => ({ targetStatic: "/tmp/vibeboard-static" }),
+      pythonBin: PYTHON_BIN,
+      nodeBin: NODE_BIN,
+    });
+
+    const manifest = await runtime.buildCurrent();
+    const hardwareResult = JSON.parse(await fs.readFile(path.join(dir, HARDWARE_RESULT_FILE), "utf8"));
+
+    assert(hardwareResult.build_id === "vb-test-valid", "build runtime should write matching hardware-result.json");
+    assert(currentBuild.built === true, "build runtime should mark current build as built");
+    assert(currentBuild.buildEvidence.phase === "local_verify", "build evidence should record local verification phase");
+    assert(currentBuild.buildEvidence.summary === "L0-L3 local verification passed", "build evidence should preserve L0-L3 summary");
+    assert(currentBuild.buildEvidence.evidence.hardwareResult.endsWith(`/${HARDWARE_RESULT_FILE}`), "build evidence should point at hardware result");
+    assert(currentBuild.intelligenceSummary?.confidence === "local_verified", "build runtime should attach local verified intelligence summary");
+    assert(currentBuild.intelligenceSummary?.hardwareChecks?.some(check => check.id === "build_id_match" && check.status === "passed"), "intelligence summary should prove build id match");
+    assert(currentBuild.intelligenceSummary?.nextBestAction === "deploy_to_board", "verified build should suggest deploy_to_board");
+    assert(currentBuild.agentRun.evidence.some(item => item.phase === "local_verify" && item.ok === true), "agent run should receive local verification evidence");
+    assert(manifest.compile?.web === "node --check app.js", "manifest should preserve web compile command");
+    assert(manifest.target === "/tmp/vibeboard-static", "manifest should keep board target");
+    assert(logs.some(item => item.event === "build.start"), "build runtime should log build.start");
+    assert(logs.some(item => item.event === "build.done"), "build runtime should log build.done");
+  });
+});
+
+await test("hardware contract wrapper preserves stdout when source exits cleanly", async () => {
+  const { injectHardwareAppContracts } = await import(pathToFileURL(path.join(ROOT, "src", "generatedAppTemplate.mjs")).href);
+  await withTempDir("vibeboard-hardware-exit-", async dir => {
+    const script = injectHardwareAppContracts(`import json
+import sys
+
+print(json.dumps({
+    "build_id": "source-build",
+    "runtime": "source-runtime",
+    "available_apis": ["/api/status", "./hardware-result.json"]
+}))
+sys.exit(0)
+`, "vb-wrapper-exit-ok");
+    const scriptPath = path.join(dir, "hardware_app.py");
+    await fs.writeFile(scriptPath, script, "utf8");
+
+    await execFileP(PYTHON_BIN, ["-m", "py_compile", scriptPath], { cwd: dir });
+    const result = await execFileP(PYTHON_BIN, [scriptPath], { cwd: dir });
+    const output = JSON.parse(result.stdout.trim());
+
+    assert(output.build_id === "vb-wrapper-exit-ok", "wrapper should replace source build id");
+    assert(output.runtime === "executed_on_board", "wrapper should normalize runtime");
+    assert(output.available_apis.includes("./hardware-result.json"), "wrapper should preserve hardware result API contract");
+  });
+});
+
+await test("build runtime rejects hardware result build id mismatch before verification", async () => {
+  const { createBuildRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "buildRuntime.mjs")).href);
+  await withTempDir("vibeboard-build-runtime-mismatch-", async dir => {
+    const files = validGeneratedFiles();
+    await writeFiles(dir, files);
+    const currentBuild = {
+      id: "vb-test-mismatch",
+      prompt: "valid generated app smoke test",
+      files: { ...files },
+      dir,
+      built: false,
+      deployed: false,
+      manifest: JSON.parse(files["manifest.json"]),
+      agentRun: { phase: "code", evidence: [], failures: [] },
+    };
+    let verifyCalled = false;
+    const runtime = createBuildRuntime({
+      execFileP,
+      verifyAllLocal: async () => {
+        verifyCalled = true;
+        return { ok: true, issues: [], evidence: {}, summary: "should not run" };
+      },
+      createAppSpec: (prompt, id) => ({ prompt, id, target: "480x360 RK3566 Linux kiosk" }),
+      generatedManifest: (prompt, id) => ({ id, prompt, files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+      getCurrentBuild: () => currentBuild,
+      getBoard: () => ({ targetStatic: "/tmp/vibeboard-static" }),
+      pythonBin: PYTHON_BIN,
+      nodeBin: NODE_BIN,
+    });
+
+    let failed = false;
+    try {
+      await runtime.buildCurrent();
+    } catch (error) {
+      failed = /HARDWARE_BUILD_ID_MISMATCH/.test(error.message);
+    }
+
+    assert(failed, "build runtime should reject mismatched hardware build_id");
+    assert(verifyCalled === false, "local verification should not run after hardware contract failure");
   });
 });
 
@@ -469,6 +1188,27 @@ await test("default DeepSeek settings do not reuse OPENAI_API_KEY", async () => 
   }
 });
 
+await test("explicitly disabled model settings ignore environment API keys", async () => {
+  const previousDeepSeek = process.env.DEEPSEEK_API_KEY;
+  const previousLlm = process.env.VIBEBOARD_LLM_API_KEY;
+
+  try {
+    process.env.DEEPSEEK_API_KEY = "deepseek-test-key";
+    process.env.VIBEBOARD_LLM_API_KEY = "generic-test-key";
+
+    const { normalizeModelSettings } = await import(pathToFileURL(path.join(ROOT, "src", "modelSettings.mjs")).href);
+    const settings = normalizeModelSettings({ enabled: false });
+
+    assert(settings.apiKey === "", "disabled settings should not inherit environment API keys");
+    assert(settings.enabled === false, "explicit enabled:false should keep the model disabled");
+  } finally {
+    if (previousDeepSeek === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = previousDeepSeek;
+    if (previousLlm === undefined) delete process.env.VIBEBOARD_LLM_API_KEY;
+    else process.env.VIBEBOARD_LLM_API_KEY = previousLlm;
+  }
+});
+
 await test("project memory is scoped per conversation", async () => {
   const initSqlJs = (await import("sql.js")).default;
   const { createConversationStore } = await import(pathToFileURL(path.join(ROOT, "src", "conversationStore.mjs")).href);
@@ -497,6 +1237,115 @@ await test("project memory is scoped per conversation", async () => {
   store.deleteConversation("project-a");
   assert(store.getProjectMemory("project-a").goal === "", "deleted project memory should be removed");
   assert(store.getProjectMemory("project-b").goal.includes("weather"), "deleting one project must not delete another project memory");
+});
+
+await test("conversation files reject chat-text pollution", async () => {
+  const initSqlJs = (await import("sql.js")).default;
+  const { createConversationStore } = await import(pathToFileURL(path.join(ROOT, "src", "conversationStore.mjs")).href);
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  const store = createConversationStore(db, () => {});
+  store.initSchema();
+  store.createConversation("project-files", "Files");
+
+  store.saveConversationFiles("project-files", "build-safe", {
+    "index.html": "<!doctype html>",
+    "style.css": "body{}",
+    "app.js": "console.log('ok')",
+    "{\"intent\":\"build_ready\"}": "planner json accidentally used as a filename",
+    "开始吧": "user chat accidentally used as a filename",
+  });
+
+  const saved = store.loadConversationFiles("project-files").files;
+  assert(saved["index.html"] === "<!doctype html>", "valid generated file should be saved");
+  assert(saved["style.css"] === "body{}", "valid style file should be saved");
+  assert(!saved["{\"intent\":\"build_ready\"}"], "planner JSON must not be treated as a generated file");
+  assert(!saved["开始吧"], "user chat text must not be treated as a generated file");
+});
+
+await test("conversation files keep only manifest-declared assets", async () => {
+  const initSqlJs = (await import("sql.js")).default;
+  const { createConversationStore } = await import(pathToFileURL(path.join(ROOT, "src", "conversationStore.mjs")).href);
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  const store = createConversationStore(db, () => {});
+  store.initSchema();
+  store.createConversation("project-assets", "Assets");
+
+  const files = {
+    ...validGeneratedFilesWithAsset(),
+    "assets/undeclared.webp": Buffer.from([4, 5, 6]),
+  };
+  store.saveConversationFiles("project-assets", "build-assets", files);
+  const saved = store.loadConversationFiles("project-assets").files;
+
+  assert(saved["manifest.json"], "manifest should be saved");
+  assert(saved["assets/pet.json"] === files["assets/pet.json"], "declared text asset should be saved");
+  assert(Buffer.isBuffer(saved["assets/sprite.webp"]), "declared binary asset should be restored as Buffer");
+  assert(saved["assets/sprite.webp"].equals(files["assets/sprite.webp"]), "declared binary asset should match original");
+  assert(!saved["assets/undeclared.webp"], "undeclared asset should not be saved");
+});
+
+await test("conversation files filter legacy polluted rows on load", async () => {
+  const initSqlJs = (await import("sql.js")).default;
+  const { createConversationStore } = await import(pathToFileURL(path.join(ROOT, "src", "conversationStore.mjs")).href);
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  const store = createConversationStore(db, () => {});
+  store.initSchema();
+  store.createConversation("project-legacy-files", "Legacy Files");
+
+  db.run(
+    "INSERT INTO conversation_files (conversation_id, build_id, filename, content) VALUES (?, ?, ?, ?)",
+    ["project-legacy-files", "build-legacy", "{\"intent\":\"build_ready\"}", "polluted chat JSON"]
+  );
+  db.run(
+    "INSERT INTO conversation_files (conversation_id, build_id, filename, content) VALUES (?, ?, ?, ?)",
+    ["project-legacy-files", "build-legacy", "app.js", "console.log('safe')"]
+  );
+
+  const loaded = store.loadConversationFiles("project-legacy-files").files;
+  assert(loaded["app.js"] === "console.log('safe')", "valid legacy generated file should load");
+  assert(Object.keys(loaded).length === 1, `polluted legacy rows should be filtered, got ${Object.keys(loaded).join(",")}`);
+});
+
+await test("conversation store persists compound writes once per operation", async () => {
+  const initSqlJs = (await import("sql.js")).default;
+  const { createConversationStore } = await import(pathToFileURL(path.join(ROOT, "src", "conversationStore.mjs")).href);
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  let saveCount = 0;
+  const store = createConversationStore(db, () => {
+    saveCount += 1;
+  });
+  store.initSchema();
+  store.createConversation("project-persist", "Persist");
+  saveCount = 0;
+
+  store.appendMessage("project-persist", { role: "user", content: "first prompt" });
+  assert(saveCount === 1, `appendMessage should save once, got ${saveCount}`);
+
+  saveCount = 0;
+  store.saveConversationFiles("project-persist", "build-persist", {
+    "index.html": "<!doctype html>",
+    "style.css": "body{}",
+    "app.js": "console.log('ok')",
+    "hardware_app.py": "print('ok')",
+    "manifest.json": "{}",
+    "hardware-result.json": "{}",
+  });
+  assert(saveCount === 1, `saveConversationFiles should save once, got ${saveCount}`);
+
+  saveCount = 0;
+  store.setProjectMemory("project-persist", {
+    summary: "persist",
+    goal: "persist compound writes",
+  });
+  assert(saveCount === 1, `setProjectMemory should save once, got ${saveCount}`);
+
+  saveCount = 0;
+  store.deleteConversation("project-persist");
+  assert(saveCount === 1, `deleteConversation should save once, got ${saveCount}`);
 });
 
 await test("chat planner keeps capability questions in chat mode", async () => {
@@ -573,6 +1422,31 @@ await test("chat planner requires build_prompt for build_ready", async () => {
   assert(valid.ready_to_build === true, `expected valid build plan, got ${JSON.stringify(valid)}`);
   assert(valid.build_prompt.includes("480x360"), "valid build prompt should be preserved");
   assert(valid.project_memory.requirements.includes("显示当前时间"), "valid build plan should preserve project memory");
+});
+
+await test("chat planner recovers truncated build_ready JSON when build prompt is complete", async () => {
+  const { parseChatPlan } = await import(pathToFileURL(path.join(ROOT, "src", "chatPlanner.mjs")).href);
+  const longPrompt = [
+    "Build a pure frontend village simulation for a 480x360 display.",
+    "Use a 45-degree isometric view with road grids and houses upgrading to 4 floors.",
+    "Add day-night cycle, weather changes, and a Day 1 08:00 style time label.",
+  ].join("\n");
+  const truncated = `{
+    "intent": "build_ready",
+    "reply": "I understand the village simulation and will build it.",
+    "understanding": ["45-degree village", "day-night weather", "Canvas only"],
+    "planned_changes": ["draw Canvas scene", "implement weather particles"],
+    "target": "new_project",
+    "ready_to_build": true,
+    "build_prompt": ${JSON.stringify(longPrompt)},
+    "project_memory": {
+      "summary": "truncated after this point`;
+
+  const plan = parseChatPlan(truncated, { goal: "old goal" });
+  assert(plan.intent === "build_ready", `expected recovered build_ready, got ${JSON.stringify(plan)}`);
+  assert(plan.ready_to_build === true, "recovered plan should be build ready");
+  assert(plan.build_prompt.includes("village simulation"), "recovered plan should preserve build prompt");
+  assert(plan.understanding.includes("45-degree village"), "recovered plan should preserve understanding");
 });
 
 await test("chat planner preserves understanding and planned changes for confirmation UI", async () => {
@@ -718,6 +1592,169 @@ await test("build graph runs template path and returns trace", async () => {
   assert(nodes.includes("save_snapshot"), "build graph should include snapshot node");
 });
 
+await test("generate runtime runs template path and saves snapshot", async () => {
+  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  let savedSnapshot = null;
+  const runtime = createGenerateRuntime({
+    conversationStore: {
+      getProjectMemory: id => {
+        assert(id === "conv-runtime-template", "runtime should load project memory by conversation id");
+        return { goal: "make a quiet status panel", requirements: ["show status"] };
+      },
+      loadConversationFiles: id => {
+        assert(id === "conv-runtime-template", "runtime should load conversation files by conversation id");
+        return { files: {} };
+      },
+      saveConversationFiles: (conversationId, buildId, files) => {
+        savedSnapshot = { conversationId, buildId, files };
+      },
+    },
+    memoryStore: {
+      getAll: () => ({ palette: "high contrast" }),
+      set: () => {},
+    },
+    writeGenerated: async (prompt, modelSettings, history) => ({
+      ok: true,
+      id: "vb-runtime-template",
+      files: { "index.html": "<html></html>" },
+      manifest: { id: "vb-runtime-template" },
+      agentRun: { spec: { prompt }, evidence: [{ phase: "code", ok: true, summary: "template ok" }] },
+      buildEvidence: { ok: true, issues: [] },
+      intelligenceSummary: { confidence: "local_verified", nextBestAction: "deploy_to_board" },
+      modelSettings,
+      history,
+    }),
+    filesWithHardwareResult: async files => ({ ...files, [HARDWARE_RESULT_FILE]: "{\"ok\":true}" }),
+  });
+
+  const result = await runtime.runGenerateRequest({
+    prompt: "Build a small device panel.",
+    conversation_id: "conv-runtime-template",
+    modelSettings: { enabled: false },
+  });
+
+  const nodes = result.buildGraph.map(item => item.node);
+  assert(result.ok === true, `expected runtime ok, got ${JSON.stringify(result)}`);
+  assert(result.id === "vb-runtime-template", "template build id should pass through");
+  assert(result.source === "template", "runtime should use template path when model settings are disabled");
+  assert(result.intelligenceSummary?.confidence === "local_verified", "runtime should return template build intelligence summary");
+  assert(nodes.includes("template_generate"), "runtime graph should include template node");
+  assert(nodes.includes("save_snapshot"), "runtime graph should include save snapshot node");
+  assert(savedSnapshot?.conversationId === "conv-runtime-template", "runtime should save conversation snapshot");
+  assert(savedSnapshot?.files?.[HARDWARE_RESULT_FILE], "snapshot should include hardware result file");
+});
+
+await test("generate runtime downgrades snapshot save failures", async () => {
+  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  const logs = [];
+  const runtime = createGenerateRuntime({
+    conversationStore: {
+      getProjectMemory: () => ({}),
+      loadConversationFiles: () => ({ files: {} }),
+      saveConversationFiles: () => {
+        throw new Error("database busy");
+      },
+    },
+    memoryStore: {
+      getAll: () => ({}),
+      set: () => {},
+    },
+    appendServerLog: async (event, detail) => {
+      logs.push({ event, detail });
+    },
+    writeGenerated: async () => ({
+      id: "vb-runtime-save-fail",
+      files: { "index.html": "<html></html>" },
+      manifest: null,
+      agentRun: { evidence: [] },
+      buildEvidence: { ok: true, issues: [] },
+      intelligenceSummary: { confidence: "local_verified" },
+    }),
+    filesWithHardwareResult: async files => files,
+  });
+
+  const result = await runtime.runGenerateRequest({
+    prompt: "Build a resilient snapshot test.",
+    conversation_id: "conv-runtime-save-fail",
+    modelSettings: { enabled: false },
+  });
+
+  assert(result.ok === true, `snapshot save failure must not fail generation, got ${JSON.stringify(result)}`);
+  assert(logs.some(item => item.event === "generate.template.conversation_save_failed"), "runtime should log downgraded snapshot failure");
+});
+
+await test("generate runtime passes conversation files into agent path", async () => {
+  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  await withTempDir("vibeboard-runtime-agent-", async dir => {
+    let receivedFiles = null;
+    let currentBuild = null;
+    const runtime = createGenerateRuntime({
+      conversationStore: {
+        getProjectMemory: () => ({ goal: "edit existing screen" }),
+        loadConversationFiles: () => ({
+          files: {
+            "index.html": "<html><script src=\"./app.js\"></script></html>",
+            "style.css": "body{}",
+            "app.js": "console.log('old')",
+          },
+        }),
+        saveConversationFiles: () => {},
+      },
+      memoryStore: {
+        getAll: () => ({}),
+        set: () => {},
+      },
+      runAgent: async (_settings, _prompt, fileStore) => {
+        receivedFiles = { ...fileStore };
+        return {
+          success: true,
+          summary: "agent edited files",
+          files: {
+            "index.html": "<html><script src=\"./app.js\"></script></html>",
+            "style.css": "body{}",
+            "app.js": "console.log('new')",
+          },
+          actions: [],
+        };
+      },
+      buildId: () => "vb-runtime-agent",
+      createAppSpec: (prompt, id) => ({ prompt, id, target: "test-target" }),
+      generatedHardwareApp: (_prompt, id) => `print({"build_id": "${id}"})`,
+      injectHardwareAppContracts: source => source,
+      generatedManifest: (_prompt, id) => ({ id, files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+      buildCurrent: async () => {
+        currentBuild.built = true;
+        currentBuild.buildEvidence = { ok: true, issues: [], phase: "local_verify" };
+        currentBuild.intelligenceSummary = { confidence: "local_verified", nextBestAction: "deploy_to_board" };
+      },
+      setCurrentBuild: build => {
+        currentBuild = build;
+        return currentBuild;
+      },
+      getCurrentBuild: () => currentBuild,
+      generatedDir: dir,
+      filesWithHardwareResult: async files => files,
+    });
+
+    const result = await runtime.runGenerateRequest({
+      prompt: "Change the existing screen.",
+      conversation_id: "conv-runtime-agent",
+      modelSettings: {
+        provider: "custom",
+        baseUrl: "http://mock.local",
+        model: "mock",
+        apiKey: "key",
+      },
+    });
+
+    assert(result.ok === true, `expected agent runtime ok, got ${JSON.stringify(result)}`);
+    assert(result.source === "agent", "enabled model settings should use agent path");
+    assert(result.intelligenceSummary?.confidence === "local_verified", "runtime should return agent build intelligence summary");
+    assert(receivedFiles?.["app.js"] === "console.log('old')", "agent should receive saved conversation files");
+    assert(result.buildGraph.some(item => item.node === "agent_generate" && item.status === "done"), "runtime graph should include completed agent node");
+  });
+});
+
 await test("agent graph keeps chat behind confirmation gate", async () => {
   const { runAgentGraph } = await import(pathToFileURL(path.join(ROOT, "src", "agentGraph.mjs")).href);
   let buildCalled = false;
@@ -780,6 +1817,71 @@ await test("agent graph confirm action runs build graph and returns build result
   assert(result.id === "vb-agent-graph-test", "build result should pass through");
   assert(receivedPrompt === "Build a cyberpunk clock.", "explicit confirmed prompt should win over stale memory");
   assert(result.agentGraph.some(item => item.node === "build_graph" && item.status === "done"), "agent graph should include build_graph node");
+});
+
+await test("agent orchestrator routes confirmed build through generator", async () => {
+  const { createAgentOrchestrator } = await import(pathToFileURL(path.join(ROOT, "src", "agentOrchestrator.mjs")).href);
+  let receivedBody = null;
+  const conversationMemory = { build_prompt: "Build old stale app." };
+  const orchestrator = createAgentOrchestrator({
+    conversationStore: {
+      getProjectMemory: id => {
+        assert(id === "conv-agent-orchestrator", "conversation id should be passed to memory store");
+        return conversationMemory;
+      },
+      setProjectMemory: () => {
+        throw new Error("confirm build should not update planner memory");
+      },
+    },
+    memoryStore: {
+      getAll: () => ({}),
+    },
+    recordAgentLearning: () => null,
+    runGenerateRequest: async body => {
+      receivedBody = body;
+      return {
+        ok: true,
+        id: "vb-orchestrator-test",
+        files: { "index.html": "<html></html>" },
+        source: "agent",
+        buildEvidence: { ok: true, issues: [] },
+      };
+    },
+  });
+
+  const result = await orchestrator.runAgentRequest({
+    action: "confirm_build",
+    conversation_id: "conv-agent-orchestrator",
+    build_prompt: "Build the confirmed village simulator.",
+    modelSettings: { enabled: false },
+    history: [{ role: "user", content: "confirmed" }],
+  });
+
+  assert(result.ok === true, `expected ok result, got ${JSON.stringify(result)}`);
+  assert(result.mode === "build_done", "confirm_build should return build_done mode");
+  assert(result.id === "vb-orchestrator-test", "build result id should pass through");
+  assert(receivedBody?.prompt === "Build the confirmed village simulator.", "confirmed prompt should reach generator");
+  assert(receivedBody?.conversation_id === "conv-agent-orchestrator", "conversation id should reach generator");
+  assert(Array.isArray(receivedBody?.history) && receivedBody.history.length === 1, "history should reach generator");
+});
+
+await test("build registry tracks current and conversation builds", async () => {
+  const { createBuildRegistry } = await import(pathToFileURL(path.join(ROOT, "src", "buildRegistry.mjs")).href);
+  const registry = createBuildRegistry();
+  const build = { id: "vb-build-registry-test", conversationId: "conv-build-registry" };
+
+  registry.setCurrentBuild(build);
+  assert(registry.currentBuild === build, "registry should expose current build");
+  assert(registry.getBuild("vb-build-registry-test") === build, "registry should index build by id");
+  assert(registry.getConversationBuild("conv-build-registry") === build, "registry should index build by conversation id");
+
+  const endpoint = { name: "local", host: "127.0.0.1" };
+  registry.setActiveEndpoint(endpoint);
+  assert(registry.activeEndpoint === endpoint, "registry should track active endpoint");
+
+  const deploy = { id: "vb-build-registry-test", mode: "offline-simulated" };
+  registry.setLastDeploy(deploy);
+  assert(registry.lastDeploy === deploy, "registry should track last deploy result");
 });
 
 await test("agent accepts complete text-only final answer after local verification", async () => {

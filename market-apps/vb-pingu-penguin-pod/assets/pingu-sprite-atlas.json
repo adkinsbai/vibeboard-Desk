@@ -1,0 +1,76 @@
+{
+  "image": "./assets/pingu-sprite-atlas.webp",
+  "frameWidth": 256,
+  "frameHeight": 288,
+  "columns": 5,
+  "rows": 6,
+  "animations": {
+    "idle": {
+      "start": 0,
+      "frames": 4,
+      "fps": 5,
+      "loop": true,
+      "row": 0,
+      "x": 0,
+      "y": 0,
+      "w": 256,
+      "h": 288
+    },
+    "wave": {
+      "start": 4,
+      "frames": 5,
+      "fps": 9,
+      "loop": false,
+      "row": 1,
+      "x": 0,
+      "y": 288,
+      "w": 256,
+      "h": 288
+    },
+    "waddle-right": {
+      "start": 9,
+      "frames": 4,
+      "fps": 8,
+      "loop": true,
+      "row": 2,
+      "x": 0,
+      "y": 576,
+      "w": 256,
+      "h": 288
+    },
+    "waddle-left": {
+      "start": 13,
+      "frames": 4,
+      "fps": 8,
+      "loop": true,
+      "row": 3,
+      "x": 0,
+      "y": 864,
+      "w": 256,
+      "h": 288
+    },
+    "warm": {
+      "start": 17,
+      "frames": 3,
+      "fps": 7,
+      "loop": false,
+      "row": 4,
+      "x": 0,
+      "y": 1152,
+      "w": 256,
+      "h": 288
+    },
+    "sleep": {
+      "start": 20,
+      "frames": 2,
+      "fps": 3,
+      "loop": true,
+      "row": 5,
+      "x": 0,
+      "y": 1440,
+      "w": 256,
+      "h": 288
+    }
+  },
+  "source": "OpenRouter ICU gpt-image-2 edits from user-provided authorized reference; connected-edge chroma key preserves red/orange features"
+}

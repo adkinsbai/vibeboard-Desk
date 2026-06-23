@@ -759,6 +759,12 @@ textarea:focus {
   box-shadow: 0 0 0 2px rgba(56, 189, 248, .12);
 }
 
+.digital-life-link {
+  min-height: 32px;
+  padding: 0 10px;
+  text-decoration: none;
+}
+
 .device-stage {
   display: grid;
   place-items: center;
@@ -800,6 +806,7 @@ textarea:focus {
   height: 360px;
   border: none;
   display: block;
+  background: #000;
   pointer-events: none;
   position: absolute;
   left: 50%;
@@ -900,7 +907,7 @@ textarea:focus {
   height: 360px;
   position: relative;
   overflow: hidden;
-  background: #10161e;
+  background: #000;
 }
 
 .device-screen {
@@ -910,7 +917,7 @@ textarea:focus {
   flex: none;
   position: relative;
   overflow: hidden;
-  background: #10161e;
+  background: #000;
   transform: scale(var(--screen-scale, 1));
   transform-origin: 0 0;
 }
@@ -922,7 +929,7 @@ textarea:focus {
   left: 0;
   top: 0;
   border: 0;
-  background: #10161e;
+  background: #000;
 }
 
 .screen-app {

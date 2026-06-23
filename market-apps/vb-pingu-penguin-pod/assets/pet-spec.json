@@ -1,0 +1,26 @@
+{
+  "id": "pingu-penguin-pod",
+  "displayName": "Pingu Penguin Pod",
+  "sourceReference": "assets/pingu-reference.webp",
+  "cutout": "assets/pingu-cutout.webp",
+  "plannedSpritesheet": "assets/pingu-spritesheet.webp",
+  "plannedPetJson": "assets/pingu-pet.json",
+  "atlas": {
+    "columns": 8,
+    "rows": 9,
+    "cellWidth": 192,
+    "cellHeight": 208
+  },
+  "states": [
+    "idle",
+    "running-right",
+    "running-left",
+    "waving",
+    "jumping",
+    "failed",
+    "waiting",
+    "running",
+    "review"
+  ],
+  "note": "Current market app uses the supplied authorized reference image as a passive asset; full Image-2 spritesheet can replace the cutout without changing the app contract."
+}

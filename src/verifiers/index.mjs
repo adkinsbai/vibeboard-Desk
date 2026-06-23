@@ -9,6 +9,7 @@ import {
   GENERATED_FILES,
   SCREEN_CONTRACT,
   validateFileContracts,
+  validateHardwareResultContract,
 } from "../contracts.mjs";
 import {
   failResult,
@@ -183,43 +184,13 @@ export async function verifyHardwareRun(input = {}, options = {}) {
     }
 
     const data = parsed.value;
-    const issues = [];
-    if (!hasValue(data?.build_id)) {
-      issues.push({
-        code: "HARDWARE_BUILD_ID_MISSING",
-        message: "hardware_app.py JSON output must include build_id.",
-        phase,
-        evidence: { outputKeys: Object.keys(data || {}) },
-        suggestedFixes: ["Include a build_id field in the JSON printed by hardware_app.py."],
-      });
-    }
-    if (!hasValue(data?.runtime)) {
-      issues.push({
-        code: "HARDWARE_RUNTIME_MISSING",
-        message: "hardware_app.py JSON output must include runtime.",
-        phase,
-        evidence: { outputKeys: Object.keys(data || {}) },
-        suggestedFixes: ["Include a runtime field in the JSON printed by hardware_app.py."],
-      });
-    }
-    if (!Array.isArray(data?.available_apis) || !data.available_apis.includes("/api/status")) {
-      issues.push({
-        code: "HARDWARE_STATUS_API_MISSING",
-        message: "hardware_app.py JSON output must include /api/status in available_apis.",
-        phase,
-        evidence: { available_apis: data?.available_apis },
-        suggestedFixes: ["Add /api/status to available_apis."],
-      });
-    }
-    if (!Array.isArray(data?.available_apis) || !data.available_apis.some(api => String(api).includes("hardware-result.json"))) {
-      issues.push({
-        code: "HARDWARE_RESULT_API_MISSING",
-        message: "hardware_app.py JSON output must include hardware-result.json in available_apis.",
-        phase,
-        evidence: { available_apis: data?.available_apis },
-        suggestedFixes: ["Add ./hardware-result.json to available_apis."],
-      });
-    }
+    const issues = validateHardwareResultContract(data, {
+      label: "hardware_app.py JSON output",
+    }).map(issue => ({
+      ...issue,
+      phase,
+      suggestedFixes: hardwareResultSuggestedFixes(issue.code),
+    }));
 
     return toolResult({
       ok: issues.length === 0,
@@ -635,7 +606,15 @@ function contentTypeFor(filePath) {
   if (ext === ".png") return "image/png";
   if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
   if (ext === ".webp") return "image/webp";
+  if (ext === ".gif") return "image/gif";
   if (ext === ".svg") return "image/svg+xml";
+  if (ext === ".webm") return "video/webm";
+  if (ext === ".mp3") return "audio/mpeg";
+  if (ext === ".wav") return "audio/wav";
+  if (ext === ".ogg") return "audio/ogg";
+  if (ext === ".ttf") return "font/ttf";
+  if (ext === ".woff") return "font/woff";
+  if (ext === ".woff2") return "font/woff2";
   if (TEXT_EXTENSIONS.has(ext)) return "text/plain; charset=utf-8";
   return "application/octet-stream";
 }
@@ -671,6 +650,21 @@ function mockHardwareResult() {
 
 function hasValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== "";
+}
+
+function hardwareResultSuggestedFixes(code) {
+  switch (code) {
+    case "HARDWARE_BUILD_ID_MISSING":
+      return ["Include a build_id field in the JSON printed by hardware_app.py."];
+    case "HARDWARE_RUNTIME_MISSING":
+      return ["Include a runtime field in the JSON printed by hardware_app.py."];
+    case "HARDWARE_STATUS_API_MISSING":
+      return ["Add /api/status to available_apis."];
+    case "HARDWARE_RESULT_API_MISSING":
+      return ["Add ./hardware-result.json to available_apis."];
+    default:
+      return ["Make hardware_app.py output satisfy the VibeBoard hardware contract."];
+  }
 }
 
 function truncate(value, max = 4000) {

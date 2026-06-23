@@ -17,8 +17,9 @@ import http from "http";
 import { execFile } from "child_process";
 import {
   APP_CONTRACT_SNIPPETS,
-  GENERATED_FILES,
+  AGENT_WRITABLE_FILE_NAMES,
   HARDWARE_CONTRACT_SNIPPETS,
+  REQUIRED_RUNTIME_FILE_NAMES,
   validationRulesText,
 } from "./contracts.mjs";
 
@@ -31,8 +32,8 @@ const AGENT_TIMEOUT_MS = 180000;
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_HISTORY_CONTENT_CHARS = 4000;
 const MAX_NO_TOOL_RESPONSES = 3;
-const REQUIRED_RUNTIME_FILES = GENERATED_FILES.filter(name => name !== "manifest.json");
-const AGENT_WRITABLE_FILES = new Set(REQUIRED_RUNTIME_FILES);
+const REQUIRED_RUNTIME_FILES = [...REQUIRED_RUNTIME_FILE_NAMES];
+const AGENT_WRITABLE_FILES = new Set(AGENT_WRITABLE_FILE_NAMES);
 const GENERATION_TOOL_NAMES = new Set([
   "read_file",
   "list_files",

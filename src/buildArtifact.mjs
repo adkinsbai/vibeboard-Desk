@@ -1,5 +1,8 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import {
+  declaredAssetPathsFromManifest,
+} from "./assetContract.mjs";
 
 export function withAssetVersion(source, buildId) {
   const version = encodeURIComponent(buildId || Date.now());
@@ -40,8 +43,9 @@ export function buildCompileManifest({
 
 export async function writeGeneratedFiles(dir, files) {
   await fs.mkdir(dir, { recursive: true });
+  await fs.rm(path.join(dir, "assets"), { recursive: true, force: true }).catch(() => {});
   await Promise.all(Object.entries(files).map(([name, content]) => (
-    fs.writeFile(path.join(dir, name), content, "utf8")
+    writeGeneratedFile(dir, name, content)
   )));
 }
 
@@ -50,6 +54,12 @@ export async function readGeneratedFiles(dir, generatedFileNames) {
   for (const name of generatedFileNames) {
     try {
       files[name] = await fs.readFile(path.join(dir, name), "utf8");
+    } catch {}
+  }
+  const manifest = parseManifest(files["manifest.json"]);
+  for (const assetPath of declaredAssetPathsFromManifest(manifest)) {
+    try {
+      files[assetPath] = await fs.readFile(safeResolve(dir, assetPath));
     } catch {}
   }
   return files;
@@ -121,4 +131,31 @@ export async function ensureGeneratedWorkspace({
   }
 
   return loadGeneratedWorkspace(dir, generatedFileNames, fallbackSeed);
+}
+
+async function writeGeneratedFile(dir, name, content) {
+  const filePath = safeResolve(dir, name);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  if (Buffer.isBuffer(content) || content instanceof Uint8Array) {
+    await fs.writeFile(filePath, content);
+    return;
+  }
+  await fs.writeFile(filePath, String(content ?? ""), "utf8");
+}
+
+function safeResolve(rootDir, fileName) {
+  const root = path.resolve(rootDir);
+  const target = path.resolve(root, String(fileName).replace(/^[/\\]+/, ""));
+  if (target !== root && !target.startsWith(`${root}${path.sep}`)) {
+    throw new Error(`Refusing to write outside generated workspace: ${fileName}`);
+  }
+  return target;
+}
+
+function parseManifest(raw) {
+  try {
+    return typeof raw === "string" && raw.trim() ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
 }

@@ -24,7 +24,7 @@ export async function planChatWithModel(settings, rawMessages = [], preferences 
       model: settings.model,
       messages,
       temperature: 0.2,
-      max_tokens: 1600,
+      max_tokens: 4096,
     }),
   });
 
@@ -73,6 +73,8 @@ export function parseChatPlan(rawContent, fallbackMemory = {}) {
   }
 
   if (!parsed || typeof parsed !== "object") {
+    const recovered = recoverChatPlanFromJsonLikeText(raw, existingMemory);
+    if (recovered) return recovered;
     return {
       intent: "chat",
       reply: raw,
@@ -103,6 +105,121 @@ export function parseChatPlan(rawContent, fallbackMemory = {}) {
     build_prompt: readyToBuild ? buildPrompt : "",
     project_memory: projectMemory,
   };
+}
+
+function recoverChatPlanFromJsonLikeText(raw, existingMemory = {}) {
+  if (!/"intent"\s*:\s*"build_ready"/.test(raw) && !/"ready_to_build"\s*:\s*true/.test(raw)) {
+    return null;
+  }
+
+  const intent = extractJsonStringValue(raw, "intent").value || "chat";
+  const ready = extractJsonBooleanValue(raw, "ready_to_build");
+  const buildPrompt = extractJsonStringValue(raw, "build_prompt");
+  if (intent !== "build_ready" || ready !== true || !buildPrompt.complete || !buildPrompt.value.trim()) {
+    return null;
+  }
+
+  const reply = extractJsonStringValue(raw, "reply").value.trim() ||
+    "我理解你要做的内容已经完整了。请确认后我开始生成并做本地验证。";
+  const target = extractJsonStringValue(raw, "target").value || "new_project";
+  const understanding = extractJsonStringArray(raw, "understanding");
+  const plannedChanges = extractJsonStringArray(raw, "planned_changes");
+  const projectMemory = normalizeProjectMemory({
+    ...existingMemory,
+    requirements: understanding.length ? understanding : existingMemory.requirements,
+    decisions: plannedChanges.length ? plannedChanges : existingMemory.decisions,
+    build_prompt: buildPrompt.value,
+  });
+
+  return {
+    intent: "build_ready",
+    reply,
+    understanding,
+    planned_changes: plannedChanges,
+    target: normalizeTarget(target, true),
+    ready_to_build: true,
+    build_prompt: buildPrompt.value.trim(),
+    project_memory: projectMemory,
+  };
+}
+
+function extractJsonBooleanValue(raw, key) {
+  const pattern = new RegExp(`"${escapeRegExp(key)}"\\s*:\\s*(true|false)`);
+  const match = pattern.exec(raw);
+  return match ? match[1] === "true" : null;
+}
+
+function extractJsonStringValue(raw, key) {
+  const pattern = new RegExp(`"${escapeRegExp(key)}"\\s*:\\s*"`, "g");
+  const match = pattern.exec(raw);
+  if (!match) return { value: "", complete: false };
+  let value = "";
+  let escaped = false;
+  for (let index = pattern.lastIndex; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (escaped) {
+      value += unescapeJsonChar(char);
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "\"") {
+      return { value, complete: true };
+    }
+    value += char;
+  }
+  return { value, complete: false };
+}
+
+function extractJsonStringArray(raw, key) {
+  const pattern = new RegExp(`"${escapeRegExp(key)}"\\s*:\\s*\\[`);
+  const match = pattern.exec(raw);
+  if (!match) return [];
+  let depth = 1;
+  let inString = false;
+  let escaped = false;
+  for (let index = match.index + match[0].length; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === "[") depth += 1;
+    if (char === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return stringList(JSON.parse(raw.slice(match.index + match[0].lastIndexOf("["), index + 1)));
+        } catch {
+          return [];
+        }
+      }
+    }
+  }
+  return [];
+}
+
+function unescapeJsonChar(char) {
+  if (char === "n") return "\n";
+  if (char === "r") return "\r";
+  if (char === "t") return "\t";
+  return char;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizeTarget(value, readyToBuild) {

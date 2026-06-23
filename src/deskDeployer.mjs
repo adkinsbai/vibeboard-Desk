@@ -1,15 +1,18 @@
 import path from "node:path";
 
+import { declaredAssetPathsFromFiles } from "./assetContract.mjs";
+import { GENERATED_FILES } from "./contracts.mjs";
 import { makeCheck } from "./goldenLoop.mjs";
 import { shQuote } from "./remoteRunner.mjs";
 
-export const DEPLOY_FILE_NAMES = [
-  "index.html",
-  "style.css",
-  "app.js",
-  "hardware_app.py",
-  "manifest.json"
-];
+export const DEPLOY_FILE_NAMES = [...GENERATED_FILES];
+
+export function deployFileNamesForBuild(currentBuild = {}) {
+  return [
+    ...DEPLOY_FILE_NAMES,
+    ...declaredAssetPathsFromFiles(currentBuild.files || {}),
+  ];
+}
 
 export function buildDeployPaths(board, buildId) {
   const release = `${board.releaseRoot}/${buildId}`;
@@ -25,7 +28,7 @@ export function buildDeployUploadEntries({
   currentBuild,
   board,
   runtimeDir,
-  fileNames = DEPLOY_FILE_NAMES
+  fileNames = deployFileNamesForBuild(currentBuild)
 }) {
   const { release } = buildDeployPaths(board, currentBuild.id);
   return [
@@ -63,6 +66,8 @@ export function buildDeployRemoteCommand({ board, buildId }) {
     "cp \"$release/app.js\" \"$target/app.js\" || exit 14",
     "cp \"$release/manifest.json\" \"$target/manifest.json\" || exit 15",
     "cp \"$program_result\" \"$target/hardware-result.json\" || exit 18",
+    "rm -rf \"$target/assets\" || exit 19",
+    "if [ -d \"$release/assets\" ]; then mkdir -p \"$target/assets\" || exit 22; cp -a \"$release/assets/.\" \"$target/assets/\" || exit 23; fi",
     "chmod +x \"$app_root/start-kiosk.sh\" || exit 15",
     `sudo systemctl restart ${shQuote(board.service)} || exit 20`,
     "sleep 5",

@@ -1,0 +1,382 @@
+import { runBuildGraph } from "./buildGraph.mjs";
+import { buildRefinedPrompt } from "./clarifyEngine.mjs";
+import { normalizeProjectMemory } from "./conversationStore.mjs";
+import { normalizeModelSettings } from "./modelSettings.mjs";
+import {
+  AGENT_PHASES,
+  appendEvidence,
+  buildInitialSpec,
+  createAgentRun,
+  formatRunEvidence,
+  transitionRun,
+} from "./agentStateMachine.mjs";
+import { writeGeneratedFiles } from "./buildArtifact.mjs";
+
+export const GENERATE_RUNTIME_DEFAULTS = Object.freeze({
+  maxIterations: 18,
+  maxVerificationAttempts: 1,
+  timeoutMs: 120000,
+  llmTimeoutMs: 60000,
+});
+
+export function formatProjectMemoryForPrompt(memory = {}) {
+  const normalized = normalizeProjectMemory(memory);
+  const lines = [];
+  if (normalized.summary) lines.push(`Summary: ${normalized.summary}`);
+  if (normalized.goal) lines.push(`Goal: ${normalized.goal}`);
+  if (normalized.requirements.length) lines.push(`Requirements:\n${normalized.requirements.map(item => `- ${item}`).join("\n")}`);
+  if (normalized.constraints.length) lines.push(`Constraints:\n${normalized.constraints.map(item => `- ${item}`).join("\n")}`);
+  if (normalized.decisions.length) lines.push(`Confirmed decisions:\n${normalized.decisions.map(item => `- ${item}`).join("\n")}`);
+  if (normalized.open_questions.length) lines.push(`Open questions:\n${normalized.open_questions.map(item => `- ${item}`).join("\n")}`);
+  if (!lines.length) return "";
+  return `\n\n## Current project memory\n${lines.join("\n")}`;
+}
+
+export function createGenerateRuntime(deps = {}) {
+  const {
+    conversationStore,
+    memoryStore,
+    experienceStore,
+    runAgent,
+    appendServerLog = async () => {},
+    normalizeGenerateHistory = defaultNormalizeGenerateHistory,
+    compressHistory = async history => history,
+    structuredErrorFieldsForLog = () => ({}),
+    positiveInt = defaultPositiveInt,
+    env = process.env,
+    defaults = GENERATE_RUNTIME_DEFAULTS,
+    getBoard = () => ({}),
+    isBoardPasswordConfigured = () => false,
+    ssh,
+    scp,
+    buildId,
+    createAppSpec,
+    generatedHardwareApp,
+    injectHardwareAppContracts,
+    generatedManifest,
+    writeGenerated,
+    buildCurrent,
+    recordAgentLearning = () => {},
+    filesWithHardwareResult = async files => files,
+    generatedDir,
+    getCurrentBuild = () => null,
+    setCurrentBuild,
+    formatMemoryForPrompt = formatProjectMemoryForPrompt,
+    log = console,
+  } = deps;
+
+  requireObject(conversationStore, "conversationStore");
+  requireObject(memoryStore, "memoryStore");
+
+  async function runGenerateRequest(body = {}) {
+    const rawPrompt = String(body.prompt || "").trim();
+    if (!rawPrompt) throw new Error("Prompt is required.");
+    const rawHistory = Array.isArray(body.history) ? body.history : [];
+    const normalizedHistory = normalizeGenerateHistory(rawHistory);
+    const clarifyAnswers = Array.isArray(body.clarify_answers) ? body.clarify_answers : [];
+    const modelSettings = body.modelSettings || {};
+    const conversationId = String(body.conversation_id || "").trim();
+    const projectMemory = conversationId
+      ? conversationStore.getProjectMemory(conversationId)
+      : normalizeProjectMemory();
+    const conversationFiles = conversationId
+      ? conversationStore.loadConversationFiles(conversationId).files
+      : {};
+
+    const settings = normalizeModelSettings(modelSettings);
+    const history = await compressHistory(normalizedHistory, settings);
+    const userPreferences = memoryStore.getAll();
+    const prompt = buildRefinedPrompt(
+      `${rawPrompt}${formatMemoryForPrompt(projectMemory)}`,
+      clarifyAnswers,
+      userPreferences,
+    );
+
+    if (clarifyAnswers.length > 0) {
+      for (const ans of clarifyAnswers) {
+        if (ans.key && ans.answer) {
+          memoryStore.set(ans.key, ans.answer, {
+            label: ans.question || ans.key,
+            category: "clarify",
+            source: "auto_extract",
+          });
+        }
+      }
+    }
+
+    const fileStore = { ...conversationFiles };
+    const isEditing = Object.keys(fileStore).some(name => name !== "manifest.json");
+    const agentStartedAt = Date.now();
+    const agentSettings = buildGenerateAgentSettings(settings, env, positiveInt, defaults);
+
+    return runBuildGraph({
+      prompt,
+      rawPrompt,
+      settings,
+      agentSettings,
+      modelSettings,
+      fileStore,
+      history,
+      userPreferences,
+      conversationId,
+      isEditing,
+    }, {
+      agentGenerate: async () => runAgentGenerate({
+        prompt,
+        settings,
+        agentSettings,
+        fileStore,
+        history,
+        userPreferences,
+        conversationId,
+        isEditing,
+        agentStartedAt,
+      }),
+      templateGenerate: async () => runTemplateGenerate({ prompt, modelSettings }),
+      saveSnapshot: async state => saveSnapshot({ state, conversationId }),
+    });
+  }
+
+  async function runAgentGenerate({
+    prompt,
+    settings,
+    agentSettings,
+    fileStore,
+    history,
+    userPreferences,
+    conversationId,
+    isEditing,
+    agentStartedAt,
+  }) {
+    requireFunction(runAgent, "runAgent");
+    requireFunction(buildId, "buildId");
+    requireFunction(createAppSpec, "createAppSpec");
+    requireFunction(generatedHardwareApp, "generatedHardwareApp");
+    requireFunction(injectHardwareAppContracts, "injectHardwareAppContracts");
+    requireFunction(generatedManifest, "generatedManifest");
+    requireFunction(buildCurrent, "buildCurrent");
+    requireFunction(setCurrentBuild, "setCurrentBuild");
+    requireString(generatedDir, "generatedDir");
+
+    log.log?.(`[generate] Agent starting (${isEditing ? "edit" : "new"} mode)`);
+    await appendServerLog("generate.agent.start", {
+      prompt: prompt.slice(0, 160),
+      isEditing,
+      fileCount: Object.keys(fileStore).length,
+      files: Object.keys(fileStore).slice(0, 12),
+      model: settings.model,
+      provider: settings.provider,
+      maxIterations: agentSettings.maxIterations,
+      maxVerificationAttempts: agentSettings.maxVerificationAttempts,
+      timeoutMs: agentSettings.timeoutMs,
+      llmTimeoutMs: agentSettings.llmTimeoutMs,
+    });
+
+    let agentResult;
+    try {
+      agentResult = await runAgent(agentSettings, prompt, fileStore, history, action => {
+        log.log?.(`[agent] ${action.tool}: ${action.args?.path || action.args?.query || action.args?.summary || ""}`);
+        appendServerLog("generate.agent.action", {
+          tool: action.tool,
+          path: action.args?.path || "",
+          query: action.args?.query || "",
+          summary: action.args?.summary || "",
+        }).catch(() => {});
+      }, userPreferences, experienceStore, { ssh, scp, board: getBoard() });
+    } catch (agentErr) {
+      await appendServerLog("generate.agent.failed", {
+        error: agentErr.message,
+        ...structuredErrorFieldsForLog(agentErr),
+        durationMs: Date.now() - agentStartedAt,
+      });
+      throw agentErr;
+    }
+
+    if (!agentResult.success) {
+      await appendServerLog("generate.agent.failed", {
+        error: agentResult.summary || "Agent failed",
+        agentError: agentResult.error || null,
+        actionCount: agentResult.actions?.length || 0,
+        limit: agentResult.limit || "",
+        iteration: agentResult.iteration ?? null,
+        durationMs: Date.now() - agentStartedAt,
+      });
+      const error = new Error(agentResult.summary || "Agent failed");
+      if (agentResult.error && typeof agentResult.error === "object") {
+        Object.assign(error, agentResult.error);
+      }
+      throw error;
+    }
+
+    const id = buildId();
+    const agentFiles = agentResult.files;
+
+    if (!agentFiles["hardware_app.py"]) {
+      const spec = createAppSpec(prompt, id);
+      agentFiles["hardware_app.py"] = generatedHardwareApp(prompt, id, spec);
+    }
+    agentFiles["hardware_app.py"] = injectHardwareAppContracts(agentFiles["hardware_app.py"], id);
+
+    const board = getBoard();
+    const spec = createAppSpec(prompt, id);
+    const manifest = generatedManifest(prompt, id, spec, {
+      generator: "vibeboard-agent-v1",
+      title: prompt.slice(0, 40),
+      source: "agent",
+      model: settings.model,
+      provider: settings.provider,
+      notes: agentResult.summary,
+      target: board.targetStatic,
+    });
+    agentFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
+
+    await writeGeneratedFiles(generatedDir, agentFiles);
+    let agentRun = transitionRun(createAgentRun({
+      prompt,
+      mode: "agent",
+      buildId: id,
+      hardwareMode: isBoardPasswordConfigured() ? "real" : "simulated",
+    }), AGENT_PHASES.CODE, {
+      spec: buildInitialSpec(prompt, { requireBoard: isBoardPasswordConfigured() }),
+    });
+    agentRun = appendEvidence(agentRun, {
+      phase: AGENT_PHASES.CODE,
+      ok: true,
+      summary: agentResult.summary || "agent code completed",
+      evidence: {
+        whatWorked: agentResult.whatWorked || [],
+        whatFailed: agentResult.whatFailed || [],
+        actionCount: agentResult.actions?.length || 0,
+      },
+      issues: [],
+    });
+    setCurrentBuild({ id, prompt, files: agentFiles, dir: generatedDir, built: false, deployed: false, manifest, agentRun, conversationId });
+
+    try {
+      await buildCurrent();
+    } catch (buildErr) {
+      log.error?.("[generate] Build error:", buildErr.message);
+      await appendServerLog("generate.agent.build_failed", { id, error: buildErr.message });
+      throw new Error(`Generated app failed validation: ${buildErr.message}`);
+    }
+
+    const currentBuild = getCurrentBuild();
+    recordAgentLearning({
+      prompt,
+      agentResult,
+      verificationResult: currentBuild?.buildEvidence || null,
+      success: true,
+    });
+
+    await appendServerLog("generate.agent.done", {
+      id,
+      actionCount: agentResult.actions?.length || 0,
+      durationMs: Date.now() - agentStartedAt,
+    });
+
+    return {
+      ok: true,
+      id,
+      files: agentFiles,
+      manifest,
+      source: "agent",
+      spec: currentBuild?.agentRun?.spec || null,
+      evidence: formatRunEvidence(currentBuild?.agentRun || {}),
+      buildEvidence: currentBuild?.buildEvidence || null,
+      intelligenceSummary: currentBuild?.intelligenceSummary || null,
+      verificationMode: isBoardPasswordConfigured() ? "real-ready" : "local-simulated",
+      agentSummary: agentResult.summary,
+      agentActions: (agentResult.actions || []).map(a => ({
+        tool: a.tool,
+        path: a.args?.path,
+        query: a.args?.query,
+        summary: a.args?.summary,
+      })),
+    };
+  }
+
+  async function runTemplateGenerate({ prompt, modelSettings }) {
+    requireFunction(writeGenerated, "writeGenerated");
+    const build = await writeGenerated(prompt, modelSettings, []);
+    return {
+      ok: true,
+      id: build.id,
+      files: build.files,
+      manifest: build.manifest || null,
+      source: "template",
+      spec: build.agentRun?.spec || null,
+      evidence: formatRunEvidence(build.agentRun || {}),
+      buildEvidence: build.buildEvidence || null,
+      intelligenceSummary: build.intelligenceSummary || null,
+      verificationMode: isBoardPasswordConfigured() ? "real-ready" : "local-simulated",
+      agentActions: [],
+      thinking: "",
+    };
+  }
+
+  async function saveSnapshot({ state, conversationId }) {
+    if (!conversationId) return;
+    try {
+      conversationStore.saveConversationFiles(
+        conversationId,
+        state.result.id,
+        await filesWithHardwareResult(state.result.files),
+      );
+    } catch (saveErr) {
+      await appendServerLog(`generate.${state.result.source}.conversation_save_failed`, {
+        id: state.result.id,
+        conversationId,
+        error: saveErr.message,
+      });
+    }
+  }
+
+  return { runGenerateRequest };
+}
+
+export function buildGenerateAgentSettings(
+  settings = {},
+  env = process.env,
+  positiveInt = defaultPositiveInt,
+  defaults = GENERATE_RUNTIME_DEFAULTS,
+) {
+  return {
+    ...settings,
+    maxIterations: positiveInt(env.VIBEBOARD_AGENT_MAX_ITERATIONS, defaults.maxIterations),
+    maxVerificationAttempts: positiveInt(
+      env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS,
+      defaults.maxVerificationAttempts,
+    ),
+    timeoutMs: positiveInt(env.VIBEBOARD_AGENT_TIMEOUT_MS, defaults.timeoutMs),
+    llmTimeoutMs: positiveInt(env.VIBEBOARD_AGENT_LLM_TIMEOUT_MS, defaults.llmTimeoutMs),
+  };
+}
+
+function defaultNormalizeGenerateHistory(rawHistory) {
+  return Array.isArray(rawHistory)
+    ? rawHistory.filter(item => item && typeof item === "object")
+    : [];
+}
+
+function defaultPositiveInt(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function requireFunction(value, name) {
+  if (typeof value !== "function") {
+    throw new Error(`GenerateRuntime missing dependency: ${name}`);
+  }
+}
+
+function requireObject(value, name) {
+  if (!value || typeof value !== "object") {
+    throw new Error(`GenerateRuntime missing dependency: ${name}`);
+  }
+}
+
+function requireString(value, name) {
+  if (!value || typeof value !== "string") {
+    throw new Error(`GenerateRuntime missing dependency: ${name}`);
+  }
+}

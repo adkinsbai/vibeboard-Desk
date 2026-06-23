@@ -1,0 +1,90 @@
+import { runAgentGraph } from "./agentGraph.mjs";
+import { planChatWithModel } from "./chatPlanner.mjs";
+import { normalizeProjectMemory } from "./conversationStore.mjs";
+import { normalizeModelSettings } from "./modelSettings.mjs";
+
+export function createAgentOrchestrator({
+  conversationStore,
+  memoryStore,
+  recordAgentLearning,
+  runGenerateRequest,
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  if (!conversationStore) throw new Error("conversationStore is required");
+  if (!memoryStore) throw new Error("memoryStore is required");
+  if (typeof runGenerateRequest !== "function") throw new Error("runGenerateRequest is required");
+
+  async function runAgentRequest(body = {}) {
+    const conversationId = String(body.conversation_id || "").trim();
+    const modelSettings = normalizeModelSettings(body.modelSettings || {});
+    const projectMemory = conversationId
+      ? conversationStore.getProjectMemory(conversationId)
+      : normalizeProjectMemory();
+    const rawMessages = Array.isArray(body.messages) ? body.messages : [];
+
+    return runAgentGraph({
+      action: body.action,
+      messages: rawMessages,
+      conversationId,
+      projectMemory,
+      buildPrompt: body.build_prompt || body.prompt || "",
+    }, {
+      planMessage: async () => {
+        if (!modelSettings.enabled) {
+          return {
+            intent: "chat",
+            reply: "Please configure a model first. After that, I will chat with you, organize the requirements, and generate code only after you confirm the build.",
+            understanding: [],
+            planned_changes: [],
+            target: "chat",
+            ready_to_build: false,
+            build_prompt: "",
+            project_memory: projectMemory,
+          };
+        }
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 60000);
+        try {
+          const plan = await planChatWithModel(
+            modelSettings,
+            rawMessages,
+            memoryStore.getAll(),
+            projectMemory,
+            (url, options = {}) => fetchImpl(url, { ...options, signal: controller.signal })
+          );
+          if (conversationId && plan.project_memory) {
+            conversationStore.setProjectMemory(conversationId, plan.project_memory);
+          }
+          return plan;
+        } finally {
+          clearTimeout(timeout);
+        }
+      },
+      build: async (_state, prompt) => runGenerateRequest({
+        prompt,
+        modelSettings: body.modelSettings || {},
+        conversation_id: conversationId,
+        clarify_answers: Array.isArray(body.clarify_answers) ? body.clarify_answers : [],
+        history: Array.isArray(body.history) ? body.history : rawMessages,
+      }),
+      reflect: async (state) => {
+        if (typeof recordAgentLearning !== "function") return;
+        const build = state.build || {};
+        const issues = build.buildEvidence?.issues || [];
+        if (!issues.length) return;
+        state.learning = recordAgentLearning({
+          prompt: body.build_prompt || body.prompt || projectMemory.build_prompt || "",
+          agentResult: {
+            whatWorked: build.buildEvidence?.ok ? ["local verification passed"] : [],
+            whatFailed: issues.map(issue => issue.message || issue.code || String(issue)),
+          },
+          verificationResult: build.buildEvidence,
+          success: Boolean(build.buildEvidence?.ok),
+        });
+      },
+    });
+  }
+
+  return { runAgentRequest };
+}

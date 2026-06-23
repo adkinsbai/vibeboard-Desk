@@ -10,6 +10,11 @@ error.log
 output.log
 server.log
 
+# Local secrets
+.env
+.env.*
+!.env.example
+
 # Test scripts (temporary)
 test-api.ps1
 test-ssh.py
@@ -20,9 +25,12 @@ verify-ui-click.mjs
 generated/
 runtime/*
 !runtime/start-kiosk.sh
+hardware-result.json
+manifest.json
 
 # Previews (generated at runtime)
 previews/
+output/
 
 # Debug screenshots
 *.png

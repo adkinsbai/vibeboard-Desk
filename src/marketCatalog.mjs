@@ -1,7 +1,13 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
 
-export const GENERATED_FILE_NAMES = ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"];
+import {
+  declaredAssetPathsFromManifest,
+  normalizeAssetPath,
+} from "./assetContract.mjs";
+import { GENERATED_FILES } from "./contracts.mjs";
+
+export const GENERATED_FILE_NAMES = [...GENERATED_FILES];
 
 export function normalizeCatalogApps(data, generatedFileNames = GENERATED_FILE_NAMES) {
   const apps = Array.isArray(data?.apps) ? data.apps : [];
@@ -46,6 +52,18 @@ export async function readStaticMarketCode(marketRoot, appId, generatedFileNames
   for (const filename of generatedFileNames) {
     try {
       codeFiles[filename] = await fs.readFile(path.join(appDir, filename), "utf8");
+    } catch {}
+  }
+  let manifest = {};
+  try {
+    manifest = codeFiles["manifest.json"] ? JSON.parse(codeFiles["manifest.json"]) : {};
+  } catch {}
+  for (const assetPath of declaredAssetPathsFromManifest(manifest)) {
+    try {
+      const normalized = normalizeAssetPath(assetPath);
+      const filePath = path.resolve(appDir, normalized);
+      if (filePath === appDir || !filePath.startsWith(`${appDir}${path.sep}`)) continue;
+      codeFiles[normalized] = await fs.readFile(filePath);
     } catch {}
   }
   return codeFiles;

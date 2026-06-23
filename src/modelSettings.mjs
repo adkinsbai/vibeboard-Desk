@@ -17,6 +17,7 @@ export const MODEL_PROVIDERS = {
 };
 
 export function normalizeModelSettings(input = {}) {
+  const explicitlyDisabled = input.enabled === false;
   const envProvider = process.env.VIBEBOARD_LLM_PROVIDER || process.env.VIBEBOARD_MODEL_PROVIDER || "";
   const envBaseUrl = process.env.VIBEBOARD_LLM_BASE_URL || process.env.VIBEBOARD_MODEL_BASE_URL || "";
   const envModel = process.env.VIBEBOARD_LLM_MODEL || process.env.VIBEBOARD_MODEL || "";
@@ -24,14 +25,14 @@ export function normalizeModelSettings(input = {}) {
   const preset = MODEL_PROVIDERS[providerId] || MODEL_PROVIDERS.custom;
   const baseUrl = String(input.baseUrl || envBaseUrl || preset.baseUrl || "").trim().replace(/\/+$/, "");
   const model = String(input.model || envModel || preset.model || "").trim();
-  const apiKey = String(input.apiKey || envApiKeyFor(providerId, baseUrl)).trim();
+  const apiKey = explicitlyDisabled ? "" : String(input.apiKey || envApiKeyFor(providerId, baseUrl)).trim();
   return {
     provider: providerId,
     providerLabel: preset.label || providerId,
     baseUrl,
     model,
     apiKey,
-    enabled: Boolean(apiKey && baseUrl && model)
+    enabled: !explicitlyDisabled && Boolean(apiKey && baseUrl && model)
   };
 }
 

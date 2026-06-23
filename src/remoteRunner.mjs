@@ -206,6 +206,21 @@ export function buildUploadBundlePayload(files) {
   return Buffer.from(JSON.stringify({ files })).toString("base64");
 }
 
+export function buildUploadBundleInput(files) {
+  return JSON.stringify({ files });
+}
+
+export function buildUploadBundleStdinCommand() {
+  const scriptB64 = Buffer.from(uploadBundleScript()).toString("base64");
+  return [
+    "set -eu",
+    "s=/tmp/vb_upload_$$.py",
+    `echo '${scriptB64}' | base64 -d > "$s"`,
+    "python3 \"$s\"",
+    "rm -f \"$s\""
+  ].join("\n");
+}
+
 export function buildUploadBundleCommand(files) {
   const scriptB64 = Buffer.from(uploadBundleScript()).toString("base64");
   const dataB64 = buildUploadBundlePayload(files);

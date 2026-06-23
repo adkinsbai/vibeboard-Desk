@@ -1,11 +1,10 @@
 import http from "node:http";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
 import initSqlJs from "sql.js";
 import {
   boardEndpoints,
@@ -25,25 +24,32 @@ import { createConversationStore, normalizeProjectMemory } from "./src/conversat
 import { runAgent } from "./src/agent.mjs";
 import { chatCompletionsUrl, normalizeModelSettings } from "./src/modelSettings.mjs";
 import { createMemoryStore } from "./src/memoryStore.mjs";
+import { declaredAssetPathsFromFiles } from "./src/assetContract.mjs";
+import { createDigitalLifeStore } from "./src/digitalLife.mjs";
+import { createDigitalLifeRoutes } from "./src/digitalLifeRoutes.mjs";
 import { createExperienceStore, makePlaybookCandidate } from "./src/experienceStore.mjs";
 import { createPlaybookStore } from "./src/playbookStore.mjs";
 import { verifyAllLocal } from "./src/verifiers/index.mjs";
-import { analyzeAndClarify, buildRefinedPrompt } from "./src/clarifyEngine.mjs";
-import { planChatWithModel } from "./src/chatPlanner.mjs";
-import { runAgentGraph } from "./src/agentGraph.mjs";
+import { analyzeAndClarify } from "./src/clarifyEngine.mjs";
+import { createAgentOrchestrator } from "./src/agentOrchestrator.mjs";
+import { createGenerateRuntime } from "./src/generateRuntime.mjs";
+import { createBuildRuntime } from "./src/buildRuntime.mjs";
+import { createPreviewRuntime } from "./src/previewRuntime.mjs";
+import { createMarketRuntime } from "./src/marketRuntime.mjs";
 import {
-  assertFileContracts,
+  AUDIO_RUNTIME_APIS,
+  HARDWARE_APP_CONTRACT,
+  HARDWARE_RESULT_FILE,
+  hardwareContractPromptText,
   validationRulesText
 } from "./src/contracts.mjs";
 import {
   AGENT_PHASES,
-  appendEvidence,
   buildInitialSpec,
   createAgentRun,
   formatRunEvidence,
   transitionRun
 } from "./src/agentStateMachine.mjs";
-import { runBuildGraph } from "./src/buildGraph.mjs";
 import {
   buildGoldenLoopResult,
   buildGoldenLoopRemoteCommand,
@@ -57,15 +63,15 @@ import {
   parseDeployOutput
 } from "./src/deskDeployer.mjs";
 import {
-  buildCompileManifest,
   ensureGeneratedWorkspace,
   loadGeneratedWorkspace,
   readGeneratedFiles,
-  writeGeneratedFiles,
-  withAssetVersion
+  writeGeneratedFiles
 } from "./src/buildArtifact.mjs";
 import {
   buildUploadBundleCommand,
+  buildUploadBundleInput,
+  buildUploadBundleStdinCommand,
   buildUploadTextCommand,
   buildUploadTextPayload,
   execOpenSsh,
@@ -73,10 +79,27 @@ import {
   execWslSsh,
   runAcrossEndpoints
 } from "./src/remoteRunner.mjs";
+import { createBuildRegistry } from "./src/buildRegistry.mjs";
+import {
+  createAppSpec,
+  generatedManifestV2,
+  injectHardwareAppContractsV2,
+  validateGeneratedFileContracts,
+} from "./src/generatedAppTemplate.mjs";
+import {
+  advancedTemplateFilesV2,
+  generatedAppV2,
+  generatedHardwareAppV2,
+  generatedIndexV2,
+  generatedStyleV2,
+} from "./src/generatedAppTemplatesV2.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
-const GENERATED_DIR = path.join(ROOT, "generated", "current");
+const DEFAULT_GENERATED_DIR = path.join(ROOT, "generated", "current");
+const GENERATED_DIR = process.env.VIBEBOARD_GENERATED_DIR
+  ? path.resolve(process.env.VIBEBOARD_GENERATED_DIR)
+  : DEFAULT_GENERATED_DIR;
 const PREVIEWS_DIR = path.join(ROOT, "previews");
 const RUNTIME_DIR = path.join(ROOT, "runtime");
 const SERVER_LOG_PATH = path.join(RUNTIME_DIR, "server.log");
@@ -84,11 +107,30 @@ const SERVER_LOG_STRING_LIMIT = 600;
 const SERVER_LOG_ARRAY_LIMIT = 20;
 const MARKET_APPS_DIR = path.join(ROOT, "market-apps");
 const PORT = Number(process.env.VIBEBOARD_PORT || 8789);
-const DB_PATH = path.join(ROOT, "vibeboard.db");
+const DB_PATH = process.env.VIBEBOARD_DB_PATH || path.join(ROOT, "vibeboard.db");
 const DEFAULT_GENERATE_AGENT_MAX_ITERATIONS = 18;
 const DEFAULT_GENERATE_AGENT_MAX_VERIFICATION_ATTEMPTS = 1;
 const DEFAULT_GENERATE_AGENT_TIMEOUT_MS = 120000;
 const DEFAULT_GENERATE_AGENT_LLM_TIMEOUT_MS = 60000;
+
+async function loadLocalEnv() {
+  for (const filename of [".env.local", ".env"]) {
+    const envPath = path.join(ROOT, filename);
+    const raw = await fs.readFile(envPath, "utf8").catch(() => "");
+    if (!raw) continue;
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const index = trimmed.indexOf("=");
+      if (index <= 0) continue;
+      const key = trimmed.slice(0, index).trim();
+      const value = trimmed.slice(index + 1).trim().replace(/^['"]|['"]$/g, "");
+      if (key && process.env[key] === undefined) process.env[key] = value;
+    }
+  }
+}
+
+await loadLocalEnv();
 
 // Initialize SQLite database
 const SQL = await initSqlJs();
@@ -145,6 +187,9 @@ conversationStore.initSchema();
 const memoryStore = createMemoryStore(db, saveDb);
 memoryStore.initSchema();
 
+const digitalLifeStore = createDigitalLifeStore(db, saveDb);
+digitalLifeStore.initSchema();
+
 const experienceStore = createExperienceStore(db, saveDb);
 experienceStore.initSchema();
 
@@ -157,9 +202,25 @@ const identityFile = process.env.VIBEBOARD_IDENTITY_FILE || path.join(os.homedir
 let boardPassword = process.env.VIBEBOARD_BOARD_PASSWORD || "";
 const PYTHON_BIN = process.env.VIBEBOARD_PYTHON || (process.platform === "win32" ? "python" : "python3");
 
+const buildRegistry = createBuildRegistry();
 let currentBuild = null;
 let activeEndpoint = null;
 let lastDeploy = null;
+
+function setCurrentBuild(build) {
+  currentBuild = buildRegistry.setCurrentBuild(build);
+  return currentBuild;
+}
+
+function setActiveEndpoint(endpoint) {
+  activeEndpoint = buildRegistry.setActiveEndpoint(endpoint);
+  return activeEndpoint;
+}
+
+function setLastDeploy(deploy) {
+  lastDeploy = buildRegistry.setLastDeploy(deploy);
+  return lastDeploy;
+}
 let audioState = {
   mode: "idle",
   recording: false,
@@ -180,7 +241,18 @@ const mimeTypes = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".png": "image/png",
-  ".svg": "image/svg+xml"
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".webm": "video/webm",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".ttf": "font/ttf",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2"
 };
 
 function compactForLog(value, depth = 0) {
@@ -248,7 +320,7 @@ function staticCacheFor(filePath) {
   if (relative === "index.html" || relative === "market.html" || ext === ".html") {
     return "no-store";
   }
-  if (relative === "app.js" || relative === "styles.css") {
+  if (relative === "app.js" || relative === "styles.css" || relative.startsWith("digital-life.")) {
     return "no-store";
   }
   if (relative.startsWith("generated/current/")) {
@@ -266,19 +338,34 @@ function staticCacheFor(filePath) {
   return "public, max-age=300";
 }
 
+function resolveStaticFilePath(pathname) {
+  const normalizedPath = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
+  if (normalizedPath === "/generated/current" || normalizedPath.startsWith("/generated/current/")) {
+    const suffix = normalizedPath.slice("/generated/current".length).replace(/^\/+/, "");
+    const filePath = path.resolve(GENERATED_DIR, suffix);
+    return filePath === GENERATED_DIR || filePath.startsWith(`${GENERATED_DIR}${path.sep}`) ? filePath : "";
+  }
+  const filePath = path.resolve(ROOT, normalizedPath.replace(/^\/+/, ""));
+  return filePath === ROOT || filePath.startsWith(`${ROOT}${path.sep}`) ? filePath : "";
+}
+
 function responseContentType(filename) {
   const ext = path.extname(String(filename || "")).toLowerCase();
   return mimeTypes[ext] || "text/plain; charset=utf-8";
 }
 
-const CONVERSATION_PREVIEW_FILE_NAMES = [...new Set([...GENERATED_FILE_NAMES, "hardware-result.json"])];
+const CONVERSATION_PREVIEW_FILE_NAMES = [...HARDWARE_APP_CONTRACT.snapshotFiles];
 
 function previewFilesForConversation(conversationId) {
   const { buildId, files } = conversationStore.loadConversationFiles(conversationId);
+  const allowedFiles = new Set([
+    ...CONVERSATION_PREVIEW_FILE_NAMES,
+    ...declaredAssetPathsFromFiles(files),
+  ]);
   return {
     buildId,
     files: Object.fromEntries(
-      Object.entries(files || {}).filter(([filename]) => CONVERSATION_PREVIEW_FILE_NAMES.includes(filename))
+      Object.entries(files || {}).filter(([filename]) => allowedFiles.has(filename))
     )
   };
 }
@@ -286,7 +373,7 @@ function previewFilesForConversation(conversationId) {
 async function filesWithHardwareResult(files = {}) {
   const savedFiles = { ...(files || {}) };
   try {
-    savedFiles["hardware-result.json"] = await fs.readFile(path.join(GENERATED_DIR, "hardware-result.json"), "utf8");
+    savedFiles[HARDWARE_RESULT_FILE] = await fs.readFile(path.join(GENERATED_DIR, HARDWARE_RESULT_FILE), "utf8");
   } catch {}
   return savedFiles;
 }
@@ -297,7 +384,7 @@ function resolveConversationPreviewFile(pathname) {
   const conversationId = decodeURIComponent(match[1] || "");
   const requested = decodeURIComponent(match[2] || "index.html");
   const filename = path.posix.normalize(`/${requested}`).slice(1) || "index.html";
-  if (!conversationId || filename.includes("..") || !CONVERSATION_PREVIEW_FILE_NAMES.includes(filename)) {
+  if (!conversationId || filename.includes("..")) {
     return { error: "Invalid preview path" };
   }
   return { conversationId, filename };
@@ -369,7 +456,7 @@ function publicBoardConfig() {
 function selectDevice(deviceId = "") {
   const next = createBoardConfig(deviceIdFrom({ deviceId }, BOARD.id));
   if (next.id !== BOARD.id) {
-    activeEndpoint = null;
+    setActiveEndpoint(null);
   }
   BOARD = next;
   knownHosts = process.env.VIBEBOARD_KNOWN_HOSTS || path.join(os.tmpdir(), `${BOARD.id}_known_hosts`);
@@ -392,7 +479,7 @@ async function withDevice(deviceId, task) {
   } finally {
     BOARD = previousBoard;
     knownHosts = previousKnownHosts;
-    activeEndpoint = previousActiveEndpoint;
+    setActiveEndpoint(previousActiveEndpoint);
     release();
   }
 }
@@ -404,7 +491,7 @@ function updateBoardConfig(input = {}) {
   if (input.frpHost !== undefined) BOARD.frpHost = String(input.frpHost || "").trim() || BOARD.frpHost;
   if (input.frpPort !== undefined) BOARD.frpPort = String(input.frpPort || "").trim() || BOARD.frpPort;
   if (input.password !== undefined) boardPassword = String(input.password || "").trim();
-  activeEndpoint = null;
+  setActiveEndpoint(null);
   return publicBoardConfig();
 }
 
@@ -448,7 +535,7 @@ async function paramikoExec(remoteCommand, timeout = 30000, input = "") {
     endpointLabel,
     runOnce: endpoint => paramikoExecOnce(endpoint, remoteCommand, timeout, input)
   });
-  activeEndpoint = endpoint;
+  setActiveEndpoint(endpoint);
   return result;
 }
 
@@ -477,7 +564,7 @@ async function opensshExec(remoteCommand, timeout = 30000, input = "") {
       cwd: ROOT
     })
   });
-  activeEndpoint = endpoint;
+  setActiveEndpoint(endpoint);
   return result;
 }
 
@@ -569,7 +656,7 @@ async function uploadBundle(entries, timeout = 45000) {
     data: (await fs.readFile(entry.localPath)).toString("base64")
   })));
 
-  return ssh(buildUploadBundleCommand(files), timeout);
+  return sshWithInput(buildUploadBundleStdinCommand(), buildUploadBundleInput(files), timeout);
 }
 
 async function readBody(req) {
@@ -578,6 +665,13 @@ async function readBody(req) {
   if (!chunks.length) return {};
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
+
+const digitalLifeRoutes = createDigitalLifeRoutes({
+  store: digitalLifeStore,
+  readBody,
+  json,
+  appendLog: appendServerLog,
+});
 
 function htmlEscape(value) {
   return String(value)
@@ -590,120 +684,6 @@ function htmlEscape(value) {
 
 function buildId() {
   return `vb-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
-}
-
-function promptHas(prompt, words) {
-  const lower = String(prompt || "").toLowerCase();
-  return words.some(word => lower.includes(word.toLowerCase()));
-}
-
-function createAppSpec(prompt, id) {
-  const text = String(prompt || "").trim() || "Build a VibeBoard hardware app";
-  let mode = "assistant";
-  if (promptHas(text, ["carousel", "slideshow", "photo", "image", "图片", "照片", "轮播", "相册"])) mode = "carousel";
-  if (promptHas(text, ["fullscreen clock", "full screen clock", "clock", "全屏时钟", "时钟", "大时钟"])) mode = "clock";
-  if (promptHas(text, ["voice", "audio", "record", "speech", "语音", "录音", "麦克风"])) mode = "voice";
-  if (mode === "assistant" && promptHas(text, ["server", "dashboard", "status", "监控", "状态", "面板", "服务器"])) mode = "dashboard";
-  if (promptHas(text, ["timer", "focus", "countdown", "倒计时", "番茄"])) mode = "timer";
-  if (promptHas(text, ["control", "switch", "gpio", "relay", "button", "控制", "开关", "继电器"])) mode = "control";
-  if (promptHas(text, ["weather", "天气", "气温", "白底蓝字", "白色", "蓝色", "小屏助手"])) mode = "weather";
-
-  const titles = {
-    assistant: "AI Screen Assistant",
-    voice: "Voice Console",
-    dashboard: "Device Dashboard",
-    timer: "Focus Clock",
-    control: "Hardware Control",
-    weather: "小屏助手",
-    clock: "全屏时钟",
-    carousel: "图片轮播"
-  };
-  const accents = {
-    assistant: "#22c55e",
-    voice: "#38bdf8",
-    dashboard: "#f59e0b",
-    timer: "#a78bfa",
-    control: "#fb7185",
-    weather: "#0b63ce",
-    clock: "#f8fafc",
-    carousel: "#fb7185"
-  };
-  const widgetsByMode = {
-    assistant: [
-      ["wifi", "Wi-Fi", "--", "live network"],
-      ["ip", "IP", "--", "board address"],
-      ["temp", "Temp", "--", "thermal zone"],
-      ["runtime", "Runtime", "--", "python result"]
-    ],
-    voice: [
-      ["level", "Input", "ready", "mic state"],
-      ["transcript", "Transcript", "tap start", "simulated capture"],
-      ["response", "AI Reply", "waiting", "screen output"],
-      ["temp", "Temp", "--", "board thermal"]
-    ],
-    dashboard: [
-      ["ip", "IP", "--", "network"],
-      ["temp", "Temp", "--", "thermal"],
-      ["memory", "Memory", "--", "available"],
-      ["load", "Load", "--", "linux loadavg"]
-    ],
-    timer: [
-      ["remaining", "Timer", "25:00", "focus session"],
-      ["cycles", "Cycles", "0", "completed"],
-      ["temp", "Temp", "--", "board thermal"],
-      ["memory", "Memory", "--", "system"]
-    ],
-    control: [
-      ["switchA", "Output A", "off", "virtual GPIO"],
-      ["switchB", "Output B", "off", "virtual relay"],
-      ["serviceState", "Service", "--", "systemd"],
-      ["temp", "Temp", "--", "board thermal"]
-    ],
-    weather: [
-      ["weather", "天气", "--", "Shenzhen weather"],
-      ["temp", "板端温度", "--", "thermal zone"],
-      ["wifi", "Wi-Fi", "--", "live network"],
-      ["memory", "内存", "--", "system"]
-    ],
-    clock: [
-      ["time", "Time", "--:--", "fullscreen clock"],
-      ["date", "Date", "--", "calendar"],
-      ["seconds", "Seconds", "--", "ticker"],
-      ["service", "Service", "--", "hardware api"]
-    ],
-    carousel: [
-      ["slide", "Slide", "1/4", "image index"],
-      ["caption", "Caption", "ready", "current image"],
-      ["runtime", "Runtime", "--", "python result"],
-      ["service", "Service", "--", "hardware api"]
-    ]
-  };
-  const actionsByMode = {
-    weather: [{ id: "refresh", label: "刷新" }],
-    clock: [{ id: "refresh", label: "Sync" }],
-    carousel: [
-      { id: "previous", label: "Prev" },
-      { id: "next", label: "Next" },
-      { id: "refresh", label: "Sync" }
-    ]
-  };
-
-  return {
-    id,
-    prompt: text,
-    mode,
-    title: titles[mode],
-    subtitle: text.slice(0, 120),
-    accent: accents[mode],
-    target: "480x360 RK3566 Linux kiosk",
-    hardwareApi: ["/api/status", "./hardware-result.json", ...AUDIO_APIS],
-    widgets: widgetsByMode[mode].map(([widgetId, label, value, hint]) => ({ id: widgetId, label, value, hint })),
-    actions: actionsByMode[mode] || [
-      { id: "primary", label: mode === "voice" ? "Start" : mode === "timer" ? "Start" : mode === "control" ? "Toggle A" : "Run" },
-      { id: "secondary", label: mode === "control" ? "Toggle B" : "Mark" },
-      { id: "refresh", label: "Refresh" }
-    ]
-  };
 }
 
 function stripCodeFence(text) {
@@ -725,12 +705,14 @@ function extractJsonObject(text) {
   throw new Error("Model did not return valid JSON.");
 }
 
-function validateGeneratedFileContracts(files, label) {
-  assertFileContracts(files, label);
-}
-
 function hasBoardCredentials() {
-  return Boolean(boardPassword || process.env.VIBEBOARD_IDENTITY_FILE || process.env.VIBEBOARD_FORCE_REAL_BOARD === "1");
+  if (process.env.VIBEBOARD_FORCE_OFFLINE === "1") return false;
+  return Boolean(
+    boardPassword ||
+    process.env.VIBEBOARD_IDENTITY_FILE ||
+    (identityFile && existsSync(identityFile)) ||
+    process.env.VIBEBOARD_FORCE_REAL_BOARD === "1"
+  );
 }
 
 function buildOfflineGoldenLoop(buildId = currentBuild?.id || "") {
@@ -765,12 +747,7 @@ function buildOfflineGoldenLoop(buildId = currentBuild?.id || "") {
 
 const AUDIO_RECORDING_DIR = "/tmp/vibeboard-audio";
 const AUDIO_DEFAULT_RECORDING = `${AUDIO_RECORDING_DIR}/recording.wav`;
-const AUDIO_APIS = Object.freeze([
-  "/api/audio/status",
-  "/api/audio/play",
-  "/api/audio/record",
-  "/api/audio/stop"
-]);
+const AUDIO_APIS = AUDIO_RUNTIME_APIS;
 
 function nowIso() {
   return new Date().toISOString();
@@ -1006,6 +983,7 @@ function buildOfflineDeployResult() {
     programPath: "generated/current/hardware-result.json",
     compilePath: "",
     buildEvidence,
+    intelligenceSummary: currentBuild?.intelligenceSummary || null,
     goldenLoop: buildOfflineGoldenLoop(currentBuild?.id || ""),
   };
 }
@@ -1058,138 +1036,16 @@ function recordAgentLearning({
 }
 
 /**
- * 兜底注入：确保 hardware_app.py 输出包含 golden-loop 必需字段
- * 无论 AI 生成什么代码，都强制注入 runtime 和 build_id
+ * 鍏滃簳娉ㄥ叆锛氱‘淇?hardware_app.py 杈撳嚭鍖呭惈 golden-loop 蹇呴渶瀛楁
+ * 鏃犺 AI 鐢熸垚浠€涔堜唬鐮侊紝閮藉己鍒舵敞鍏?runtime 鍜?build_id
  */
-function injectHardwareAppContracts(source, buildId) {
-  const idJson = JSON.stringify(buildId);
-  const sourceB64Json = JSON.stringify(Buffer.from(String(source || ""), "utf8").toString("base64"));
-
-  // 检查是否已经有 runtime 字段
-  if (source.includes('"runtime"') && source.includes('"executed_on_board"')) {
-    // 已经有正确的 runtime 字段，只检查 build_id
-    if (source.includes('"build_id"')) {
-      return source; // 两个字段都有，不需要注入
-    }
-  }
-
-  // 注入包装器：在脚本执行后，强制添加必需字段
-  const wrapper = `
-# --- Golden-loop contract injection (auto-injected) ---
-import base64 as __base64
-import json as __json
-import sys as __sys
-
-__original_print = print
-__build_id = ${idJson}
-__script_content = __base64.b64decode(${sourceB64Json}).decode("utf-8")
-
-def __wrapped_main():
-    """Run original script and inject required fields."""
-    import io
-    __old_stdout = __sys.stdout
-    __sys.stdout = __buffer = io.StringIO()
-    try:
-        exec(__script_content, {"__name__": "__main__"})
-    finally:
-        __sys.stdout = __old_stdout
-
-    # 解析原始输出
-    __raw_output = __buffer.getvalue().strip()
-    try:
-        __result = __json.loads(__raw_output)
-    except __json.JSONDecodeError:
-        __result = {"raw_output": __raw_output}
-
-    # 注入必需字段
-    __result["build_id"] = __build_id
-    __result["runtime"] = "executed_on_board"
-    __result["hostname"] = __result.get("hostname", socket.gethostname())
-
-    __original_print(__json.dumps(__result, ensure_ascii=False, indent=2))
-
-# 保存原始脚本内容
-if __name__ == "__main__":
-    import socket
-    __wrapped_main()
-`;
-
-  return wrapper;
-}
-
-function injectHardwareAppContractsV2(source, buildId) {
-  const sourceText = String(source || "");
-  const idJson = JSON.stringify(buildId);
-  const sourceB64Json = JSON.stringify(Buffer.from(sourceText, "utf8").toString("base64"));
-
-  return `
-# --- VibeBoard runtime contract injection (auto-injected) ---
-import base64 as __vb_base64
-import json as __vb_json
-import socket as __vb_socket
-import sys as __vb_sys
-
-__vb_build_id = ${idJson}
-__vb_script_content = __vb_base64.b64decode(${sourceB64Json}).decode("utf-8")
-
-def __vb_parse_output(raw):
-    raw = (raw or "").strip()
-    if not raw:
-        return {}
-    try:
-        return __vb_json.loads(raw)
-    except Exception:
-        pass
-    for line in reversed([item.strip() for item in raw.splitlines() if item.strip()]):
-        if line.startswith("{") or line.startswith("["):
-            try:
-                return __vb_json.loads(line)
-            except Exception:
-                pass
-    return {"raw_output": raw}
-
-def __vb_wrapped_main():
-    import io
-    old_stdout = __vb_sys.stdout
-    __vb_sys.stdout = buffer = io.StringIO()
-    try:
-        exec(__vb_script_content, {"__name__": "__main__"})
-    finally:
-        __vb_sys.stdout = old_stdout
-
-    result = __vb_parse_output(buffer.getvalue())
-    if not isinstance(result, dict):
-        result = {"value": result}
-    result["build_id"] = __vb_build_id
-    result["runtime"] = "executed_on_board"
-    result["hostname"] = result.get("hostname") or __vb_socket.gethostname()
-    result["available_apis"] = result.get("available_apis") or ["/api/status", "./hardware-result.json", "/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"]
-    print(__vb_json.dumps(result, ensure_ascii=False, sort_keys=True))
-
-if __name__ == "__main__":
-    __vb_wrapped_main()
-`;
-}
-
-const HARDWARE_PROFILE = {
-  屏幕: { 宽度: 480, 高度: 360, 色深: "RGB565", 触摸: false, 类型: "IPS LCD" },
-  芯片: { 型号: "RK3566", 架构: "aarch64", GPU: "Mali-G52 2EE", CPU: "4x Cortex-A55 @1.8GHz" },
-  系统: { OS: "Debian 11 (bullseye)", Python: "3.9", Node: "无（仅服务端有Node）" },
-  连接: { WiFi: true, 蓝牙: false, GPIO: "40pin", I2C: true, SPI: true, UART: true },
-  传感器: { CPU温度: "可读", GPU温度: "可读", 加速度: "无", 光线: "无", GPS: "无" },
-  输入: { 触摸屏: false, 按钮: "3个GPIO物理按钮（KEY1/KEY2/KEY3）", 旋钮: "无" },
-  输出: { 屏幕: "480x360 LCD", LED: "绿色LED x1", 蜂鸣器: "无", 喇叭: "3.5mm音频" },
-  已装软件: ["flask", "luma.oled", "PIL/Pillow", "pygame", "RPi.GPIO", "requests"],
-  网络: { HTTP服务: "可运行flask或node http-server", 端口: "可用任意高端口" }
-};
-
 function llmSystemPrompt(conversationHistory = []) {
   const isEditing = conversationHistory.length > 0;
 
   return `You are VibeBoard, a hardware-aware coding assistant embedded in a real physical device.
 
 ## Your Hardware Context
-${JSON.stringify(HARDWARE_PROFILE, null, 2)}
+${hardwareContractPromptText("en")}
 
 ## Your Capabilities
 You generate complete, production-ready web applications that run on the above hardware.
@@ -1210,21 +1066,21 @@ Return ONLY a JSON object (no markdown, no commentary):
   "notes": "one concise implementation note"
 }
 
-${isEditing ? `## ⚠️ Editing Mode — CRITICAL RULES
+${isEditing ? `## 鈿狅笍 Editing Mode 鈥?CRITICAL RULES
 You are modifying an EXISTING project that is already deployed.
-The user can see the current code in the "当前部署的完整代码" section below.
+The user can see the current code in the "褰撳墠閮ㄧ讲鐨勫畬鏁翠唬鐮? section below.
 
 **YOU MUST:**
 1. Return ALL files in the JSON, even if you only changed one file
 2. For files the user didn't ask to change: copy them EXACTLY as-is (no formatting changes, no "improvements")
 3. Only modify the specific thing the user asked about
-4. If the user says "把3改成2", find what "3" refers to in the code and change only that to "2"
+4. If the user says "鎶?鏀规垚2", find what "3" refers to in the code and change only that to "2"
 5. NEVER rewrite the entire project from scratch when making a small change
 6. Preserve all existing functionality that the user didn't mention
 
 **COMMON MISTAKE TO AVOID:**
-User says "fix the color of button X" → Do NOT remove button Y or change the layout.
-User says "change item 3 to 2" → Find item 3 in the code, change its value to 2. Keep everything else.
+User says "fix the color of button X" 鈫?Do NOT remove button Y or change the layout.
+User says "change item 3 to 2" 鈫?Find item 3 in the code, change its value to 2. Keep everything else.
 ` : `## Generation Mode
 You are creating a NEW project from scratch.
 ` }
@@ -1267,46 +1123,27 @@ async function thinkBeforeGenerate(settings, prompt, id, history = []) {
   const timeout = setTimeout(() => controller.abort(), 30000);
   try {
     const isEditing = history.length > 0;
-    const recentContext = history.slice(-4).map(m =>
-      `[${m.role === "user" ? "用户" : "助手"}] ${m.content.slice(0, 200)}`
+    const recentContext = history.slice(-4).map((message) =>
+      `[${message.role === "user" ? "user" : "assistant"}] ${String(message.content || "").slice(0, 200)}`
     ).join("\n");
 
-    const thinkingPrompt = `你是一个嵌入式硬件编程助手，在生成代码前先思考分析。
+    const currentFiles = isEditing && currentBuild?.files
+      ? Object.keys(currentBuild.files)
+          .filter((name) => name !== "manifest.json")
+          .map((name) => {
+            const content = String(currentBuild.files[name] || "");
+            return `### ${name}\n${content.slice(0, 2000)}${content.length > 2000 ? "\n...(truncated)" : ""}`;
+          })
+          .join("\n\n")
+      : "";
 
-## 当前任务
-用户${isEditing ? "要修改已有的应用" : "请求创建一个新应用"}：${prompt}
-
-${isEditing ? `## 最近对话
-${recentContext}
-
-## 当前代码
-${currentBuild?.files ? Object.keys(currentBuild.files).filter(f => f !== "manifest.json").map(name => {
-  const content = currentBuild.files[name] || "";
-  return "### " + name + "\n" + content.slice(0, 2000) + (content.length > 2000 ? "\n...(已截断)" : "");
-}).join("\n\n") : "无"}` : ""}
-
-## 你的硬件环境
-- 屏幕 480x360 像素，无触摸，3个GPIO物理按钮
-- RK3566 芯片，Debian 11，Python 3.9
-- 深色主题 LCD 显示屏
-
-请用中文思考，输出你的分析过程。格式：
-
-思考过程：
-1. 需求理解：...
-2. 技术方案：...
-3. UI布局规划：...
-4. 需要注意的问题：...
-${isEditing ? "5. 需要修改哪些文件：..." : ""}
-
-不要生成代码，只输出思考分析。`;
+    const thinkingPrompt = `You are a hardware-aware coding assistant. Think briefly before generating code.\n\nBuild id: ${id}\nMode: ${isEditing ? "edit existing app" : "new app"}\nUser request: ${prompt}\n\nRecent context:\n${recentContext || "none"}\n\nCurrent files:\n${currentFiles || "none"}\n\nReturn concise analysis with: requirement understanding, technical plan, UI layout, and hardware contract risks.`;
 
     const messages = [
-      { role: "system", content: "你是一个善于分析和规划的嵌入式系统编程专家。在动手写代码前，你会先仔细思考需求、规划方案、预判问题。用中文回答。" },
+      { role: "system", content: "You analyze VibeBoard generation tasks before code generation. Return concise planning text only." },
       { role: "user", content: thinkingPrompt }
     ];
 
-    // For DeepSeek, enable native thinking
     const payload = {
       model: settings.model,
       messages,
@@ -1333,18 +1170,13 @@ ${isEditing ? "5. 需要修改哪些文件：..." : ""}
       return { thinking: "", analysis: null };
     }
 
-    // Extract thinking from DeepSeek native thinking or content
-    let thinking = "";
-    if (data.choices?.[0]?.message?.reasoning_content) {
-      thinking = data.choices[0].message.reasoning_content;
-    } else {
-      thinking = data.choices?.[0]?.message?.content || "";
-    }
-
+    const thinking = data.choices?.[0]?.message?.reasoning_content || data.choices?.[0]?.message?.content || "";
     return { thinking: thinking.trim(), analysis: thinking.trim() };
   } catch (err) {
     console.warn("[thinkBeforeGenerate] Failed:", err.message);
     return { thinking: "", analysis: null };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -1352,42 +1184,22 @@ function llmUserPrompt(prompt, id, history = []) {
   const isEditing = history.length > 0;
 
   if (!isEditing) {
-    // New project: simple prompt
-    return `Build id: ${id}
-User request: ${prompt}
-
-Respond with ONLY the JSON object containing the files.`;
+    return `Build id: ${id}\nUser request: ${prompt}\n\nRespond with ONLY the JSON object containing index.html, style.css, app.js, and hardware_app.py.`;
   }
 
-  // Editing mode: inject FULL current code snapshot
   let codeSnapshot = "";
   if (currentBuild?.files) {
-    const fileList = Object.keys(currentBuild.files).filter(f => f !== "manifest.json");
-    codeSnapshot = "\n\n## 当前部署的完整代码（这是用户正在看的版本）\n";
-    codeSnapshot += "你必须基于这些代码做修改，保留未被要求修改的部分。\n\n";
+    const fileList = Object.keys(currentBuild.files).filter((name) => name !== "manifest.json");
+    codeSnapshot = "\n\n## Existing app files\nKeep all unrelated behavior unchanged. Return every required file, even if only one file changes.\n";
     for (const name of fileList) {
-      const content = currentBuild.files[name] || "";
-      if (content.length > 8000) {
-        codeSnapshot += `### ${name}\n\`\`\`\n${content.slice(0, 8000)}\n... (截断)\n\`\`\`\n\n`;
-      } else {
-        codeSnapshot += `### ${name}\n\`\`\`\n${content}\n\`\`\`\n\n`;
-      }
+      const content = String(currentBuild.files[name] || "");
+      const truncated = content.length > 8000 ? `${content.slice(0, 8000)}\n... (truncated)` : content;
+      codeSnapshot += `### ${name}\n\`\`\`\n${truncated}\n\`\`\`\n\n`;
     }
   }
 
-  return `Build id: ${id}
-用户请求: ${prompt}
-${codeSnapshot}
-
-## 关键规则
-1. 返回完整的 JSON，包含所有文件（即使只改了一个文件，其他文件也要原样返回）
-2. 只修改用户要求改的部分，其他内容保持不变
-3. 不要重新设计或重构用户没有提到的部分
-4. 如果用户说"把X改成Y"，只改X相关的内容
-
-Respond with ONLY the JSON object.`;
+  return `Build id: ${id}\nUser request: ${prompt}${codeSnapshot}\n\nRules:\n1. Return valid JSON only.\n2. Return all required files.\n3. Preserve unrelated existing behavior.\n4. Keep the 480x360 no-touch hardware contract intact.\n\nRespond with ONLY the JSON object.`;
 }
-
 async function callChatModel(settings, prompt, id, history = []) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90000);
@@ -1450,7 +1262,7 @@ function normalizeGeneratedFiles(raw, prompt, id, meta = {}) {
     files["hardware_app.py"] = generatedHardwareAppV2(prompt, id, spec);
   }
 
-  // 兜底注入：确保 hardware_app.py 输出包含 golden-loop 必需字段
+  // 鍏滃簳娉ㄥ叆锛氱‘淇?hardware_app.py 杈撳嚭鍖呭惈 golden-loop 蹇呴渶瀛楁
   files["hardware_app.py"] = injectHardwareAppContractsV2(files["hardware_app.py"], id);
 
   validateGeneratedFileContracts(files, "Model");
@@ -1486,1289 +1298,6 @@ function templateGeneratedFiles(prompt, id, reason = "") {
       "manifest.json": JSON.stringify(manifest, null, 2)
     },
     manifest
-  };
-}
-
-function advancedTemplateFiles(prompt, id, spec) {
-  if (!["clock", "weather", "carousel"].includes(spec.mode)) return null;
-  const title = spec.mode === "clock"
-    ? "Neon Chrono"
-    : spec.mode === "weather"
-      ? "Skyline Weather"
-      : "Kinetic Gallery";
-  const modeClass = `mode-${spec.mode}`;
-  const chips = spec.mode === "clock"
-    ? ["CYBER CLOCK", "SYNC", "480x360"]
-    : spec.mode === "weather"
-      ? ["SHENZHEN", "LIVE WEATHER", "BOARD"]
-      : ["AUTO SLIDES", "RUNTIME", "GALLERY"];
-  const cards = spec.mode === "carousel"
-    ? `
-      <section class="gallery" aria-label="image carousel">
-        <article class="slide active" data-slide="0"><span>01</span><strong>Neon Street</strong><small>city rain reflections</small></article>
-        <article class="slide" data-slide="1"><span>02</span><strong>Orbit Garden</strong><small>glass and bio-light</small></article>
-        <article class="slide" data-slide="2"><span>03</span><strong>Signal Peak</strong><small>mountain relay dusk</small></article>
-        <article class="slide" data-slide="3"><span>04</span><strong>Night Harbor</strong><small>magenta waves</small></article>
-      </section>
-      <section class="deck">
-        <div><span id="slide">1/4</span><strong id="caption">Neon Street</strong></div>
-        <small id="eventLog">auto cinematic loop</small>
-      </section>`
-    : spec.mode === "weather"
-      ? `
-      <section class="weather-hero">
-        <div>
-          <span>SHENZHEN NOW</span>
-          <strong id="weatherText">天气同步中</strong>
-          <small id="weatherMeta">实时天气</small>
-        </div>
-        <b id="weatherTemp">--°C</b>
-      </section>
-      <section class="metrics">
-        <article><span>CPU</span><strong id="temp">--</strong></article>
-        <article><span>MEM</span><strong id="memory">--</strong></article>
-        <article><span>NET</span><strong id="wifi">--</strong></article>
-        <article><span>IP</span><strong id="ip">--</strong></article>
-      </section>`
-      : `
-      <section class="chrono">
-        <span id="date">--</span>
-        <strong id="time">--:--</strong>
-        <small id="seconds">--</small>
-      </section>
-      <section class="metrics compact">
-        <article><span>CPU</span><strong id="temp">--</strong></article>
-        <article><span>MEM</span><strong id="memory">--</strong></article>
-        <article><span>NET</span><strong id="wifi">--</strong></article>
-      </section>`;
-
-  const index = `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VibeBoard ${htmlEscape(title)}</title>
-  <link rel="stylesheet" href="./style.css?v=${id}">
-</head>
-<body>
-  <main class="screen ${modeClass}" data-mode="${htmlEscape(spec.mode)}">
-    <div class="aurora" aria-hidden="true"></div>
-    <div class="scanline" aria-hidden="true"></div>
-    <header class="hud">
-      <div>
-        <span id="date">${spec.mode === "clock" ? "--" : title}</span>
-        <strong>${htmlEscape(title)}</strong>
-      </div>
-      <b id="service">Linux API --</b>
-    </header>
-    <section class="chips">
-      ${chips.map(chip => `<span>${htmlEscape(chip)}</span>`).join("\n      ")}
-    </section>
-    ${cards}
-    <footer>
-      <button class="action" type="button" data-action="previous">Prev</button>
-      <span id="eventLog">hardware api waiting</span>
-      <button class="action" type="button" data-action="next">Next</button>
-    </footer>
-  </main>
-  <script src="./app.js?v=${id}"></script>
-</body>
-</html>
-`;
-
-  const style = `:root {
-  color-scheme: dark;
-  --bg: #05030f;
-  --panel: rgba(8, 13, 34, .74);
-  --line: rgba(125, 249, 255, .28);
-  --text: #f8fbff;
-  --muted: #91a8c7;
-  --cyan: #2df8ff;
-  --pink: #ff2bd6;
-  --gold: #ffd166;
-  --green: #43ff91;
-}
-
-* { box-sizing: border-box; }
-
-html, body {
-  width: 480px;
-  height: 360px;
-  margin: 0;
-  overflow: hidden;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
-}
-
-button { font: inherit; }
-
-.screen {
-  position: relative;
-  width: 480px;
-  height: 360px;
-  display: grid;
-  grid-template-rows: 46px 28px 1fr 44px;
-  gap: 8px;
-  padding: 10px;
-  overflow: hidden;
-  isolation: isolate;
-  background:
-    linear-gradient(rgba(125,249,255,.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,43,214,.06) 1px, transparent 1px),
-    radial-gradient(circle at 14% 20%, rgba(45,248,255,.33), transparent 24%),
-    radial-gradient(circle at 82% 16%, rgba(255,43,214,.3), transparent 25%),
-    radial-gradient(circle at 58% 90%, rgba(67,255,145,.14), transparent 24%),
-    linear-gradient(135deg, #070817 0%, #13051d 48%, #06111c 100%);
-  background-size: 28px 28px, 28px 28px, auto, auto, auto, auto;
-}
-
-.mode-weather {
-  background:
-    linear-gradient(rgba(45,248,255,.08) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(7,87,184,.08) 1px, transparent 1px),
-    radial-gradient(circle at 14% 14%, rgba(45,248,255,.34), transparent 24%),
-    radial-gradient(circle at 86% 22%, rgba(255,209,102,.24), transparent 25%),
-    linear-gradient(135deg, #f6fbff 0%, #dff1ff 48%, #cfe7ff 100%);
-  color: #073b7a;
-}
-
-.mode-carousel {
-  background:
-    linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px),
-    radial-gradient(circle at 24% 18%, rgba(255,43,214,.42), transparent 25%),
-    radial-gradient(circle at 78% 34%, rgba(45,248,255,.32), transparent 26%),
-    linear-gradient(135deg, #140618 0%, #071327 54%, #180512 100%);
-}
-
-.aurora {
-  position: absolute;
-  inset: -80px;
-  z-index: -2;
-  opacity: .78;
-  background: conic-gradient(from 180deg, transparent, rgba(45,248,255,.32), rgba(255,43,214,.28), transparent, rgba(67,255,145,.22), transparent);
-  animation: drift 10s linear infinite;
-}
-
-.scanline {
-  position: absolute;
-  inset: 0;
-  z-index: 5;
-  pointer-events: none;
-  background: linear-gradient(transparent 0 48%, rgba(255,255,255,.14) 50%, transparent 52% 100%);
-  background-size: 100% 7px;
-  mix-blend-mode: overlay;
-  opacity: .28;
-}
-
-.hud {
-  min-width: 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.hud span,
-.chips span,
-footer,
-.metrics span,
-.weather-hero span,
-.weather-hero small,
-.deck span,
-.deck small {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.1;
-  letter-spacing: 0;
-}
-
-.hud strong {
-  display: block;
-  margin-top: 3px;
-  color: var(--cyan);
-  font-size: 21px;
-  line-height: 1;
-  text-shadow: 0 0 16px rgba(45,248,255,.75);
-}
-
-.mode-weather .hud strong,
-.mode-weather .weather-hero strong,
-.mode-weather .weather-hero b,
-.mode-weather .metrics strong {
-  color: #0757b8;
-  text-shadow: none;
-}
-
-.hud b {
-  max-width: 178px;
-  min-height: 28px;
-  padding: 7px 9px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--cyan);
-  background: rgba(0,0,0,.22);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chips {
-  display: flex;
-  gap: 7px;
-  min-width: 0;
-}
-
-.chips span {
-  padding: 6px 9px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(255,255,255,.08);
-  color: inherit;
-  font-weight: 800;
-}
-
-.chrono {
-  min-height: 0;
-  display: grid;
-  grid-template-rows: 24px 118px 42px;
-  align-content: center;
-  justify-items: center;
-  padding-top: 4px;
-}
-
-.chrono span {
-  color: var(--muted);
-  font-size: 16px;
-}
-
-.chrono strong {
-  color: var(--text);
-  font-family: Consolas, "Segoe UI", monospace;
-  font-size: 94px;
-  font-weight: 900;
-  line-height: .95;
-  text-shadow: 0 0 18px rgba(45,248,255,.9), 4px 0 0 rgba(255,43,214,.45);
-  animation: pulseGlow 2.4s ease-in-out infinite;
-}
-
-.chrono small {
-  min-width: 74px;
-  padding: 6px 12px;
-  border: 1px solid rgba(255,43,214,.45);
-  border-radius: 8px;
-  color: var(--pink);
-  background: rgba(255,43,214,.1);
-  font-family: Consolas, monospace;
-  font-size: 25px;
-  font-weight: 900;
-  text-align: center;
-}
-
-.weather-hero {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 1fr 136px;
-  gap: 10px;
-  align-items: stretch;
-}
-
-.weather-hero > div,
-.weather-hero > b,
-.metrics article,
-.deck,
-.gallery {
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(255,255,255,.12);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 12px 28px rgba(0,0,0,.18);
-  backdrop-filter: blur(8px);
-}
-
-.weather-hero > div {
-  padding: 14px;
-}
-
-.weather-hero strong {
-  display: block;
-  margin: 8px 0 6px;
-  overflow: hidden;
-  color: var(--cyan);
-  font-size: 31px;
-  line-height: 1;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.weather-hero > b {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--cyan);
-  font-family: Consolas, monospace;
-  font-size: 36px;
-  line-height: 1;
-}
-
-.metrics {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-  min-height: 0;
-}
-
-.metrics.compact {
-  grid-template-columns: repeat(3, 1fr);
-}
-
-.metrics article {
-  padding: 9px;
-}
-
-.metrics strong {
-  display: block;
-  margin-top: 8px;
-  overflow: hidden;
-  color: var(--green);
-  font-size: 17px;
-  line-height: 1;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.gallery {
-  position: relative;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.slide {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  grid-template-rows: 34px 1fr 34px;
-  padding: 18px;
-  opacity: 0;
-  transform: translateX(16px) scale(1.02);
-  transition: opacity .55s ease, transform .55s ease;
-}
-
-.slide.active {
-  opacity: 1;
-  transform: translateX(0) scale(1);
-}
-
-.slide::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background:
-    radial-gradient(circle at 20% 30%, rgba(255,255,255,.34), transparent 19%),
-    radial-gradient(circle at 76% 70%, rgba(255,255,255,.24), transparent 17%),
-    linear-gradient(135deg, rgba(45,248,255,.7), rgba(255,43,214,.62));
-}
-
-.slide[data-slide="1"]::before { background: linear-gradient(135deg, rgba(255,209,102,.75), rgba(67,255,145,.62)); }
-.slide[data-slide="2"]::before { background: linear-gradient(135deg, rgba(45,248,255,.68), rgba(7,87,184,.7)); }
-.slide[data-slide="3"]::before { background: linear-gradient(135deg, rgba(255,43,214,.68), rgba(255,91,91,.64)); }
-
-.slide span {
-  color: rgba(255,255,255,.76);
-  font-family: Consolas, monospace;
-  font-size: 18px;
-  font-weight: 900;
-}
-
-.slide strong {
-  align-self: center;
-  overflow: hidden;
-  color: #fff;
-  font-size: 45px;
-  font-weight: 950;
-  line-height: .95;
-  text-shadow: 0 10px 28px rgba(0,0,0,.35);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.slide small {
-  color: rgba(255,255,255,.82);
-  font-size: 15px;
-  font-weight: 800;
-}
-
-.deck {
-  display: grid;
-  grid-template-columns: 1fr 148px;
-  gap: 10px;
-  align-items: center;
-  padding: 8px 11px;
-}
-
-.deck strong {
-  display: block;
-  margin-top: 4px;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 22px;
-  line-height: 1;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-footer {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 74px 1fr 74px;
-  gap: 8px;
-  align-items: center;
-}
-
-footer span {
-  min-width: 0;
-  overflow: hidden;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.action {
-  min-width: 0;
-  height: 30px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  color: var(--text);
-  background: linear-gradient(135deg, rgba(45,248,255,.24), rgba(255,43,214,.2));
-  font-size: 11px;
-  font-weight: 900;
-}
-
-@keyframes drift {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes pulseGlow {
-  0%, 100% { filter: brightness(1); }
-  50% { filter: brightness(1.22); }
-}
-`;
-
-  const app = `const SPEC = ${JSON.stringify(spec)};
-const PROMPT = SPEC.prompt;
-const BUILD_ID = ${JSON.stringify(id)};
-const el = id => document.getElementById(id);
-const slides = Array.from(document.querySelectorAll(".slide"));
-const captions = ["Neon Street", "Orbit Garden", "Signal Peak", "Night Harbor"];
-let current = 0;
-let paused = false;
-
-window.VibeBoardHardware = {
-  async getStatus() {
-    const res = await fetch("/api/status", { cache: "no-store" });
-    if (!res.ok) throw new Error("status " + res.status);
-    return res.json();
-  },
-  async getProgramResult() {
-    const res = await fetch("./hardware-result.json", { cache: "no-store" });
-    if (!res.ok) throw new Error("program " + res.status);
-    return res.json();
-  },
-  async getSnapshot() {
-    const settled = await Promise.allSettled([this.getStatus(), this.getProgramResult()]);
-    return {
-      status: settled[0].status === "fulfilled" ? settled[0].value : null,
-      program: settled[1].status === "fulfilled" ? settled[1].value : null
-    };
-  },
-  audio: {
-    async status() {
-      const res = await fetch("/api/audio/status", { cache: "no-store" });
-      if (!res.ok) throw new Error("audio status " + res.status);
-      return res.json();
-    },
-    async play(options = {}) {
-      const res = await fetch("/api/audio/play", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio play " + res.status);
-      return res.json();
-    },
-    async record(options = {}) {
-      const res = await fetch("/api/audio/record", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio record " + res.status);
-      return res.json();
-    },
-    async stop(options = {}) {
-      const res = await fetch("/api/audio/stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio stop " + res.status);
-      return res.json();
-    }
-  }
-};
-
-function pad(value) {
-  return String(value).padStart(2, "0");
-}
-
-function setText(id, value) {
-  const node = el(id);
-  if (node) node.textContent = value == null || value === "" ? "--" : String(value);
-}
-
-function drawClock() {
-  const now = new Date();
-  setText("time", pad(now.getHours()) + ":" + pad(now.getMinutes()));
-  setText("seconds", pad(now.getSeconds()));
-  setText("date", now.toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" }));
-}
-
-function showSlide(index) {
-  if (!slides.length) return;
-  current = (index + slides.length) % slides.length;
-  slides.forEach((slide, idx) => slide.classList.toggle("active", idx === current));
-  setText("slide", String(current + 1) + "/" + String(slides.length));
-  setText("caption", captions[current] || "Slide " + String(current + 1));
-}
-
-const weatherText = { 0: "晴朗", 1: "大部晴朗", 2: "局部多云", 3: "阴", 45: "有雾", 61: "小雨", 63: "中雨", 65: "大雨", 80: "阵雨", 95: "雷雨" };
-
-async function refreshWeather() {
-  if (SPEC.mode !== "weather") return;
-  setText("weatherText", "霓虹晴空");
-  setText("weatherTemp", "32°C");
-  setText("weatherMeta", "深圳参考天气");
-  try {
-    const res = await fetch("https://api.open-meteo.com/v1/forecast?latitude=22.5431&longitude=114.0579&current=temperature_2m,weather_code&timezone=Asia%2FShanghai", { cache: "no-store" });
-    if (!res.ok) throw new Error("weather " + res.status);
-    const data = await res.json();
-    const currentWeather = data.current || {};
-    const temp = Number(currentWeather.temperature_2m);
-    const code = Number(currentWeather.weather_code);
-    setText("weatherText", weatherText[code] || "天气已同步");
-    setText("weatherTemp", Number.isFinite(temp) ? Math.round(temp) + "°C" : "--°C");
-    setText("weatherMeta", "深圳实时天气");
-  } catch {
-    setText("weatherText", "霓虹晴空");
-    setText("weatherTemp", "32°C");
-    setText("weatherMeta", "深圳参考天气");
-  }
-}
-
-async function refreshHardware() {
-  try {
-    const snapshot = await window.VibeBoardHardware.getSnapshot();
-    const data = snapshot.status || {};
-    const program = snapshot.program || {};
-    const service = data.services || {};
-    const network = data.network || {};
-    setText("service", service.display || service.ssh || "Linux API ready");
-    setText("eventLog", program.runtime || ("build " + BUILD_ID.slice(0, 12)));
-    setText("wifi", network.wifi || "ready");
-    setText("ip", (network.addresses && network.addresses[0]) || "--");
-    setText("temp", data.cpu_temp == null ? "--" : data.cpu_temp + "°C");
-    setText("memory", data.memory ? Number(data.memory.percent || 0).toFixed(1) + "%" : "--");
-  } catch {
-    setText("service", "offline preview");
-    setText("eventLog", "local cinematic mode");
-    setText("wifi", "local");
-    setText("ip", "preview");
-    setText("temp", "42°C");
-    setText("memory", "36%");
-  }
-}
-
-function handleAction(action) {
-  if (action === "previous") showSlide(current - 1);
-  if (action === "next") showSlide(current + 1);
-  if (action === "refresh") {
-    refreshHardware();
-    refreshWeather();
-  }
-}
-
-document.querySelectorAll(".action").forEach(button => {
-  button.addEventListener("click", () => handleAction(button.dataset.action));
-});
-
-drawClock();
-showSlide(0);
-refreshHardware();
-refreshWeather();
-setInterval(drawClock, 1000);
-setInterval(refreshHardware, 5000);
-setInterval(() => {
-  if (slides.length && !paused) showSlide(current + 1);
-}, 2600);
-console.log("VibeBoard advanced preview ready", BUILD_ID, PROMPT);
-`;
-
-  return {
-    "index.html": index,
-    "style.css": style,
-    "app.js": app,
-  };
-}
-function advancedTemplateFilesV2(prompt, id, spec) {
-  const specialized = advancedTemplateFiles(prompt, id, spec);
-  if (specialized) {
-    if (spec.mode === "clock") {
-      specialized["index.html"] = specialized["index.html"]
-        .replaceAll("Neon Chrono", "Cyber Chrono")
-        .replace('data-action="previous">Prev</button>', 'data-action="refresh">Sync</button>')
-        .replace('data-action="next">Next</button>', 'data-action="refresh">Glow</button>');
-    }
-    if (spec.mode === "weather") {
-      specialized["index.html"] = specialized["index.html"]
-        .replace('data-action="previous">Prev</button>', 'data-action="refresh">Refresh</button>')
-        .replace('data-action="next">Next</button>', 'data-action="refresh">Sync</button>');
-    }
-    if (spec.mode === "carousel") {
-      specialized["index.html"] = specialized["index.html"]
-        .replace('class="gallery"', 'class="gallery carousel-stage"');
-    }
-    return specialized;
-  }
-
-  const titleByMode = {
-    assistant: "AI Mission Deck",
-    voice: "Voice Spectrum",
-    dashboard: "System Nebula",
-    timer: "Focus Reactor",
-    control: "Relay Command"
-  };
-  const chipsByMode = {
-    assistant: ["AI CORE", "LIVE MEMORY", "GPIO READY"],
-    voice: ["VOICE WAVE", "MIC INPUT", "AI REPLY"],
-    dashboard: ["SYSTEM BUS", "LIVE STATUS", "LINUX"],
-    timer: ["FOCUS LOOP", "COUNTDOWN", "PULSE"],
-    control: ["GPIO", "RELAY", "COMMAND"]
-  };
-  const title = titleByMode[spec.mode] || "AI Mission Deck";
-  const chips = chipsByMode[spec.mode] || chipsByMode.assistant;
-  const actions = (spec.actions || []).slice(0, 3);
-  while (actions.length < 3) actions.push({ id: actions.length ? "secondary" : "primary", label: actions.length ? "Pulse" : "Run" });
-  const widgetCards = spec.widgets.slice(0, 4).map(widget => (
-    `<article class="widget" data-widget="${htmlEscape(widget.id)}"><span>${htmlEscape(widget.label)}</span><strong id="${htmlEscape(widget.id)}">${htmlEscape(widget.value)}</strong><small>${htmlEscape(widget.hint)}</small></article>`
-  )).join("\n      ");
-  const actionButtons = actions.map(action => (
-    `<button class="action" type="button" data-action="${htmlEscape(action.id)}">${htmlEscape(action.label)}</button>`
-  )).join("\n          ");
-
-  const index = `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VibeBoard ${htmlEscape(title)}</title>
-  <link rel="stylesheet" href="./style.css?v=${id}">
-</head>
-<body>
-  <main class="screen mode-${htmlEscape(spec.mode)}" data-mode="${htmlEscape(spec.mode)}">
-    <div class="aurora" aria-hidden="true"></div>
-    <div class="scanline" aria-hidden="true"></div>
-    <div class="cityline" aria-hidden="true"></div>
-    <header class="hud">
-      <div>
-        <span id="date">480x360 RK3566 Linux kiosk</span>
-        <strong>${htmlEscape(title)}</strong>
-      </div>
-      <b id="service">Linux API --</b>
-    </header>
-    <section class="chips">
-      ${chips.map(chip => `<span>${htmlEscape(chip)}</span>`).join("\n      ")}
-    </section>
-    <section class="scene" aria-label="generated app scene">
-      <div class="scene-copy">
-        <span>${htmlEscape(spec.mode.toUpperCase())} SCENE</span>
-        <h1>${htmlEscape(spec.title)}</h1>
-        <p>${htmlEscape(spec.subtitle)}</p>
-      </div>
-      <div class="reactor" aria-hidden="true"><i></i><i></i><i></i></div>
-      <div class="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
-    </section>
-    <section class="widgets">
-      ${widgetCards}
-    </section>
-    <section class="actions">
-      <div>
-        ${actionButtons}
-      </div>
-      <small id="eventLog">hardware api waiting</small>
-    </section>
-    <footer><span id="clock">--:--</span><span>${id}</span></footer>
-  </main>
-  <script src="./app.js?v=${id}"></script>
-</body>
-</html>
-`;
-
-  const style = `:root {
-  color-scheme: dark;
-  --bg: #05030f;
-  --panel: rgba(8, 13, 34, .72);
-  --line: rgba(125, 249, 255, .26);
-  --text: #f8fbff;
-  --muted: #91a8c7;
-  --cyan: #2df8ff;
-  --pink: #ff2bd6;
-  --green: #43ff91;
-  --gold: #ffd166;
-}
-
-* { box-sizing: border-box; }
-
-html, body {
-  width: 480px;
-  height: 360px;
-  margin: 0;
-  overflow: hidden;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
-}
-
-button { font: inherit; }
-
-.screen {
-  position: relative;
-  width: 480px;
-  height: 360px;
-  display: grid;
-  grid-template-rows: 46px 28px 118px 78px 44px 18px;
-  gap: 7px;
-  padding: 10px;
-  overflow: hidden;
-  isolation: isolate;
-  background:
-    linear-gradient(rgba(125,249,255,.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,43,214,.06) 1px, transparent 1px),
-    radial-gradient(circle at 14% 18%, rgba(45,248,255,.32), transparent 24%),
-    radial-gradient(circle at 82% 18%, rgba(255,43,214,.27), transparent 25%),
-    radial-gradient(circle at 62% 88%, rgba(67,255,145,.14), transparent 26%),
-    linear-gradient(135deg, #070817 0%, #13051d 48%, #06111c 100%);
-  background-size: 28px 28px, 28px 28px, auto, auto, auto, auto;
-}
-
-.mode-dashboard {
-  background:
-    linear-gradient(rgba(255,209,102,.07) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(45,248,255,.06) 1px, transparent 1px),
-    radial-gradient(circle at 18% 24%, rgba(255,209,102,.34), transparent 25%),
-    radial-gradient(circle at 84% 72%, rgba(45,248,255,.24), transparent 28%),
-    linear-gradient(135deg, #08111d 0%, #1a1320 52%, #061922 100%);
-}
-
-.mode-control {
-  background:
-    linear-gradient(rgba(255,43,214,.08) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(67,255,145,.06) 1px, transparent 1px),
-    radial-gradient(circle at 18% 18%, rgba(255,43,214,.34), transparent 26%),
-    radial-gradient(circle at 82% 70%, rgba(67,255,145,.24), transparent 28%),
-    linear-gradient(135deg, #140612 0%, #061513 58%, #190918 100%);
-}
-
-.mode-timer {
-  background:
-    linear-gradient(rgba(167,139,250,.08) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(45,248,255,.06) 1px, transparent 1px),
-    radial-gradient(circle at 22% 20%, rgba(167,139,250,.36), transparent 26%),
-    radial-gradient(circle at 78% 76%, rgba(255,209,102,.2), transparent 28%),
-    linear-gradient(135deg, #10091e 0%, #071327 54%, #130f08 100%);
-}
-
-.mode-voice {
-  background:
-    linear-gradient(rgba(56,189,248,.07) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,43,214,.06) 1px, transparent 1px),
-    radial-gradient(circle at 20% 24%, rgba(56,189,248,.35), transparent 26%),
-    radial-gradient(circle at 80% 70%, rgba(255,43,214,.2), transparent 28%),
-    linear-gradient(135deg, #07111f 0%, #0c071b 58%, #061522 100%);
-}
-
-.aurora {
-  position: absolute;
-  inset: -80px;
-  z-index: -2;
-  opacity: .74;
-  background: conic-gradient(from 180deg, transparent, rgba(45,248,255,.32), rgba(255,43,214,.28), transparent, rgba(67,255,145,.22), transparent);
-  animation: drift 10s linear infinite;
-}
-
-.scanline {
-  position: absolute;
-  inset: 0;
-  z-index: 5;
-  pointer-events: none;
-  background: linear-gradient(transparent 0 48%, rgba(255,255,255,.14) 50%, transparent 52% 100%);
-  background-size: 100% 7px;
-  mix-blend-mode: overlay;
-  opacity: .26;
-}
-
-.cityline {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 38px;
-  z-index: -1;
-  height: 54px;
-  opacity: .42;
-  background:
-    linear-gradient(90deg, transparent 0 18px, rgba(45,248,255,.28) 18px 32px, transparent 32px 48px),
-    linear-gradient(180deg, transparent 0 22px, rgba(255,43,214,.2) 22px 54px);
-  background-size: 48px 54px, 100% 54px;
-  filter: drop-shadow(0 0 12px rgba(45,248,255,.5));
-}
-
-.hud {
-  min-width: 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.hud span,
-.chips span,
-.scene span,
-.scene p,
-.widget span,
-.widget small,
-.actions small,
-footer {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.1;
-  letter-spacing: 0;
-}
-
-.hud strong {
-  display: block;
-  margin-top: 3px;
-  overflow: hidden;
-  color: var(--cyan);
-  font-size: 21px;
-  line-height: 1;
-  text-shadow: 0 0 16px rgba(45,248,255,.75);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.hud b {
-  max-width: 178px;
-  min-height: 28px;
-  padding: 7px 9px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--cyan);
-  background: rgba(0,0,0,.22);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chips {
-  display: flex;
-  gap: 7px;
-  min-width: 0;
-}
-
-.chips span {
-  padding: 6px 9px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(255,255,255,.08);
-  color: inherit;
-  font-weight: 800;
-}
-
-.scene,
-.widget {
-  min-width: 0;
-  min-height: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 12px 28px rgba(0,0,0,.18);
-  backdrop-filter: blur(8px);
-}
-
-.scene {
-  position: relative;
-  display: grid;
-  grid-template-columns: 1fr 124px;
-  gap: 8px;
-  padding: 12px;
-  overflow: hidden;
-}
-
-.scene-copy {
-  min-width: 0;
-  z-index: 1;
-}
-
-h1 {
-  max-width: 276px;
-  margin: 8px 0 6px;
-  overflow: hidden;
-  color: var(--cyan);
-  font-size: 29px;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-shadow: 0 0 16px rgba(45,248,255,.68);
-}
-
-p {
-  display: -webkit-box;
-  max-width: 276px;
-  margin: 0;
-  overflow: hidden;
-  line-height: 1.35;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-}
-
-.reactor {
-  position: relative;
-  width: 106px;
-  height: 106px;
-  align-self: center;
-  justify-self: end;
-}
-
-.reactor i {
-  position: absolute;
-  inset: 0;
-  border: 2px solid rgba(45,248,255,.42);
-  border-radius: 50%;
-  box-shadow: 0 0 18px rgba(45,248,255,.36), inset 0 0 18px rgba(255,43,214,.22);
-  animation: orbit 4s linear infinite;
-}
-
-.reactor i:nth-child(2) {
-  inset: 16px;
-  border-color: rgba(255,43,214,.52);
-  animation-duration: 2.7s;
-  animation-direction: reverse;
-}
-
-.reactor i:nth-child(3) {
-  inset: 36px;
-  border-color: rgba(67,255,145,.52);
-  animation-duration: 1.8s;
-}
-
-.meter {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 10px;
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 6px;
-  height: 18px;
-}
-
-.meter i {
-  display: block;
-  border-radius: 4px;
-  background: linear-gradient(90deg, rgba(45,248,255,.62), rgba(255,43,214,.42));
-  transform-origin: bottom;
-  animation: meter 1.3s ease-in-out infinite;
-}
-
-.meter i:nth-child(2) { animation-delay: .16s; }
-.meter i:nth-child(3) { animation-delay: .31s; }
-.meter i:nth-child(4) { animation-delay: .47s; }
-.meter i:nth-child(5) { animation-delay: .62s; }
-
-.widgets {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 7px;
-}
-
-.widget {
-  padding: 8px;
-}
-
-.widget strong {
-  display: block;
-  margin: 7px 0 4px;
-  overflow: hidden;
-  color: var(--green);
-  font-size: 17px;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.widget small {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.actions {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  gap: 5px;
-}
-
-.actions div {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 7px;
-}
-
-.action {
-  min-width: 0;
-  height: 28px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  color: var(--text);
-  background: linear-gradient(135deg, rgba(45,248,255,.24), rgba(255,43,214,.2));
-  font-size: 11px;
-  font-weight: 900;
-}
-
-.action.active {
-  border-color: var(--green);
-  box-shadow: 0 0 16px rgba(67,255,145,.45);
-}
-
-.actions small,
-footer span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-footer {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-@keyframes drift {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes orbit {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes meter {
-  0%, 100% { transform: scaleY(.35); opacity: .58; }
-  50% { transform: scaleY(1); opacity: 1; }
-}
-`;
-
-  const app = `const SPEC = ${JSON.stringify(spec)};
-const PROMPT = SPEC.prompt;
-const BUILD_ID = ${JSON.stringify(id)};
-const el = id => document.getElementById(id);
-let secondsLeft = 25 * 60;
-let cycles = 0;
-
-window.VibeBoardHardware = {
-  async getStatus() {
-    const res = await fetch("/api/status", { cache: "no-store" });
-    if (!res.ok) throw new Error("status " + res.status);
-    return res.json();
-  },
-  async getProgramResult() {
-    const res = await fetch("./hardware-result.json", { cache: "no-store" });
-    if (!res.ok) throw new Error("program " + res.status);
-    return res.json();
-  },
-  async getSnapshot() {
-    const settled = await Promise.allSettled([this.getStatus(), this.getProgramResult()]);
-    return {
-      status: settled[0].status === "fulfilled" ? settled[0].value : null,
-      program: settled[1].status === "fulfilled" ? settled[1].value : null
-    };
-  },
-  audio: {
-    async status() {
-      const res = await fetch("/api/audio/status", { cache: "no-store" });
-      if (!res.ok) throw new Error("audio status " + res.status);
-      return res.json();
-    },
-    async play(options = {}) {
-      const res = await fetch("/api/audio/play", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio play " + res.status);
-      return res.json();
-    },
-    async record(options = {}) {
-      const res = await fetch("/api/audio/record", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio record " + res.status);
-      return res.json();
-    },
-    async stop(options = {}) {
-      const res = await fetch("/api/audio/stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio stop " + res.status);
-      return res.json();
-    }
-  }
-};
-
-function pad(value) {
-  return String(value).padStart(2, "0");
-}
-
-function setText(id, value) {
-  const node = el(id);
-  if (node) node.textContent = value == null || value === "" ? "--" : String(value);
-}
-
-function drawClock() {
-  const now = new Date();
-  setText("clock", pad(now.getHours()) + ":" + pad(now.getMinutes()));
-}
-
-function tickTimer() {
-  if (SPEC.mode !== "timer") return;
-  const minutes = Math.floor(secondsLeft / 60);
-  const seconds = secondsLeft % 60;
-  setText("remaining", pad(minutes) + ":" + pad(seconds));
-  setText("cycles", String(cycles));
-  secondsLeft -= 1;
-  if (secondsLeft < 0) {
-    cycles += 1;
-    secondsLeft = 25 * 60;
-  }
-}
-
-function animateVoice() {
-  if (SPEC.mode !== "voice") return;
-  const level = 34 + Math.round(Math.random() * 62);
-  setText("level", level + "%");
-  setText("transcript", level > 72 ? "捕捉到语音" : "监听中");
-  setText("response", level > 72 ? "准备回应" : "等待指令");
-}
-
-async function refreshHardware() {
-  try {
-    const snapshot = await window.VibeBoardHardware.getSnapshot();
-    const data = snapshot.status || {};
-    const program = snapshot.program || {};
-    const service = data.services || {};
-    const network = data.network || {};
-    setText("service", service.display || service.ssh || "Linux API ready");
-    setText("eventLog", program.runtime || ("build " + BUILD_ID.slice(0, 12)));
-    setText("wifi", network.wifi || "ready");
-    setText("ip", (network.addresses && network.addresses[0]) || "--");
-    setText("temp", data.cpu_temp == null ? "--" : data.cpu_temp + "°C");
-    setText("memory", data.memory ? Number(data.memory.percent || 0).toFixed(1) + "%" : "--");
-    setText("load", data.loadavg || "0.18");
-    setText("runtime", program.runtime || "executed");
-    setText("serviceState", service.display || "active");
-  } catch {
-    setText("service", "offline preview");
-    setText("eventLog", "local cinematic mode");
-    setText("wifi", "local");
-    setText("ip", "preview");
-    setText("temp", "42°C");
-    setText("memory", "36%");
-    setText("load", "0.18");
-    setText("runtime", "simulated");
-    setText("serviceState", "active");
-  }
-}
-
-async function handleAction(action, button) {
-  if (action === "primary") {
-    if (SPEC.mode === "voice") {
-      const result = await window.VibeBoardHardware.audio.record({ duration: 8 });
-      setText("level", result.mode === "offline-simulated" ? "simulated" : "recording");
-      setText("transcript", "录音中");
-      setText("eventLog", result.message || "microphone recording");
-    } else {
-      setText("eventLog", "command pulse accepted");
-      setText("switchA", "on");
-    }
-  }
-  if (action === "secondary") {
-    if (SPEC.mode === "voice") {
-      const result = await window.VibeBoardHardware.audio.stop();
-      setText("level", "ready");
-      setText("transcript", "录音已停止");
-      setText("eventLog", result.message || "audio stopped");
-    } else {
-      setText("eventLog", "secondary command toggled");
-      setText("switchB", "on");
-    }
-    if (SPEC.mode === "timer") {
-      secondsLeft = 25 * 60;
-      tickTimer();
-    }
-  }
-  if (action === "refresh") {
-    if (SPEC.mode === "voice") {
-      const result = await window.VibeBoardHardware.audio.play();
-      setText("response", result.message || "speaker playback");
-      setText("eventLog", result.mode === "offline-simulated" ? "simulated playback" : "speaker playback");
-    } else {
-      refreshHardware();
-    }
-  }
-  if (button) button.classList.toggle("active");
-}
-
-document.querySelectorAll(".action").forEach(button => {
-  button.addEventListener("click", () => handleAction(button.dataset.action, button));
-});
-
-drawClock();
-tickTimer();
-animateVoice();
-refreshHardware();
-setInterval(drawClock, 1000);
-setInterval(tickTimer, 1000);
-setInterval(animateVoice, 1300);
-setInterval(refreshHardware, 5000);
-console.log("VibeBoard advanced preview ready", BUILD_ID, PROMPT);
-`;
-
-  return {
-    "index.html": index,
-    "style.css": style,
-    "app.js": app
   };
 }
 
@@ -2943,1388 +1472,6 @@ async function generateFilesForPrompt(prompt, id, modelSettings = {}, history = 
   }
 }
 
-function generatedIndexV2(prompt, id, spec = createAppSpec(prompt, id)) {
-  if (spec.mode === "clock") {
-    return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VibeBoard Clock</title>
-  <link rel="stylesheet" href="./style.css?v=${id}">
-</head>
-<body>
-  <main class="screen clock-screen" data-mode="clock">
-    <section class="clock-face" aria-label="fullscreen clock">
-      <span id="date">--</span>
-      <strong id="time">--:--</strong>
-      <small id="seconds">--</small>
-    </section>
-    <footer>
-      <span id="service">Linux API --</span>
-      <span id="eventLog">waiting</span>
-      <button class="action" type="button" data-action="refresh">Sync</button>
-    </footer>
-  </main>
-  <script src="./app.js?v=${id}"></script>
-</body>
-</html>
-`;
-  }
-
-  if (spec.mode === "carousel") {
-    return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VibeBoard Carousel</title>
-  <link rel="stylesheet" href="./style.css?v=${id}">
-</head>
-<body>
-  <main class="screen carousel-screen" data-mode="carousel">
-    <section class="slide-stage" aria-label="image carousel">
-      <div class="slide active" data-slide="0"><span>01</span><strong>晨光</strong></div>
-      <div class="slide" data-slide="1"><span>02</span><strong>城市</strong></div>
-      <div class="slide" data-slide="2"><span>03</span><strong>山海</strong></div>
-      <div class="slide" data-slide="3"><span>04</span><strong>夜色</strong></div>
-    </section>
-    <section class="carousel-meta">
-      <div>
-        <span id="slide">1/4</span>
-        <strong id="caption">晨光</strong>
-      </div>
-      <small id="eventLog">auto playing</small>
-    </section>
-    <footer>
-      <button class="action" type="button" data-action="previous">Prev</button>
-      <span id="service">Linux API --</span>
-      <button class="action" type="button" data-action="next">Next</button>
-    </footer>
-  </main>
-  <script src="./app.js?v=${id}"></script>
-</body>
-</html>
-`;
-  }
-
-  if (spec.mode === "weather") {
-    return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VibeBoard App</title>
-  <link rel="stylesheet" href="./style.css?v=${id}">
-</head>
-<body>
-  <main class="screen" data-mode="assistant">
-    <header class="top">
-      <div>
-        <span id="date">--</span>
-        <strong>${htmlEscape(spec.title)}</strong>
-      </div>
-      <b id="service">同步中</b>
-    </header>
-
-    <section class="time-panel" aria-label="time">
-      <span id="time">--:--</span>
-      <small id="seconds">--</small>
-    </section>
-
-    <section class="weather-panel" aria-label="weather">
-      <div>
-        <span>今日天气</span>
-        <strong id="weatherText">天气同步中</strong>
-        <small id="weatherMeta">深圳</small>
-      </div>
-      <b id="weatherTemp">--°C</b>
-    </section>
-
-    <section class="status-grid">
-      <article><span>Wi-Fi</span><strong id="wifi">--</strong></article>
-      <article><span>板端温度</span><strong id="temp">--</strong></article>
-      <article><span>内存</span><strong id="memory">--</strong></article>
-      <article><span>IP</span><strong id="ip">--</strong></article>
-    </section>
-
-    <footer>
-      <button class="action" type="button" data-action="refresh">刷新</button>
-      <span id="eventLog">等待硬件 API</span>
-      <span>${id}</span>
-    </footer>
-  </main>
-  <script src="./app.js?v=${id}"></script>
-</body>
-</html>
-`;
-  }
-
-  const widgets = spec.widgets.map(widget => (
-    `<article class="widget" data-widget="${htmlEscape(widget.id)}"><span>${htmlEscape(widget.label)}</span><strong id="${htmlEscape(widget.id)}">${htmlEscape(widget.value)}</strong><small>${htmlEscape(widget.hint)}</small></article>`
-  )).join("\n      ");
-  const actions = spec.actions.map(action => (
-    `<button class="action" type="button" data-action="${htmlEscape(action.id)}">${htmlEscape(action.label)}</button>`
-  )).join("\n        ");
-
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VibeBoard App</title>
-  <link rel="stylesheet" href="./style.css?v=${id}">
-</head>
-<body>
-  <main class="screen" data-mode="${htmlEscape(spec.mode)}">
-    <header class="top">
-      <div>
-        <span id="date">--</span>
-        <strong id="time">--:--</strong>
-      </div>
-      <b>${htmlEscape(spec.mode)}</b>
-    </header>
-    <section class="hero">
-      <span>Generated Linux web app</span>
-      <h1>${htmlEscape(spec.title)}</h1>
-      <p>${htmlEscape(spec.subtitle)}</p>
-    </section>
-    <section class="widgets">
-      ${widgets}
-    </section>
-    <section class="actions">
-      <div>
-        ${actions}
-      </div>
-      <small id="eventLog">hardware api waiting</small>
-    </section>
-    <footer><span id="service">Linux API --</span><span>${id}</span></footer>
-  </main>
-  <script src="./app.js?v=${id}"></script>
-</body>
-</html>
-`;
-}
-
-function generatedStyleV2(prompt = "", id = "preview", spec = createAppSpec(prompt, id)) {
-  if (spec.mode === "clock") {
-    return `:root {
-  color-scheme: dark;
-  --bg: #05070b;
-  --panel: rgba(255, 255, 255, .08);
-  --line: rgba(255, 255, 255, .16);
-  --text: #f8fafc;
-  --muted: #94a3b8;
-  --accent: #38bdf8;
-}
-
-* { box-sizing: border-box; }
-
-html, body {
-  width: 480px;
-  height: 360px;
-  margin: 0;
-  overflow: hidden;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
-}
-
-button { font: inherit; }
-
-.screen {
-  width: 480px;
-  height: 360px;
-  display: grid;
-  grid-template-rows: 1fr 42px;
-  gap: 0;
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 22% 20%, rgba(56, 189, 248, .22), transparent 28%),
-    linear-gradient(135deg, #05070b 0%, #111827 52%, #020617 100%);
-}
-
-.clock-face {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: 42px 172px 48px;
-  align-content: center;
-  justify-items: center;
-  padding: 22px 18px 10px;
-}
-
-.clock-face span,
-.clock-face small,
-footer {
-  color: var(--muted);
-  font-size: 16px;
-  line-height: 1.2;
-  letter-spacing: 0;
-}
-
-.clock-face strong {
-  overflow: hidden;
-  max-width: 456px;
-  color: var(--text);
-  font-family: Consolas, "Segoe UI", monospace;
-  font-size: 118px;
-  font-weight: 900;
-  line-height: .92;
-  letter-spacing: 0;
-  text-align: center;
-  white-space: nowrap;
-}
-
-.clock-face small {
-  min-width: 78px;
-  padding: 6px 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--accent);
-  background: var(--panel);
-  font-family: Consolas, monospace;
-  font-size: 28px;
-  font-weight: 800;
-  text-align: center;
-}
-
-footer {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 150px 1fr 74px;
-  gap: 8px;
-  align-items: center;
-  padding: 7px 10px;
-  border-top: 1px solid var(--line);
-  background: rgba(2, 6, 23, .72);
-  white-space: nowrap;
-}
-
-footer span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.action {
-  min-width: 0;
-  height: 28px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  color: var(--text);
-  background: rgba(56, 189, 248, .16);
-  font-size: 12px;
-  font-weight: 800;
-}
-`;
-  }
-
-  if (spec.mode === "carousel") {
-    return `:root {
-  color-scheme: dark;
-  --bg: #111827;
-  --line: rgba(255, 255, 255, .18);
-  --text: #f8fafc;
-  --muted: #cbd5e1;
-  --accent: #fb7185;
-}
-
-* { box-sizing: border-box; }
-
-html, body {
-  width: 480px;
-  height: 360px;
-  margin: 0;
-  overflow: hidden;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
-}
-
-button { font: inherit; }
-
-.screen {
-  width: 480px;
-  height: 360px;
-  display: grid;
-  grid-template-rows: 248px 58px 54px;
-  overflow: hidden;
-  background: #111827;
-}
-
-.slide-stage {
-  position: relative;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  background: #0f172a;
-}
-
-.slide {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  opacity: 0;
-  transform: scale(1.02);
-  transition: opacity .45s ease, transform .45s ease;
-}
-
-.slide.active {
-  opacity: 1;
-  transform: scale(1);
-}
-
-.slide::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, .18), transparent 36%),
-    radial-gradient(circle at 20% 72%, rgba(255, 255, 255, .22), transparent 18%),
-    radial-gradient(circle at 78% 28%, rgba(255, 255, 255, .2), transparent 16%);
-}
-
-.slide[data-slide="0"] { background: linear-gradient(135deg, #0f766e, #f59e0b); }
-.slide[data-slide="1"] { background: linear-gradient(135deg, #1d4ed8, #7c3aed); }
-.slide[data-slide="2"] { background: linear-gradient(135deg, #166534, #0891b2); }
-.slide[data-slide="3"] { background: linear-gradient(135deg, #312e81, #be123c); }
-
-.slide span {
-  position: absolute;
-  top: 18px;
-  left: 20px;
-  color: rgba(255, 255, 255, .72);
-  font-family: Consolas, monospace;
-  font-size: 24px;
-  font-weight: 900;
-}
-
-.slide strong {
-  position: relative;
-  max-width: 420px;
-  overflow: hidden;
-  color: #ffffff;
-  font-size: 66px;
-  font-weight: 900;
-  line-height: 1;
-  letter-spacing: 0;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-shadow: 0 8px 20px rgba(0, 0, 0, .28);
-}
-
-.carousel-meta {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 1fr 160px;
-  gap: 10px;
-  align-items: center;
-  padding: 8px 12px;
-  border-top: 1px solid var(--line);
-  background: #111827;
-}
-
-.carousel-meta div,
-.carousel-meta small {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.carousel-meta span,
-.carousel-meta small,
-footer {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.2;
-}
-
-.carousel-meta strong {
-  display: block;
-  margin-top: 3px;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 23px;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-footer {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 86px 1fr 86px;
-  gap: 9px;
-  align-items: center;
-  padding: 10px 12px;
-  border-top: 1px solid var(--line);
-  background: #0f172a;
-  white-space: nowrap;
-}
-
-footer span {
-  min-width: 0;
-  overflow: hidden;
-  text-align: center;
-  text-overflow: ellipsis;
-}
-
-.action {
-  min-width: 0;
-  height: 32px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  color: #fff;
-  background: rgba(251, 113, 133, .28);
-  font-size: 12px;
-  font-weight: 850;
-}
-`;
-  }
-
-  if (spec.mode === "weather") {
-    return `:root {
-  color-scheme: light;
-  --bg: #ffffff;
-  --panel: #f2f7ff;
-  --panel-strong: #e5f0ff;
-  --line: #b8d4ff;
-  --text: #0757b8;
-  --muted: #3d78c5;
-  --accent: ${spec.accent};
-}
-
-* { box-sizing: border-box; }
-
-html, body {
-  width: 480px;
-  height: 360px;
-  margin: 0;
-  overflow: hidden;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
-}
-
-button { font: inherit; }
-
-.screen {
-  width: 480px;
-  height: 360px;
-  display: grid;
-  grid-template-rows: 44px 98px 82px 82px 30px;
-  gap: 7px;
-  padding: 10px;
-  background: var(--bg);
-}
-
-.top {
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-}
-
-.top span,
-.weather-panel span,
-.weather-panel small,
-.status-grid span,
-footer {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.2;
-}
-
-.top strong {
-  display: block;
-  margin-top: 2px;
-  color: var(--accent);
-  font-size: 22px;
-  line-height: 1;
-  letter-spacing: 0;
-}
-
-.top b {
-  max-width: 170px;
-  min-height: 26px;
-  padding: 6px 9px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--accent);
-  background: var(--panel);
-  font-size: 12px;
-  font-weight: 800;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.time-panel {
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel-strong);
-}
-
-.time-panel span {
-  color: var(--accent);
-  font-family: Consolas, "Segoe UI", monospace;
-  font-size: 70px;
-  font-weight: 900;
-  line-height: 1;
-  letter-spacing: 0;
-}
-
-.time-panel small {
-  color: var(--muted);
-  font-family: Consolas, monospace;
-  font-size: 24px;
-  font-weight: 800;
-}
-
-.weather-panel {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 1fr 136px;
-  gap: 8px;
-  align-items: stretch;
-}
-
-.weather-panel > div,
-.weather-panel > b,
-.status-grid article {
-  min-width: 0;
-  min-height: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-}
-
-.weather-panel > div {
-  padding: 10px 12px;
-}
-
-.weather-panel strong {
-  display: block;
-  margin: 4px 0;
-  overflow: hidden;
-  color: var(--accent);
-  font-size: 25px;
-  line-height: 1.05;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.weather-panel > b {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  color: var(--accent);
-  font-family: Consolas, monospace;
-  font-size: 31px;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.status-grid {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 7px;
-}
-
-.status-grid article {
-  padding: 8px;
-}
-
-.status-grid strong {
-  display: block;
-  margin-top: 6px;
-  overflow: hidden;
-  color: var(--accent);
-  font-size: 16px;
-  line-height: 1.05;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-footer {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 70px 1fr 132px;
-  gap: 7px;
-  align-items: center;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.action {
-  min-width: 0;
-  min-height: 28px;
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  color: #ffffff;
-  background: var(--accent);
-  font-size: 13px;
-  font-weight: 850;
-}
-
-footer span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-`;
-  }
-
-  return `:root {
-  color-scheme: dark;
-  --bg: #10161e;
-  --panel: rgba(255, 255, 255, .07);
-  --line: rgba(255, 255, 255, .14);
-  --text: #f8fafc;
-  --muted: #cbd5e1;
-  --accent: ${spec.accent};
-}
-
-* { box-sizing: border-box; }
-html, body {
-  width: 480px;
-  height: 360px;
-  margin: 0;
-  overflow: hidden;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
-}
-
-button { font: inherit; }
-
-.screen {
-  width: 480px;
-  height: 360px;
-  display: grid;
-  grid-template-rows: 48px 96px 112px 54px 24px;
-  gap: 6px;
-  padding: 10px;
-  background:
-    linear-gradient(145deg, rgba(34, 197, 94, .15), transparent 42%),
-    linear-gradient(330deg, rgba(56, 189, 248, .16), transparent 48%),
-    #10161e;
-}
-
-.top {
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-}
-
-.top span, .hero span, .widget span, .widget small, .actions small, footer {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.top strong {
-  display: block;
-  margin-top: 2px;
-  font-family: Consolas, monospace;
-  font-size: 32px;
-  line-height: .95;
-}
-
-.top b {
-  padding: 5px 8px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--text);
-  background: rgba(255, 255, 255, .08);
-  font-size: 12px;
-  text-transform: uppercase;
-}
-
-.hero, .widget {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-}
-
-.hero {
-  min-width: 0;
-  min-height: 0;
-  padding: 9px;
-}
-
-h1 {
-  margin: 4px 0 5px;
-  font-size: 22px;
-  line-height: 1.12;
-  letter-spacing: 0;
-}
-
-p {
-  margin: 0;
-  display: -webkit-box;
-  overflow: hidden;
-  color: #e2e8f0;
-  font-size: 13px;
-  line-height: 1.35;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.widgets {
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 7px;
-}
-
-.widget {
-  min-width: 0;
-  min-height: 0;
-  padding: 7px;
-}
-
-.widget strong {
-  display: block;
-  margin: 2px 0 1px;
-  overflow: hidden;
-  font-size: 17px;
-  line-height: 1.05;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.actions {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  gap: 5px;
-}
-
-.actions div {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-}
-
-.action {
-  min-width: 0;
-  min-height: 28px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  color: var(--text);
-  background: #0b1220;
-  font-weight: 750;
-  font-size: 12px;
-}
-
-.action.active {
-  border-color: var(--accent);
-  box-shadow: 0 0 14px rgba(56, 189, 248, .45);
-}
-
-.actions small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-footer {
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  overflow: hidden;
-  white-space: nowrap;
-}
-`;
-}
-
-function generatedAppV2(prompt, id, spec = createAppSpec(prompt, id)) {
-  const specJson = JSON.stringify(spec);
-  const idJson = JSON.stringify(id);
-  if (spec.mode === "clock") {
-    return `const SPEC = ${specJson};
-const PROMPT = SPEC.prompt;
-const BUILD_ID = ${idJson};
-const el = id => document.getElementById(id);
-
-window.VibeBoardHardware = {
-  async getStatus() {
-    const res = await fetch("/api/status", { cache: "no-store" });
-    if (!res.ok) throw new Error("status " + res.status);
-    return res.json();
-  },
-  async getProgramResult() {
-    const res = await fetch("./hardware-result.json", { cache: "no-store" });
-    if (!res.ok) throw new Error("program " + res.status);
-    return res.json();
-  },
-  async getSnapshot() {
-    const settled = await Promise.allSettled([this.getStatus(), this.getProgramResult()]);
-    return {
-      status: settled[0].status === "fulfilled" ? settled[0].value : null,
-      program: settled[1].status === "fulfilled" ? settled[1].value : null
-    };
-  },
-  audio: {
-    async status() {
-      const res = await fetch("/api/audio/status", { cache: "no-store" });
-      if (!res.ok) throw new Error("audio status " + res.status);
-      return res.json();
-    },
-    async play(options = {}) {
-      const res = await fetch("/api/audio/play", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio play " + res.status);
-      return res.json();
-    },
-    async record(options = {}) {
-      const res = await fetch("/api/audio/record", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio record " + res.status);
-      return res.json();
-    },
-    async stop(options = {}) {
-      const res = await fetch("/api/audio/stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio stop " + res.status);
-      return res.json();
-    }
-  }
-};
-
-function pad(value) {
-  return String(value).padStart(2, "0");
-}
-
-function setText(id, value) {
-  const node = el(id);
-  if (node) node.textContent = value == null || value === "" ? "--" : String(value);
-}
-
-function drawClock() {
-  const now = new Date();
-  setText("time", pad(now.getHours()) + ":" + pad(now.getMinutes()));
-  setText("seconds", pad(now.getSeconds()));
-  setText("date", now.toLocaleDateString("zh-CN", {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric"
-  }));
-}
-
-async function refresh() {
-  try {
-    const snapshot = await window.VibeBoardHardware.getSnapshot();
-    const data = snapshot.status || {};
-    const program = snapshot.program || {};
-    const serviceText = data.services ? "SSH " + (data.services.ssh || "--") + " / FRP " + (data.services.frpc || "--") : "Linux API ready";
-    setText("service", serviceText);
-    setText("eventLog", program.runtime || "clock synced");
-  } catch (error) {
-    setText("service", "Linux API retrying");
-    setText("eventLog", "offline clock");
-  }
-}
-
-document.querySelectorAll(".action").forEach(button => {
-  button.addEventListener("click", refresh);
-});
-
-drawClock();
-refresh();
-setInterval(drawClock, 1000);
-setInterval(refresh, 5000);
-console.log("VibeBoard preview ready", BUILD_ID, PROMPT);
-`;
-  }
-
-  if (spec.mode === "carousel") {
-    return `const SPEC = ${specJson};
-const PROMPT = SPEC.prompt;
-const BUILD_ID = ${idJson};
-const el = id => document.getElementById(id);
-const slides = Array.from(document.querySelectorAll(".slide"));
-const captions = ["晨光", "城市", "山海", "夜色"];
-let current = 0;
-
-window.VibeBoardHardware = {
-  async getStatus() {
-    const res = await fetch("/api/status", { cache: "no-store" });
-    if (!res.ok) throw new Error("status " + res.status);
-    return res.json();
-  },
-  async getProgramResult() {
-    const res = await fetch("./hardware-result.json", { cache: "no-store" });
-    if (!res.ok) throw new Error("program " + res.status);
-    return res.json();
-  },
-  async getSnapshot() {
-    const settled = await Promise.allSettled([this.getStatus(), this.getProgramResult()]);
-    return {
-      status: settled[0].status === "fulfilled" ? settled[0].value : null,
-      program: settled[1].status === "fulfilled" ? settled[1].value : null
-    };
-  },
-  audio: {
-    async status() {
-      const res = await fetch("/api/audio/status", { cache: "no-store" });
-      if (!res.ok) throw new Error("audio status " + res.status);
-      return res.json();
-    },
-    async play(options = {}) {
-      const res = await fetch("/api/audio/play", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio play " + res.status);
-      return res.json();
-    },
-    async record(options = {}) {
-      const res = await fetch("/api/audio/record", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio record " + res.status);
-      return res.json();
-    },
-    async stop(options = {}) {
-      const res = await fetch("/api/audio/stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options)
-      });
-      if (!res.ok) throw new Error("audio stop " + res.status);
-      return res.json();
-    }
-  }
-};
-
-function setText(id, value) {
-  const node = el(id);
-  if (node) node.textContent = value == null || value === "" ? "--" : String(value);
-}
-
-function showSlide(index) {
-  if (!slides.length) return;
-  current = (index + slides.length) % slides.length;
-  slides.forEach((slide, idx) => slide.classList.toggle("active", idx === current));
-  setText("slide", String(current + 1) + "/" + String(slides.length));
-  setText("caption", captions[current] || "Slide " + String(current + 1));
-}
-
-async function refresh() {
-  try {
-    const snapshot = await window.VibeBoardHardware.getSnapshot();
-    const data = snapshot.status || {};
-    const program = snapshot.program || {};
-    const serviceText = data.services ? "SSH " + (data.services.ssh || "--") : "Linux API ready";
-    setText("service", serviceText);
-    setText("eventLog", "build " + (program.build_id || BUILD_ID).slice(0, 10));
-  } catch (error) {
-    setText("service", "Linux API retrying");
-    setText("eventLog", "local slideshow");
-  }
-}
-
-function handleAction(action) {
-  if (action === "previous") showSlide(current - 1);
-  if (action === "next") showSlide(current + 1);
-  if (action === "refresh") refresh();
-}
-
-document.querySelectorAll(".action").forEach(button => {
-  button.addEventListener("click", () => handleAction(button.dataset.action));
-});
-
-showSlide(0);
-refresh();
-setInterval(() => showSlide(current + 1), 3000);
-setInterval(refresh, 5000);
-console.log("VibeBoard preview ready", BUILD_ID, PROMPT);
-`;
-  }
-
-  if (spec.mode === "weather") {
-    return `const SPEC = ${specJson};
-const PROMPT = SPEC.prompt;
-const BUILD_ID = ${idJson};
-const el = id => document.getElementById(id);
-
-window.VibeBoardHardware = {
-  async getStatus() {
-    const res = await fetch("/api/status", { cache: "no-store" });
-    if (!res.ok) throw new Error("status " + res.status);
-    return res.json();
-  },
-  async getProgramResult() {
-    const res = await fetch("./hardware-result.json", { cache: "no-store" });
-    if (!res.ok) throw new Error("program " + res.status);
-    return res.json();
-  },
-  async getSnapshot() {
-    const settled = await Promise.allSettled([this.getStatus(), this.getProgramResult()]);
-    return {
-      status: settled[0].status === "fulfilled" ? settled[0].value : null,
-      program: settled[1].status === "fulfilled" ? settled[1].value : null
-    };
-  }
-};
-
-function pad(value) {
-  return String(value).padStart(2, "0");
-}
-
-function setText(id, value) {
-  const node = el(id);
-  if (node) node.textContent = value == null || value === "" ? "--" : String(value);
-}
-
-function drawClock() {
-  const now = new Date();
-  setText("time", pad(now.getHours()) + ":" + pad(now.getMinutes()));
-  setText("seconds", pad(now.getSeconds()));
-  setText("date", now.toLocaleDateString("zh-CN", {
-    weekday: "long",
-    month: "long",
-    day: "numeric"
-  }));
-}
-
-const weatherCodeText = {
-  0: "晴",
-  1: "大部晴朗",
-  2: "局部多云",
-  3: "阴",
-  45: "有雾",
-  48: "雾凇",
-  51: "小毛毛雨",
-  53: "毛毛雨",
-  55: "密集毛毛雨",
-  61: "小雨",
-  63: "中雨",
-  65: "大雨",
-  71: "小雪",
-  73: "中雪",
-  75: "大雪",
-  80: "阵雨",
-  81: "强阵雨",
-  82: "暴阵雨",
-  95: "雷雨"
-};
-
-async function refreshWeather() {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 4000);
-  setText("weatherText", "大部晴朗");
-  setText("weatherTemp", "32°C");
-  setText("weatherMeta", "深圳参考天气");
-  try {
-    const url = "https://api.open-meteo.com/v1/forecast?latitude=22.5431&longitude=114.0579&current=temperature_2m,weather_code&timezone=Asia%2FShanghai";
-    const res = await fetch(url, { cache: "no-store", signal: controller.signal });
-    if (!res.ok) throw new Error("weather " + res.status);
-    const data = await res.json();
-    const current = data.current || {};
-    const code = Number(current.weather_code);
-    const temp = Number(current.temperature_2m);
-    setText("weatherText", weatherCodeText[code] || "天气已同步");
-    setText("weatherTemp", Number.isFinite(temp) ? Math.round(temp) + "°C" : "--°C");
-    setText("weatherMeta", "深圳实时天气");
-  } catch (error) {
-    setText("weatherText", "大部晴朗");
-    setText("weatherTemp", "32°C");
-    setText("weatherMeta", "深圳参考天气");
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function refreshHardware() {
-  try {
-    const snapshot = await window.VibeBoardHardware.getSnapshot();
-    const data = snapshot.status || {};
-    const program = snapshot.program || {};
-    const ip = (data.network && data.network.addresses && data.network.addresses[0]) || "--";
-    setText("wifi", (data.network && data.network.wifi) || "未连接");
-    setText("ip", ip);
-    setText("temp", data.cpu_temp == null ? "--" : data.cpu_temp + "°C");
-    setText("memory", data.memory ? Number(data.memory.percent || 0).toFixed(1) + "%" : "--");
-    setText("service", data.services && data.services.display || "在线");
-    setText("eventLog", "API " + (program.runtime || "ready"));
-  } catch (error) {
-    setText("service", "重连中");
-    setText("eventLog", "硬件 API 重试中");
-    setText("ip", "waiting");
-  }
-}
-
-async function refreshAll() {
-  await Promise.allSettled([refreshWeather(), refreshHardware()]);
-}
-
-document.querySelectorAll(".action").forEach(button => {
-  button.addEventListener("click", refreshAll);
-});
-
-drawClock();
-refreshAll();
-setInterval(drawClock, 1000);
-setInterval(refreshHardware, 5000);
-setInterval(refreshWeather, 600000);
-console.log("VibeBoard preview ready", BUILD_ID, PROMPT);
-`;
-  }
-
-  return `const SPEC = ${specJson};
-const PROMPT = SPEC.prompt;
-const BUILD_ID = ${idJson};
-const el = id => document.getElementById(id);
-const state = { tick: 0, activeA: false, activeB: false, running: false, seconds: 1500, cycles: 0 };
-
-window.VibeBoardHardware = {
-  async getStatus() {
-    const res = await fetch("/api/status", { cache: "no-store" });
-    if (!res.ok) throw new Error("status " + res.status);
-    return res.json();
-  },
-  async getProgramResult() {
-    const res = await fetch("./hardware-result.json", { cache: "no-store" });
-    if (!res.ok) throw new Error("program " + res.status);
-    return res.json();
-  },
-  async getSnapshot() {
-    const settled = await Promise.allSettled([this.getStatus(), this.getProgramResult()]);
-    return {
-      status: settled[0].status === "fulfilled" ? settled[0].value : null,
-      program: settled[1].status === "fulfilled" ? settled[1].value : null
-    };
-  }
-};
-
-function pad(value) {
-  return String(value).padStart(2, "0");
-}
-
-function setText(id, value) {
-  const node = el(id);
-  if (node) node.textContent = value == null || value === "" ? "--" : String(value);
-}
-
-function drawClock() {
-  const now = new Date();
-  setText("time", pad(now.getHours()) + ":" + pad(now.getMinutes()));
-  setText("date", now.toLocaleDateString("zh-CN", {
-    weekday: "long",
-    month: "long",
-    day: "numeric"
-  }));
-}
-
-function renderMode() {
-  if (SPEC.mode === "timer") {
-    if (state.running && state.seconds > 0) state.seconds -= 1;
-    const minutes = Math.floor(state.seconds / 60);
-    const seconds = state.seconds % 60;
-    setText("remaining", pad(minutes) + ":" + pad(seconds));
-    setText("cycles", state.cycles);
-  }
-  if (SPEC.mode === "voice") {
-    setText("level", state.running ? "listening" : "ready");
-    setText("transcript", state.running ? "capturing..." : "tap start");
-    setText("response", state.tick % 2 ? "hardware online" : "waiting");
-  }
-  if (SPEC.mode === "control") {
-    setText("switchA", state.activeA ? "on" : "off");
-    setText("switchB", state.activeB ? "on" : "off");
-  }
-}
-
-async function refresh() {
-  try {
-    const snapshot = await window.VibeBoardHardware.getSnapshot();
-    const data = snapshot.status || {};
-    const program = snapshot.program || {};
-    const ip = (data.network && data.network.addresses && data.network.addresses[0]) || "--";
-    setText("wifi", (data.network && data.network.wifi) || "offline");
-    setText("ip", ip);
-    setText("temp", data.cpu_temp == null ? "--" : data.cpu_temp + "°C");
-    setText("memory", data.memory ? Number(data.memory.percent || 0).toFixed(1) + "%" : "--");
-    setText("runtime", program.runtime || "waiting");
-    setText("load", program.loadavg || "--");
-    setText("serviceState", data.services && data.services.display || "--");
-    setText("eventLog", "api ok " + new Date().toLocaleTimeString("zh-CN", { hour12: false }));
-    const serviceText = data.services ? "SSH " + (data.services.ssh || "--") + " / FRP " + (data.services.frpc || "--") : "Linux API ready";
-    setText("service", serviceText);
-  } catch (error) {
-    setText("eventLog", "hardware api retrying");
-    setText("ip", "waiting");
-  }
-}
-
-function handleAction(action, button) {
-  if (action === "refresh") refresh();
-  if (action === "primary") {
-    if (SPEC.mode === "timer") state.running = !state.running;
-    else if (SPEC.mode === "control") state.activeA = !state.activeA;
-    else state.running = !state.running;
-  }
-  if (action === "secondary") {
-    if (SPEC.mode === "timer") { state.cycles += 1; state.seconds = 1500; }
-    else if (SPEC.mode === "control") state.activeB = !state.activeB;
-    else state.tick += 1;
-  }
-  if (button) button.classList.toggle("active");
-  renderMode();
-}
-
-drawClock();
-refresh();
-renderMode();
-document.querySelectorAll(".action").forEach(button => {
-  button.addEventListener("click", () => handleAction(button.dataset.action, button));
-});
-setInterval(drawClock, 1000);
-setInterval(() => { state.tick += 1; renderMode(); }, 1000);
-setInterval(refresh, 5000);
-console.log("VibeBoard preview ready", BUILD_ID, PROMPT);
-`;
-}
-
-function generatedHardwareAppV2(prompt, id, spec = createAppSpec(prompt, id)) {
-  const promptJson = JSON.stringify(prompt);
-  const idJson = JSON.stringify(id);
-  const specJson = JSON.stringify(spec);
-  return `#!/usr/bin/env python3
-import glob
-import json
-import os
-import platform
-import shutil
-import socket
-import sys
-import time
-
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except AttributeError:
-    pass
-
-BUILD_ID = ${idJson}
-PROMPT = ${promptJson}
-SPEC = ${specJson}
-
-def read_first(path, default=""):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.readline().strip()
-    except OSError:
-        return default
-
-def cpu_temp_c():
-    raw = read_first("/sys/class/thermal/thermal_zone0/temp")
-    try:
-        value = float(raw)
-        return round(value / 1000, 1) if value > 200 else round(value, 1)
-    except ValueError:
-        return None
-
-def mem_available_kb():
-    try:
-        with open("/proc/meminfo", "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1])
-    except OSError:
-        pass
-    return None
-
-def network_interfaces():
-    items = []
-    for path in glob.glob("/sys/class/net/*/operstate"):
-        name = path.split("/")[-2]
-        state = read_first(path, "unknown")
-        if name != "lo":
-            items.append({"name": name, "state": state})
-    return items
-
-def disk_percent():
-    try:
-        usage = shutil.disk_usage("/")
-        return round((usage.used / usage.total) * 100, 1)
-    except OSError:
-        return None
-
-result = {
-    "app": "vibeboard-hardware-app",
-    "build_id": BUILD_ID,
-    "compile": "py_compile_ok",
-    "runtime": "executed_on_board",
-    "prompt": PROMPT,
-    "spec": SPEC,
-    "hostname": socket.gethostname(),
-    "platform": platform.platform(),
-    "time": int(time.time()),
-    "cpu_temp_c": cpu_temp_c(),
-    "mem_available_kb": mem_available_kb(),
-    "disk_percent": disk_percent(),
-    "network": network_interfaces(),
-    "loadavg": read_first("/proc/loadavg"),
-    "cwd": os.getcwd(),
-    "available_apis": ["/api/status", "./hardware-result.json", "/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"]
-}
-
-print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-`;
-}
-
-function generatedManifestV2(prompt, id, spec = createAppSpec(prompt, id), extra = {}) {
-  return {
-    id,
-    prompt: spec.prompt || prompt,
-    generator: "vibeboard-web-coding-v2",
-    mode: spec.mode,
-    title: spec.title,
-    target: spec.target,
-    hardwareApi: spec.hardwareApi,
-    files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"],
-    createdAt: new Date().toISOString(),
-    ...extra
-  };
-}
-
 function generatedIndex(prompt, id) {
   const safePrompt = htmlEscape(prompt).slice(0, 160);
   return `<!doctype html>
@@ -4346,7 +1493,7 @@ function generatedIndex(prompt, id) {
     </header>
     <section class="summary">
       <span>AI generated app</span>
-      <h1>小屏助手已部署</h1>
+      <h1>灏忓睆鍔╂墜宸查儴缃?/h1>
       <p>${safePrompt}</p>
     </section>
     <section class="grid">
@@ -4518,12 +1665,12 @@ async function refresh() {
   try {
     const res = await fetch("/api/status", { cache: "no-store" });
     const data = await res.json();
-    const ip = (data.network && data.network.addresses && data.network.addresses[0]) || "--";
-    el("wifi").textContent = (data.network && data.network.wifi) || "未连接";
+    const ip = (data.network && data.network.addresses && data.network.addresses[0]) || "--C";
+    el("wifi").textContent = (data.network && data.network.wifi) || "鏈繛鎺?;
     el("ip").textContent = ip;
-    el("temp").textContent = data.cpu_temp == null ? "--" : data.cpu_temp + "°C";
-    el("mem").textContent = data.memory ? Number(data.memory.percent || 0).toFixed(1) + "%" : "--";
-    el("service").textContent = "SSH " + (data.services && data.services.ssh || "--") + " / FRP " + (data.services && data.services.frpc || "--");
+    el("temp").textContent = data.cpu_temp == null ? "--C" : data.cpu_temp + "掳C";
+    el("mem").textContent = data.memory ? Number(data.memory.percent || 0).toFixed(1) + "%" : "--C";
+    el("service").textContent = "SSH " + (data.services && data.services.ssh || "--C") + " / FRP " + (data.services && data.services.frpc || "--C");
   } catch (error) {
     el("ip").textContent = "waiting";
   }
@@ -4607,27 +1754,27 @@ async function writeGenerated(prompt, modelSettings = {}, history = []) {
   }), AGENT_PHASES.CODE, {
     spec: buildInitialSpec(prompt, { requireBoard: Boolean(boardPassword) }),
   });
-  currentBuild = { id, prompt, files, dir: GENERATED_DIR, built: false, deployed: false, manifest, agentRun };
+  setCurrentBuild({ id, prompt, files, dir: GENERATED_DIR, built: false, deployed: false, manifest, agentRun });
   await buildCurrent();
   await appendServerLog("generate.template.done", { id, files: Object.keys(files) });
   return currentBuild;
 }
 
 async function loadGeneratedBuild() {
-  currentBuild = await loadGeneratedWorkspace(GENERATED_DIR, GENERATED_FILE_NAMES, {
+  setCurrentBuild(await loadGeneratedWorkspace(GENERATED_DIR, GENERATED_FILE_NAMES, {
     id: "preview",
-    prompt: "等待生成"
-  });
+    prompt: "Waiting for generation"
+  }));
   return currentBuild;
 }
 
 async function ensureInitialGenerated() {
-  currentBuild = await ensureGeneratedWorkspace({
+  setCurrentBuild(await ensureGeneratedWorkspace({
     dir: GENERATED_DIR,
     generatedFileNames: GENERATED_FILE_NAMES,
     fallbackSeed: {
       id: "preview",
-      prompt: "等待生成。这里会显示即将写入灰色版小电脑的同一份 480x360 小屏应用。"
+      prompt: "Waiting for generation. This preview will show the 480x360 VibeBoard kiosk app before it is deployed to hardware."
     },
     bootstrapFile: "index.html",
     makeFiles: ({ id, prompt }) => {
@@ -4640,170 +1787,38 @@ async function ensureInitialGenerated() {
         "manifest.json": JSON.stringify(generatedManifestV2(prompt, id, spec), null, 2)
       };
     }
-  });
+  }));
 }
 
+const buildRuntime = createBuildRuntime({
+  appendServerLog,
+  execFileP,
+  verifyAllLocal,
+  createAppSpec,
+  generatedManifest: generatedManifestV2,
+  getCurrentBuild: () => currentBuild,
+  getBoard: () => BOARD,
+  pythonBin: PYTHON_BIN,
+  nodeBin: process.execPath,
+});
+
+const previewRuntime = createPreviewRuntime({
+  rootDir: ROOT,
+  previewsDir: PREVIEWS_DIR,
+  port: PORT,
+  nodeBin: process.execPath,
+  appendServerLog,
+});
+
 async function buildCurrent() {
-  if (!currentBuild) throw new Error("No generated app. Generate first.");
-  await appendServerLog("build.start", { id: currentBuild.id });
-  const appFile = path.join(currentBuild.dir, "app.js");
-  const hardwareFile = path.join(currentBuild.dir, "hardware_app.py");
-  const hardwareResultFile = path.join(currentBuild.dir, "hardware-result.json");
-  const indexFile = path.join(currentBuild.dir, "index.html");
-  const styleFile = path.join(currentBuild.dir, "style.css");
-  const manifestFile = path.join(currentBuild.dir, "manifest.json");
-  try {
-    const indexSource = await fs.readFile(indexFile, "utf8");
-    const versionedIndex = withAssetVersion(indexSource, currentBuild.id);
-    if (versionedIndex !== indexSource) {
-      await fs.writeFile(indexFile, versionedIndex, "utf8");
-      currentBuild.files["index.html"] = versionedIndex;
-    }
-  } catch {}
-  await execFileP(process.execPath, ["--check", appFile], { timeout: 10000 });
-  const hardwareCompile = await execFileP(PYTHON_BIN, ["-m", "py_compile", hardwareFile], { timeout: 10000 });
-  const hardwareRun = await execFileP(PYTHON_BIN, [hardwareFile], { cwd: currentBuild.dir, timeout: 10000 });
-  const hardwareResult = parseJsonObject(hardwareRun.stdout, "hardware_app.py output");
-  if (!hardwareResult.build_id) throw new Error("hardware_app.py output is missing build_id.");
-  if (hardwareResult.build_id !== currentBuild.id) {
-    throw new Error(`hardware_app.py build_id mismatch: ${hardwareResult.build_id} !== ${currentBuild.id}`);
-  }
-  if (!hardwareResult.runtime) throw new Error("hardware_app.py output is missing runtime.");
-  const hardwareResultJson = JSON.stringify(hardwareResult, null, 2);
-  await fs.writeFile(hardwareResultFile, hardwareResultJson, "utf8");
-  delete currentBuild.files["hardware-result.json"];
-  for (const file of [indexFile, styleFile, appFile, hardwareFile, manifestFile]) {
-    const stat = await fs.stat(file);
-    if (!stat.size) throw new Error(`${path.basename(file)} is empty`);
-  }
-  const hardwareResultStat = await fs.stat(hardwareResultFile);
-  if (!hardwareResultStat.size) throw new Error("hardware-result.json is empty");
-  const indexSource = await fs.readFile(indexFile, "utf8");
-  const appSource = await fs.readFile(appFile, "utf8");
-  const hardwareSource = await fs.readFile(hardwareFile, "utf8");
-  validateGeneratedFileContracts({
-    "index.html": indexSource,
-    "app.js": appSource,
-    "hardware_app.py": hardwareSource
-  }, "Generated app");
-  let previousManifest = {};
-  try {
-    previousManifest = JSON.parse(await fs.readFile(manifestFile, "utf8"));
-  } catch {
-    previousManifest = {};
-  }
-  const spec = createAppSpec(currentBuild.prompt, currentBuild.id);
-  const manifest = buildCompileManifest({
-    generatedManifest: generatedManifestV2(currentBuild.prompt, currentBuild.id, spec),
-    previousManifest,
-    pythonBin: PYTHON_BIN,
-    hardwareCompileOutput: hardwareCompile,
-    targetStatic: BOARD.targetStatic
-  });
-  await fs.writeFile(path.join(currentBuild.dir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
-  currentBuild.files["manifest.json"] = JSON.stringify(manifest, null, 2);
-  currentBuild.manifest = manifest;
-  const verificationFiles = {
-    "index.html": await fs.readFile(indexFile, "utf8"),
-    "style.css": await fs.readFile(styleFile, "utf8"),
-    "app.js": await fs.readFile(appFile, "utf8"),
-    "hardware_app.py": await fs.readFile(hardwareFile, "utf8"),
-    "manifest.json": await fs.readFile(manifestFile, "utf8"),
-    "hardware-result.json": hardwareResultJson,
-  };
-  const verification = await verifyAllLocal(verificationFiles, {
-    dir: currentBuild.dir,
-    pythonBin: PYTHON_BIN,
-    timeoutMs: 15000,
-  });
-  if (!verification.ok) {
-    await appendServerLog("build.failed", {
-      id: currentBuild.id,
-      issues: (verification.issues || []).map(issue => ({ code: issue.code, message: issue.message })),
-    });
-    const detail = (verification.issues || [])
-      .slice(0, 5)
-      .map(issue => `${issue.code}: ${issue.message}`)
-      .join("; ");
-    throw new Error(`local verification failed: ${detail || verification.summary}`);
-  }
-  currentBuild.built = true;
-  currentBuild.buildEvidence = verification;
-  currentBuild.buildEvidence.phase = AGENT_PHASES.LOCAL_VERIFY;
-  currentBuild.buildEvidence.summary = "L0-L3 local verification passed";
-  currentBuild.buildEvidence.evidence = {
-    ...currentBuild.buildEvidence.evidence,
-    nodeCheck: "passed",
-    pythonCompile: "passed",
-    hardwareRun: "passed",
-    hardwareResult: "generated/current/hardware-result.json",
-    buildId: currentBuild.id,
-    pythonBin: PYTHON_BIN,
-  };
-  if (currentBuild.agentRun) {
-    currentBuild.agentRun = appendEvidence(currentBuild.agentRun, currentBuild.buildEvidence);
-  }
-  await appendServerLog("build.done", {
-    id: currentBuild.id,
-    phase: currentBuild.buildEvidence.phase,
-    issueCount: currentBuild.buildEvidence.issues?.length || 0,
-  });
-  return manifest;
+  return buildRuntime.buildCurrent();
 }
 
 // Capture preview screenshot and return verification report
 async function capturePreview() {
   if (!currentBuild) return { ok: false, error: "no build" };
   try {
-    await fs.mkdir(PREVIEWS_DIR, { recursive: true });
-    const previewPath = path.join(PREVIEWS_DIR, `${currentBuild.id}.png`);
-    const reportPath = path.join(PREVIEWS_DIR, `${currentBuild.id}.json`);
-    const scriptPath = path.join(ROOT, "screenshot.cjs");
-    const url = `http://127.0.0.1:${PORT}/generated/current/index.html`;
-
-    let stdout = "", stderr = "";
-    let exitCode = 0;
-    try {
-      await new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, [scriptPath, url, previewPath, reportPath], {
-          timeout: 25000,
-          stdio: ["ignore", "pipe", "pipe"]
-        });
-        child.stdout.on("data", d => stdout += d);
-        child.stderr.on("data", d => stderr += d);
-        child.on("close", code => { exitCode = code; resolve(); });
-        child.on("error", reject);
-      });
-    } catch (spawnErr) {
-      exitCode = 1;
-      stderr = spawnErr.message;
-    }
-
-    // Parse report from stdout
-    let report = { ok: false, consoleErrors: [], pageErrors: [], isBlank: false };
-    const reportMatch = stdout.match(/__REPORT__(.*)/);
-    if (reportMatch) {
-      try { report = JSON.parse(reportMatch[1]); } catch {}
-    }
-
-    // Also try reading from report file
-    if (!report.ok) {
-      try {
-        const fileReport = await fs.readFile(reportPath, "utf8");
-        report = JSON.parse(fileReport);
-      } catch {}
-    }
-
-    // Set preview path if screenshot exists
-    try {
-      const stat = await fs.stat(previewPath);
-      if (stat.size > 0) {
-        currentBuild.previewPath = previewPath;
-      }
-    } catch {}
-
-    report.screenshot = previewPath;
-    return report;
+    return await previewRuntime.ensureBuildPreview(currentBuild);
   } catch (err) {
     console.error("[capturePreview] Failed:", err.message);
     return { ok: false, error: err.message, consoleErrors: [], pageErrors: [], isBlank: false };
@@ -4889,7 +1904,7 @@ async function deployCurrent() {
       error
     });
   }
-  lastDeploy = {
+  setLastDeploy({
     id: currentBuild.id,
     backup,
     output,
@@ -4898,8 +1913,9 @@ async function deployCurrent() {
     hardwareResultRaw,
     programPath,
     compilePath,
+    intelligenceSummary: currentBuild?.intelligenceSummary || null,
     goldenLoop
-  };
+  });
   return lastDeploy;
 }
 
@@ -5028,9 +2044,8 @@ async function rawBoardStatus() {
 
 async function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const pathname = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
-  const filePath = path.normalize(path.join(ROOT, pathname));
-  if (!filePath.startsWith(ROOT)) {
+  const filePath = resolveStaticFilePath(url.pathname);
+  if (!filePath) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
@@ -5073,400 +2088,155 @@ async function readServerLogTail(limit = 80) {
 
 // ==================== Error Classification ====================
 function classifyError(error) {
-  const llmText = [
-    error?.type || "",
-    error?.code || "",
-    error?.status ? `HTTP ${error.status}` : "",
-    error?.endpoint || "",
-    error?.providerMessage || "",
-    error?.message || "",
-    error?.stdout || "",
-    error?.stderr || ""
-  ].join("\n");
-
-  if (/LLM_TIMEOUT|llm.*timeout|model.*timeout/i.test(llmText)) {
-    return { errorType: "llm_timeout", errorLabel: "AI model timeout" };
-  }
-  if (/not configured|no api key|NO_API_KEY/i.test(llmText)) {
-    return { errorType: "no_api_key", errorLabel: "AI model not configured" };
-  }
-  if (/LLM_CALL_FAILED|llm.*fail|model.*fail/i.test(llmText)) {
-    if (/HTTP\s*(?:401|403)|api key|invalid|unauthorized|forbidden|Authentication Fails|authentication failed|auth/i.test(llmText)) {
-      return { errorType: "llm_auth", errorLabel: "AI model authentication failed" };
-    }
-    return { errorType: "llm_failed", errorLabel: "AI model call failed" };
-  }
-
-  const text = [
-    error?.message || "",
-    error?.stdout || "",
-    error?.stderr || ""
-  ].join("\n");
-
-  if (/timed out|ETIMEDOUT|timeout/i.test(text)) {
-    return { errorType: "ssh_timeout", errorLabel: "设备连接超时" };
-  }
-  if (/ECONNREFUSED|Connection refused/i.test(text)) {
-    return { errorType: "connection_refused", errorLabel: "设备拒绝连接" };
-  }
-  if (/Unable to reach|NoValidConnectionsError|Unable to connect/i.test(text)) {
-    return { errorType: "board_offline", errorLabel: "设备离线" };
-  }
-  if (/Permission denied|Authentication failed|auth/i.test(text)) {
-    return { errorType: "auth_failed", errorLabel: "设备认证失败" };
+  const text = `${error?.message || ""}\n${error?.stack || ""}`;
+  if (/timed?out|timeout/i.test(text)) {
+    return { errorType: "timeout", errorLabel: "Operation timed out" };
   }
   if (/Connection reset|Connection closed|EOFError/i.test(text)) {
-    return { errorType: "connection_dropped", errorLabel: "设备连接中断" };
+    return { errorType: "connection_dropped", errorLabel: "Connection dropped" };
   }
   if (/mkdir|No space left|ENOSPC/i.test(text)) {
-    return { errorType: "deploy_mkdir", errorLabel: "设备存储空间不足" };
+    return { errorType: "deploy_mkdir", errorLabel: "Unable to create deploy directory" };
   }
   if (/scp|upload|copy/i.test(text) && /fail|error/i.test(text)) {
-    return { errorType: "deploy_copy", errorLabel: "文件写入设备失败" };
+    return { errorType: "deploy_copy", errorLabel: "File upload failed" };
   }
   if (/syntax.?error|SyntaxError|unexpected token/i.test(text)) {
-    return { errorType: "syntax_error", errorLabel: "代码语法错误" };
+    return { errorType: "syntax_error", errorLabel: "Generated code has a syntax error" };
   }
   if (/IndentationError|TabError|NameError|python/i.test(text) && /error/i.test(text)) {
-    return { errorType: "python_syntax", errorLabel: "硬件代码语法错误" };
+    return { errorType: "python_syntax", errorLabel: "Generated Python has an error" };
   }
   if (/systemctl|service.*restart|Failed to restart/i.test(text)) {
-    return { errorType: "deploy_service", errorLabel: "设备服务重启失败" };
+    return { errorType: "deploy_service", errorLabel: "Device service restart failed" };
   }
   if (/HTTP.*(?:502|503|504)|connection refused.*curl/i.test(text)) {
-    return { errorType: "deploy_http", errorLabel: "设备 HTTP 服务无响应" };
+    return { errorType: "deploy_http", errorLabel: "Device HTTP service did not respond" };
   }
   if (/not configured|no api key|NO_API_KEY/i.test(text)) {
-    return { errorType: "no_api_key", errorLabel: "未配置 AI 模型" };
+    return { errorType: "no_api_key", errorLabel: "AI provider is not configured" };
   }
   if (/LLM_CALL_FAILED|llm.*fail|model.*fail/i.test(text)) {
-    return { errorType: "llm_failed", errorLabel: "AI 模型调用失败" };
+    return { errorType: "llm_failed", errorLabel: "AI model call failed" };
   }
   if (/LLM_TIMEOUT|llm.*timeout|model.*timeout/i.test(text)) {
-    return { errorType: "llm_timeout", errorLabel: "AI 模型响应超时" };
+    return { errorType: "llm_timeout", errorLabel: "AI model call timed out" };
   }
-  if (/达到最大迭代次数|maximum iterations|max iterations|未确认完成|Agent 未生成完整项目/i.test(text)) {
-    return { errorType: "generate_failed", errorLabel: "AI 生成未完成" };
+  if (/maximum iterations|max iterations/i.test(text)) {
+    return { errorType: "generate_failed", errorLabel: "AI generation reached its iteration limit" };
   }
   if (/Prompt is required|empty.*prompt/i.test(text)) {
-    return { errorType: "empty_prompt", errorLabel: "请输入你的需求" };
+    return { errorType: "empty_prompt", errorLabel: "Prompt is required" };
   }
   if (/no code|has no code/i.test(text)) {
-    return { errorType: "no_code", errorLabel: "此应用为示例预览" };
+    return { errorType: "no_code", errorLabel: "Generated app has no code" };
   }
   if (/Deploy failed/i.test(text)) {
-    return { errorType: "deploy_failed", errorLabel: "部署失败" };
+    return { errorType: "deploy_failed", errorLabel: "Deploy failed" };
   }
-  return { errorType: "unknown", errorLabel: error?.message || "操作失败" };
+  return { errorType: "unknown", errorLabel: error?.message || "Unknown failure" };
 }
 
 function formatProjectMemoryForPrompt(memory = {}) {
   const normalized = normalizeProjectMemory(memory);
   const lines = [];
-  if (normalized.summary) lines.push(`摘要: ${normalized.summary}`);
-  if (normalized.goal) lines.push(`目标: ${normalized.goal}`);
-  if (normalized.requirements.length) lines.push(`功能需求:\n${normalized.requirements.map(item => `- ${item}`).join("\n")}`);
-  if (normalized.constraints.length) lines.push(`约束:\n${normalized.constraints.map(item => `- ${item}`).join("\n")}`);
-  if (normalized.decisions.length) lines.push(`已确认方案:\n${normalized.decisions.map(item => `- ${item}`).join("\n")}`);
-  if (normalized.open_questions.length) lines.push(`未解决问题:\n${normalized.open_questions.map(item => `- ${item}`).join("\n")}`);
+  if (normalized.summary) lines.push(`Summary: ${normalized.summary}`);
+  if (normalized.goal) lines.push(`Goal: ${normalized.goal}`);
+  if (normalized.requirements.length) lines.push(`Requirements:\n${normalized.requirements.map((item) => `- ${item}`).join("\n")}`);
+  if (normalized.constraints.length) lines.push(`Constraints:\n${normalized.constraints.map((item) => `- ${item}`).join("\n")}`);
+  if (normalized.decisions.length) lines.push(`Decisions:\n${normalized.decisions.map((item) => `- ${item}`).join("\n")}`);
+  if (normalized.open_questions.length) lines.push(`Open questions:\n${normalized.open_questions.map((item) => `- ${item}`).join("\n")}`);
   if (!lines.length) return "";
-  return `\n\n## 当前项目记忆\n${lines.join("\n")}`;
+  return `\n\n## Current project memory\n${lines.join("\n")}`;
 }
+const generateRuntime = createGenerateRuntime({
+  conversationStore,
+  memoryStore,
+  experienceStore,
+  runAgent,
+  appendServerLog,
+  normalizeGenerateHistory,
+  compressHistory,
+  structuredErrorFieldsForLog,
+  positiveInt,
+  env: process.env,
+  defaults: {
+    maxIterations: DEFAULT_GENERATE_AGENT_MAX_ITERATIONS,
+    maxVerificationAttempts: DEFAULT_GENERATE_AGENT_MAX_VERIFICATION_ATTEMPTS,
+    timeoutMs: DEFAULT_GENERATE_AGENT_TIMEOUT_MS,
+    llmTimeoutMs: DEFAULT_GENERATE_AGENT_LLM_TIMEOUT_MS,
+  },
+  getBoard: () => BOARD,
+  isBoardPasswordConfigured: () => Boolean(boardPassword),
+  ssh,
+  scp,
+  buildId,
+  createAppSpec,
+  generatedHardwareApp: generatedHardwareAppV2,
+  injectHardwareAppContracts: injectHardwareAppContractsV2,
+  generatedManifest: generatedManifestV2,
+  writeGenerated,
+  buildCurrent,
+  recordAgentLearning,
+  filesWithHardwareResult,
+  generatedDir: GENERATED_DIR,
+  getCurrentBuild: () => currentBuild,
+  setCurrentBuild,
+});
 
 async function runGenerateRequest(body = {}) {
-  const rawPrompt = String(body.prompt || "").trim();
-  if (!rawPrompt) throw new Error("Prompt is required.");
-  const rawHistory = Array.isArray(body.history) ? body.history : [];
-  const normalizedHistory = normalizeGenerateHistory(rawHistory);
-  const clarifyAnswers = Array.isArray(body.clarify_answers) ? body.clarify_answers : [];
-  const modelSettings = body.modelSettings || {};
-  const conversationId = String(body.conversation_id || "").trim();
-  const projectMemory = conversationId ? conversationStore.getProjectMemory(conversationId) : normalizeProjectMemory();
-  const conversationFiles = conversationId
-    ? conversationStore.loadConversationFiles(conversationId).files
-    : {};
-
-  const settings = normalizeModelSettings(modelSettings);
-  const history = await compressHistory(normalizedHistory, settings);
-  const userPreferences = memoryStore.getAll();
-  const prompt = buildRefinedPrompt(`${rawPrompt}${formatProjectMemoryForPrompt(projectMemory)}`, clarifyAnswers, userPreferences);
-
-  if (clarifyAnswers.length > 0) {
-    for (const ans of clarifyAnswers) {
-      if (ans.key && ans.answer) {
-        memoryStore.set(ans.key, ans.answer, {
-          label: ans.question || ans.key,
-          category: "clarify",
-          source: "auto_extract",
-        });
-      }
-    }
-  }
-
-  const fileStore = { ...conversationFiles };
-  const isEditing = Object.keys(fileStore).some(name => name !== "manifest.json");
-  const agentStartedAt = Date.now();
-  const agentSettings = {
-    ...settings,
-    maxIterations: positiveInt(process.env.VIBEBOARD_AGENT_MAX_ITERATIONS, DEFAULT_GENERATE_AGENT_MAX_ITERATIONS),
-    maxVerificationAttempts: positiveInt(process.env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS, DEFAULT_GENERATE_AGENT_MAX_VERIFICATION_ATTEMPTS),
-    timeoutMs: positiveInt(process.env.VIBEBOARD_AGENT_TIMEOUT_MS, DEFAULT_GENERATE_AGENT_TIMEOUT_MS),
-    llmTimeoutMs: positiveInt(process.env.VIBEBOARD_AGENT_LLM_TIMEOUT_MS, DEFAULT_GENERATE_AGENT_LLM_TIMEOUT_MS),
-  };
-
-  return runBuildGraph({
-    prompt,
-    rawPrompt,
-    settings,
-    agentSettings,
-    modelSettings,
-    fileStore,
-    history,
-    userPreferences,
-    conversationId,
-    isEditing,
-  }, {
-    agentGenerate: async () => {
-      console.log(`[generate] Agent starting (${isEditing ? "edit" : "new"} mode)`);
-      await appendServerLog("generate.agent.start", {
-        prompt: prompt.slice(0, 160),
-        isEditing,
-        fileCount: Object.keys(fileStore).length,
-        files: Object.keys(fileStore).slice(0, 12),
-        model: settings.model,
-        provider: settings.provider,
-        maxIterations: agentSettings.maxIterations,
-        maxVerificationAttempts: agentSettings.maxVerificationAttempts,
-        timeoutMs: agentSettings.timeoutMs,
-        llmTimeoutMs: agentSettings.llmTimeoutMs,
-      });
-
-      let agentResult;
-      try {
-        agentResult = await runAgent(agentSettings, prompt, fileStore, history, (action) => {
-          console.log(`[agent] ${action.tool}: ${action.args?.path || action.args?.query || action.args?.summary || ""}`);
-          appendServerLog("generate.agent.action", {
-            tool: action.tool,
-            path: action.args?.path || "",
-            query: action.args?.query || "",
-            summary: action.args?.summary || "",
-          }).catch(() => {});
-        }, userPreferences, experienceStore, { ssh, scp, board: BOARD });
-      } catch (agentErr) {
-        await appendServerLog("generate.agent.failed", {
-          error: agentErr.message,
-          ...structuredErrorFieldsForLog(agentErr),
-          durationMs: Date.now() - agentStartedAt,
-        });
-        throw agentErr;
-      }
-
-      if (!agentResult.success) {
-        await appendServerLog("generate.agent.failed", {
-          error: agentResult.summary || "Agent failed",
-          agentError: agentResult.error || null,
-          actionCount: agentResult.actions?.length || 0,
-          limit: agentResult.limit || "",
-          iteration: agentResult.iteration ?? null,
-          durationMs: Date.now() - agentStartedAt,
-        });
-        const error = new Error(agentResult.summary || "Agent failed");
-        if (agentResult.error && typeof agentResult.error === "object") {
-          Object.assign(error, agentResult.error);
-        }
-        throw error;
-      }
-
-      const id = buildId();
-      const agentFiles = agentResult.files;
-
-      if (!agentFiles["hardware_app.py"]) {
-        const spec = createAppSpec(prompt, id);
-        agentFiles["hardware_app.py"] = generatedHardwareAppV2(prompt, id, spec);
-      }
-      agentFiles["hardware_app.py"] = injectHardwareAppContractsV2(agentFiles["hardware_app.py"], id);
-
-      const spec = createAppSpec(prompt, id);
-      const manifest = generatedManifestV2(prompt, id, spec, {
-        generator: "vibeboard-agent-v1",
-        title: prompt.slice(0, 40),
-        source: "agent",
-        model: settings.model,
-        provider: settings.provider,
-        notes: agentResult.summary,
-        target: BOARD.targetStatic
-      });
-      agentFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
-
-      await writeGeneratedFiles(GENERATED_DIR, agentFiles);
-      let agentRun = transitionRun(createAgentRun({
-        prompt,
-        mode: "agent",
-        buildId: id,
-        hardwareMode: boardPassword ? "real" : "simulated",
-      }), AGENT_PHASES.CODE, {
-        spec: buildInitialSpec(prompt, { requireBoard: Boolean(boardPassword) }),
-      });
-      agentRun = appendEvidence(agentRun, {
-        phase: AGENT_PHASES.CODE,
-        ok: true,
-        summary: agentResult.summary || "agent code completed",
-        evidence: {
-          whatWorked: agentResult.whatWorked || [],
-          whatFailed: agentResult.whatFailed || [],
-          actionCount: agentResult.actions?.length || 0,
-        },
-        issues: [],
-      });
-      currentBuild = { id, prompt, files: agentFiles, dir: GENERATED_DIR, built: false, deployed: false, manifest, agentRun };
-
-      try {
-        await buildCurrent();
-      } catch (buildErr) {
-        console.error("[generate] Build error:", buildErr.message);
-        await appendServerLog("generate.agent.build_failed", { id, error: buildErr.message });
-        throw new Error(`Generated app failed validation: ${buildErr.message}`);
-      }
-
-      recordAgentLearning({
-        prompt,
-        agentResult,
-        verificationResult: currentBuild.buildEvidence || null,
-        success: true,
-      });
-
-      await appendServerLog("generate.agent.done", {
-        id,
-        actionCount: agentResult.actions?.length || 0,
-        durationMs: Date.now() - agentStartedAt,
-      });
-
-      return {
-        ok: true,
-        id,
-        files: agentFiles,
-        manifest,
-        source: "agent",
-        spec: currentBuild.agentRun?.spec || null,
-        evidence: formatRunEvidence(currentBuild.agentRun || {}),
-        buildEvidence: currentBuild.buildEvidence || null,
-        verificationMode: boardPassword ? "real-ready" : "local-simulated",
-        agentSummary: agentResult.summary,
-        agentActions: agentResult.actions.map(a => ({
-          tool: a.tool,
-          path: a.args?.path,
-          query: a.args?.query,
-          summary: a.args?.summary
-        }))
-      };
-    },
-    templateGenerate: async () => {
-      const build = await writeGenerated(prompt, modelSettings, []);
-      return {
-        ok: true,
-        id: build.id,
-        files: build.files,
-        manifest: build.manifest || null,
-        source: "template",
-        spec: build.agentRun?.spec || null,
-        evidence: formatRunEvidence(build.agentRun || {}),
-        buildEvidence: build.buildEvidence || null,
-        verificationMode: boardPassword ? "real-ready" : "local-simulated",
-        agentActions: [],
-        thinking: ""
-      };
-    },
-    saveSnapshot: async (state) => {
-      if (!conversationId) return;
-      try {
-        conversationStore.saveConversationFiles(
-          conversationId,
-          state.result.id,
-          await filesWithHardwareResult(state.result.files)
-        );
-      } catch (saveErr) {
-        await appendServerLog(`generate.${state.result.source}.conversation_save_failed`, {
-          id: state.result.id,
-          conversationId,
-          error: saveErr.message,
-        });
-      }
-    }
-  });
+  return generateRuntime.runGenerateRequest(body);
 }
 
-async function runAgentRequest(body = {}) {
-  const conversationId = String(body.conversation_id || "").trim();
-  const modelSettings = normalizeModelSettings(body.modelSettings || {});
-  const projectMemory = conversationId ? conversationStore.getProjectMemory(conversationId) : normalizeProjectMemory();
-  const rawMessages = Array.isArray(body.messages) ? body.messages : [];
+const marketRuntime = createMarketRuntime({
+  generatedFileNames: GENERATED_FILE_NAMES,
+  query,
+  run,
+  loadStaticMarketApps,
+  readStaticMarketCode,
+  mergeMarketApps,
+  readGeneratedFiles,
+  writeGeneratedFiles,
+  generatedDir: GENERATED_DIR,
+  getCurrentBuild: () => currentBuild,
+  capturePreview,
+  loadGeneratedBuild,
+  buildCurrent,
+  deployCurrent,
+  withDeployLock,
+  withDevice,
+  deviceIdFrom,
+  getBoard: () => BOARD,
+});
 
-  return runAgentGraph({
-    action: body.action,
-    messages: rawMessages,
-    conversationId,
-    projectMemory,
-    buildPrompt: body.build_prompt || body.prompt || "",
-  }, {
-    planMessage: async () => {
-      if (!modelSettings.enabled) {
-        return {
-          intent: "chat",
-          reply: "请先在右上角 Model 里配置可用的大模型。配置后我会先和你对话、梳理需求，只有你确认开始构建时才会生成代码。",
-          understanding: [],
-          planned_changes: [],
-          target: "chat",
-          ready_to_build: false,
-          build_prompt: "",
-          project_memory: projectMemory,
-        };
-      }
-
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 60000);
-      try {
-        const plan = await planChatWithModel(
-          modelSettings,
-          rawMessages,
-          memoryStore.getAll(),
-          projectMemory,
-          (url, options = {}) => fetch(url, { ...options, signal: controller.signal })
-        );
-        if (conversationId && plan.project_memory) {
-          conversationStore.setProjectMemory(conversationId, plan.project_memory);
-        }
-        return plan;
-      } finally {
-        clearTimeout(timeout);
-      }
-    },
-    build: async (_state, prompt) => runGenerateRequest({
-      prompt,
-      modelSettings: body.modelSettings || {},
-      conversation_id: conversationId,
-      clarify_answers: Array.isArray(body.clarify_answers) ? body.clarify_answers : [],
-      history: Array.isArray(body.history) ? body.history : rawMessages,
-    }),
-    reflect: async (state) => {
-      const build = state.build || {};
-      const issues = build.buildEvidence?.issues || [];
-      if (!issues.length) return;
-      state.learning = recordAgentLearning({
-        prompt: body.build_prompt || body.prompt || projectMemory.build_prompt || "",
-        agentResult: {
-          whatWorked: build.buildEvidence?.ok ? ["local verification passed"] : [],
-          whatFailed: issues.map(issue => issue.message || issue.code || String(issue)),
-        },
-        verificationResult: build.buildEvidence,
-        success: Boolean(build.buildEvidence?.ok),
-      });
-    },
-  });
-}
+const { runAgentRequest } = createAgentOrchestrator({
+  conversationStore,
+  memoryStore,
+  recordAgentLearning,
+  runGenerateRequest,
+});
 
 async function route(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (req.method === "POST" && url.pathname === "/chat/completions") {
+      const body = await readBody(req);
+      if (body?.model === "stub-model") {
+        const isAppraisal = body.messages?.some((message) => String(message.content || "").includes("affect appraisal engine"));
+        json(res, 200, {
+          choices: [{
+            message: {
+              content: isAppraisal
+                ? JSON.stringify({ warmth: 0.45, reward: 0.2, goalProgress: 0.5, soothing: 0.2, safety: 0.2, uncertainty: 0.05, controllability: 0.6 })
+                : "I heard you. The local stub model is responding.",
+            },
+          }],
+        });
+        return;
+      }
+    }    if (await digitalLifeRoutes.handle(req, res, url)) {
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/api/board") {
       const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
       const status = await withDevice(deviceId, () => fastBoardStatus());
@@ -5547,7 +2317,7 @@ async function route(req, res) {
       json(res, 200, { ok: true, goldenLoop });
       return;
     }
-    // --- Chat: 对话式规划（不生成代码） ---
+    // --- Chat: 瀵硅瘽寮忚鍒掞紙涓嶇敓鎴愪唬鐮侊級 ---
     if (req.method === "POST" && url.pathname === "/api/chat") {
       const body = await readBody(req);
       try {
@@ -5558,7 +2328,7 @@ async function route(req, res) {
       }
       return;
     }
-    // --- Clarify: 实时需求细化 ---
+    // --- Clarify: 瀹炴椂闇€姹傜粏鍖?---
     if (req.method === "POST" && url.pathname === "/api/clarify") {
       const body = await readBody(req);
       const prompt = String(body.prompt || "").trim();
@@ -5575,7 +2345,7 @@ async function route(req, res) {
       return;
     }
 
-    // --- Preferences: 用户偏好 CRUD ---
+    // --- Preferences: 鐢ㄦ埛鍋忓ソ CRUD ---
     if (req.method === "GET" && url.pathname === "/api/preferences") {
       json(res, 200, { ok: true, preferences: memoryStore.getAll() });
       return;
@@ -5596,7 +2366,7 @@ async function route(req, res) {
       return;
     }
 
-    // --- Experience: Agent 经验查询 ---
+    // --- Experience: Agent 缁忛獙鏌ヨ ---
     if (req.method === "GET" && url.pathname === "/api/experience") {
       const taskType = url.searchParams.get("type") || "general";
       const lessons = experienceStore.getLessons(taskType, 10);
@@ -5630,7 +2400,7 @@ async function route(req, res) {
       return;
     }
 
-    // --- Generate: AI 代码生成 ---
+    // --- Generate: AI 浠ｇ爜鐢熸垚 ---
     if (req.method === "POST" && url.pathname === "/api/generate") {
       const body = await readBody(req);
       json(res, 200, await runGenerateRequest(body || {}));
@@ -5645,6 +2415,7 @@ async function route(req, res) {
         summary: `${manifest.files.length} files`,
         manifest,
         buildEvidence: currentBuild?.buildEvidence || null,
+        intelligenceSummary: currentBuild?.intelligenceSummary || null,
         evidence: formatRunEvidence(currentBuild?.agentRun || {}),
       });
       return;
@@ -5657,7 +2428,7 @@ async function route(req, res) {
           if (!currentBuild) await loadGeneratedBuild();
           if (currentBuild && (!currentBuild.built || !currentBuild.buildEvidence)) await buildCurrent();
           const result = buildOfflineDeployResult();
-          lastDeploy = result;
+          setLastDeploy(result);
           await appendServerLog("deploy.skipped", { id: currentBuild?.id || "", mode: result.mode });
           json(res, 200, { ok: true, deviceId, ...result });
           return;
@@ -5736,7 +2507,9 @@ async function route(req, res) {
       const content = resolved.filename === "index.html"
         ? rewriteConversationPreviewHtml(files[resolved.filename], resolved.conversationId, buildId)
         : files[resolved.filename];
-      const body = Buffer.from(String(content || ""), "utf8");
+      const body = Buffer.isBuffer(content)
+        ? content
+        : Buffer.from(String(content || ""), "utf8");
       res.writeHead(200, {
         "Content-Type": responseContentType(resolved.filename),
         "Content-Length": body.length,
@@ -5766,62 +2539,32 @@ async function route(req, res) {
 
     // Market APIs
     if (req.method === "GET" && url.pathname === "/api/market") {
-      const dbApps = query("SELECT id, conversation_id, name, description, preview_url, author, downloads, created_at FROM market_apps ORDER BY created_at DESC")
-        .map(app => ({ ...app, source: "database" }));
-      const apps = mergeMarketApps(dbApps, await loadStaticMarketApps());
-      json(res, 200, { ok: true, apps });
+      json(res, 200, await marketRuntime.listApps());
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/market/publish") {
-      const body = await readBody(req);
-      const { conversation_id, name, description } = body;
-      if (!name) throw new Error("App name is required.");
-
-      // Get current generated code
-      let codeJson = "{}";
-      if (currentBuild && currentBuild.files) {
-        codeJson = JSON.stringify(currentBuild.files);
-      } else {
-        // Try to read from generated/current directory
-        try {
-          const files = await readGeneratedFiles(GENERATED_DIR, GENERATED_FILE_NAMES);
-          if (Object.keys(files).length > 0) {
-            codeJson = JSON.stringify(files);
-          }
-        } catch {}
+      try {
+        const body = await readBody(req);
+        json(res, 200, await marketRuntime.publishApp(body || {}));
+      } catch (publishErr) {
+        const classified = classifyError(publishErr);
+        json(res, publishErr.statusCode || 500, {
+          ok: false,
+          error: publishErr.message,
+          ...classified,
+          previewReport: publishErr.previewReport,
+        });
       }
-
-      // Get preview image if available
-      let preview_url = "";
-      if (currentBuild && currentBuild.previewPath) {
-        preview_url = `/api/previews/${currentBuild.id}.png`;
-      } else {
-        // Check if preview file exists on disk
-        const previewFile = path.join(PREVIEWS_DIR, `${currentBuild?.id || "unknown"}.png`);
-        try {
-          await fs.access(previewFile);
-          preview_url = `/api/previews/${currentBuild.id}.png`;
-        } catch {}
-      }
-      const id = randomUUID();
-      const author = "user";
-
-      run(
-        "INSERT INTO market_apps (id, conversation_id, name, description, code, preview_url, author) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [id, conversation_id || null, name, description || "", codeJson, preview_url, author]
-      );
-
-      json(res, 200, { ok: true, id });
       return;
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/market/") && !url.pathname.includes("/deploy")) {
       const appId = url.pathname.split("/")[3];
-      const apps = query("SELECT * FROM market_apps WHERE id = ?", [appId]);
-      if (apps.length === 0) {
-        json(res, 404, { ok: false, error: "App not found" });
-        return;
+      try {
+        json(res, 200, marketRuntime.getApp(appId));
+      } catch (marketErr) {
+        const classified = classifyError(marketErr);
+        json(res, marketErr.statusCode || 500, { ok: false, error: marketErr.message, ...classified });
       }
-      json(res, 200, { ok: true, app: apps[0] });
       return;
     }
     if (req.method === "POST" && url.pathname.startsWith("/api/market/") && url.pathname.endsWith("/deploy")) {
@@ -5829,66 +2572,7 @@ async function route(req, res) {
 
       try {
         const body = await readBody(req);
-        const deviceId = deviceIdFrom(body || {}, BOARD.id);
-        const result = await withDeployLock(async () => {
-          return withDevice(deviceId, async () => {
-            // Get app from market
-            const apps = query("SELECT * FROM market_apps WHERE id = ?", [appId]);
-            const isStaticApp = apps.length === 0;
-            if (isStaticApp) {
-              const staticApps = await loadStaticMarketApps();
-              if (!staticApps.some(app => app.id === appId)) {
-                const error = new Error("App not found");
-                error.statusCode = 404;
-                throw error;
-              }
-            }
-            if (apps.length === 0 && !isStaticApp) {
-              const error = new Error("App not found");
-              error.statusCode = 404;
-              throw error;
-            }
-
-            const app = apps[0] || null;
-            let codeFiles = {};
-            if (app) {
-              try {
-                codeFiles = JSON.parse(app.code || "{}");
-              } catch {}
-            } else {
-              codeFiles = await readStaticMarketCode(appId);
-            }
-
-            if (Object.keys(codeFiles).length === 0) {
-              const error = new Error("App has no code to deploy");
-              error.statusCode = 400;
-              throw error;
-            }
-
-            // Write code to generated/current directory
-            const generatedFiles = Object.fromEntries(Object.entries(codeFiles).filter(([filename]) => (
-              GENERATED_FILE_NAMES.includes(filename)
-            )));
-            await writeGeneratedFiles(GENERATED_DIR, generatedFiles);
-            await loadGeneratedBuild();
-            console.log("[marketDeploy] requested app:", appId, "loaded build:", currentBuild?.id, "device:", BOARD.id);
-
-            await buildCurrent();
-            const deployResult = await deployCurrent();
-
-            // Increment download count
-            if (app) run("UPDATE market_apps SET downloads = downloads + 1 WHERE id = ?", [appId]);
-
-            return deployResult;
-          });
-        });
-
-        json(res, 200, {
-          ok: true,
-          message: "App deployed successfully",
-          deviceId,
-          deployId: result.id
-        });
+        json(res, 200, await marketRuntime.deployApp(appId, body || {}));
       } catch (deployErr) {
         const classified = classifyError(deployErr);
         if (deployErr.statusCode) {
