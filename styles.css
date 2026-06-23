@@ -1814,6 +1814,13 @@ pre {
   color: var(--text, #e2e8f0);
 }
 
+.mode-boundary-note {
+  border-color: rgba(56, 189, 248, .18) !important;
+  background: rgba(56, 189, 248, .055) !important;
+  color: var(--text-2) !important;
+  font-size: 12px !important;
+}
+
 .build-confirmation {
   display: grid;
   gap: 10px;

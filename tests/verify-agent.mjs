@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import zlib from "node:zlib";
 import {
   AGENT_WRITABLE_FILE_NAMES,
   CONVERSATION_SNAPSHOT_FILE_NAMES,
@@ -141,6 +142,30 @@ print(json.dumps(payload))
       files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"],
     }, null, 2),
   };
+}
+
+function makeZip(entries = []) {
+  const chunks = [];
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const raw = Buffer.isBuffer(entry.content) ? entry.content : Buffer.from(String(entry.content || ""), "utf8");
+    const method = entry.method ?? 8;
+    const data = method === 0 ? raw : zlib.deflateRawSync(raw);
+    const header = Buffer.alloc(30);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(20, 4);
+    header.writeUInt16LE(0, 6);
+    header.writeUInt16LE(method, 8);
+    header.writeUInt16LE(0, 10);
+    header.writeUInt16LE(0, 12);
+    header.writeUInt32LE(0, 14);
+    header.writeUInt32LE(data.length, 18);
+    header.writeUInt32LE(raw.length, 22);
+    header.writeUInt16LE(name.length, 26);
+    header.writeUInt16LE(0, 28);
+    chunks.push(header, name, data);
+  }
+  return Buffer.concat(chunks);
 }
 
 function validGeneratedFilesWithAsset() {
@@ -1536,6 +1561,46 @@ await test("asset library store returns non-duplicated upload summary", async ()
   assert(store.listAssets("asset-summary-test").length === 1, "store should persist one asset");
 });
 
+await test("asset library expands ZIP bundles into analyzed assets", async () => {
+  const { normalizeIncomingAssets, formatAssetContext } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const zip = makeZip([
+    { name: "brief.txt", content: "品牌视觉 cyan 480x360 product screen" },
+    { name: "components/card.html", content: "<section><button>Start</button></section>" },
+    { name: "images/hero.png", content: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+  ]);
+  const result = normalizeIncomingAssets([
+    { name: "launch-pack.zip", mime: "application/zip", encoding: "base64", content: zip.toString("base64") },
+  ]);
+  const names = result.assets.map(asset => asset.name);
+
+  assert(result.rejected.length === 0, `expected zip to unpack cleanly, got ${JSON.stringify(result.rejected)}`);
+  assert(names.includes("launch-pack.zip"), "archive itself should be retained");
+  assert(names.includes("launch-pack/brief.txt"), `brief should be extracted, got ${names.join(",")}`);
+  assert(names.includes("launch-pack/components/card.html"), "nested component should be extracted");
+  assert(names.includes("launch-pack/images/hero.png"), "nested image should be extracted");
+  assert(result.assets.some(asset => asset.kind === "component" && asset.summary.signals.includes("Contains UI/component markup.")), "component signal should survive zip extraction");
+  const context = formatAssetContext(result.assets);
+  assert(context.includes("ZIP archive extracted 3 supported files"), "archive extraction should be visible to the agent");
+  assert(context.includes("launch-pack/components/card.html"), "agent context should include extracted file path");
+});
+
+await test("asset library rejects unsafe ZIP entry paths", async () => {
+  const { normalizeIncomingAssets } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const zip = makeZip([
+    { name: "../escape.txt", content: "escape" },
+    { name: "safe.txt", content: "ok" },
+  ]);
+  const result = normalizeIncomingAssets([
+    { name: "unsafe.zip", mime: "application/zip", encoding: "base64", content: zip.toString("base64") },
+  ]);
+  const names = result.assets.map(asset => asset.name);
+
+  assert(names.includes("unsafe.zip"), "archive itself should still be retained");
+  assert(names.includes("unsafe/safe.txt"), "safe entry should be extracted");
+  assert(!names.some(name => name.includes("escape")), `unsafe entry should not be accepted, got ${names.join(",")}`);
+  assert(result.rejected.some(item => item.error.includes("unsafe ZIP entry path")), `expected unsafe path rejection, got ${JSON.stringify(result.rejected)}`);
+});
+
 await test("chat planner prompt includes asset context and Codex hardware boundary", async () => {
   const { planChatWithModel } = await import(pathToFileURL(path.join(ROOT, "src", "chatPlanner.mjs")).href);
   let requestBody = null;
@@ -2018,6 +2083,61 @@ await test("agent orchestrator routes confirmed build through generator", async 
   assert(receivedBody?.prompt === "Build the confirmed village simulator.", "confirmed prompt should reach generator");
   assert(receivedBody?.conversation_id === "conv-agent-orchestrator", "conversation id should reach generator");
   assert(Array.isArray(receivedBody?.history) && receivedBody.history.length === 1, "history should reach generator");
+});
+
+await test("agent orchestrator exposes Codex hardware mode boundary", async () => {
+  const { createAgentOrchestrator } = await import(pathToFileURL(path.join(ROOT, "src", "agentOrchestrator.mjs")).href);
+  const orchestrator = createAgentOrchestrator({
+    conversationStore: {
+      getProjectMemory: () => ({ summary: "codex test" }),
+      setProjectMemory: () => {},
+    },
+    memoryStore: {
+      getAll: () => ({}),
+    },
+    runGenerateRequest: async () => ({ ok: true }),
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              intent: "clarify",
+              reply: "先确认展示重点。",
+              ready_to_build: false,
+              build_prompt: "",
+              quick_replies: [{ label: "主视觉", value: "优先主视觉。" }],
+              project_memory: {
+                summary: "codex test",
+                goal: "",
+                requirements: [],
+                constraints: [],
+                open_questions: [],
+                decisions: [],
+                build_prompt: "",
+              },
+            }),
+          },
+        }],
+      }),
+    }),
+  });
+
+  const result = await orchestrator.runAgentRequest({
+    action: "message",
+    agent_mode: "codex",
+    modelSettings: {
+      provider: "custom",
+      baseUrl: "http://planner.test",
+      apiKey: "test-key",
+      model: "mock-planner",
+    },
+    messages: [{ role: "user", content: "用 Codex 做小屏" }],
+  });
+
+  assert(result.agent_mode === "codex", `expected codex mode, got ${JSON.stringify(result)}`);
+  assert(result.mode_boundary?.scope?.includes("480x360"), "Codex boundary should mention hardware screen scope");
+  assert(result.mode_boundary?.disallowed?.some(item => item.includes("general desktop automation")), "Codex boundary should disallow unrelated automation");
 });
 
 await test("build registry tracks current and conversation builds", async () => {

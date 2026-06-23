@@ -1468,6 +1468,13 @@ function truncateButtonText(value, maxLength) {
   return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
+function renderModeBoundary(boundary = {}) {
+  if (!boundary || boundary.mode !== "codex") return;
+  const scope = boundary.scope || "VibeBoard hardware embedded design only.";
+  const body = addMarkdownMessage("agent", `Codex 硬件模式已启用：${scope}`);
+  body?.classList.add("mode-boundary-note");
+}
+
 function addBuildPromptAction(buildPrompt, plan = {}) {
   const prompt = String(buildPrompt || "").trim();
   if (!prompt) return;
@@ -1636,6 +1643,7 @@ async function handleChat(prompt) {
     const reply = result.reply || "抱歉，我暂时无法回应。";
     addMarkdownMessage("agent", reply);
     persistMessage("agent", reply, null, conversationId);
+    renderModeBoundary(result.mode_boundary);
 
     // 检测是否准备好构建
     if (result.ready_to_build) {
@@ -1723,6 +1731,7 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
 3. Local verification is checking contracts, syntax, hardware simulation, and 480x360 render
 4. Hardware write waits for your later deploy confirmation`);
     }
+    renderModeBoundary(gen.mode_boundary);
     addEvidenceCard(gen);
 
     if (!conversationId || conversationId === currentConversationId) {

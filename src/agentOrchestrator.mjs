@@ -26,6 +26,7 @@ export function createAgentOrchestrator({
       : "";
     const rawMessages = Array.isArray(body.messages) ? body.messages : [];
     const agentMode = normalizeAgentMode(body.agent_mode || body.agentMode);
+    const modeBoundary = agentModeBoundary(agentMode);
 
     return runAgentGraph({
       action: body.action,
@@ -34,6 +35,7 @@ export function createAgentOrchestrator({
       projectMemory,
       buildPrompt: body.build_prompt || body.prompt || "",
       agentMode,
+      modeBoundary,
     }, {
       planMessage: async () => {
         if (!modelSettings.enabled) {
@@ -48,6 +50,7 @@ export function createAgentOrchestrator({
             project_memory: projectMemory,
             quick_replies: [],
             agent_mode: agentMode,
+            mode_boundary: modeBoundary,
           };
         }
 
@@ -94,7 +97,11 @@ export function createAgentOrchestrator({
           success: Boolean(build.buildEvidence?.ok),
         });
       },
-    });
+    }).then(result => ({
+      ...result,
+      agent_mode: agentMode,
+      mode_boundary: modeBoundary,
+    }));
   }
 
   return { runAgentRequest };
@@ -104,4 +111,26 @@ function normalizeAgentMode(value) {
   const mode = String(value || "vibeboard").trim();
   if (mode === "codex") return "codex";
   return "vibeboard";
+}
+
+function agentModeBoundary(mode = "vibeboard") {
+  if (mode === "codex") {
+    return {
+      mode,
+      label: "Codex hardware embedded design mode",
+      scope: "VibeBoard 480x360 hardware UI design, generation, local verification, and explicit deploy confirmation only.",
+      disallowed: [
+        "general desktop automation",
+        "account, payment, trading, or unrelated web tasks",
+        "filesystem operations outside VibeBoard hardware app generation",
+        "automatic hardware writes without deploy confirmation",
+      ],
+    };
+  }
+  return {
+    mode: "vibeboard",
+    label: "VibeBoard self-developed Agent mode",
+    scope: "Local VibeBoard planner/generator flow with hardware contracts and explicit deploy confirmation.",
+    disallowed: ["automatic hardware writes without deploy confirmation"],
+  };
 }

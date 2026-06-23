@@ -1,11 +1,15 @@
 import crypto from "node:crypto";
 import path from "node:path";
+import zlib from "node:zlib";
 
 export const ASSET_LIBRARY_LIMITS = Object.freeze({
   maxAssetCount: 80,
   maxAssetBytes: 12 * 1024 * 1024,
   maxTotalBytes: 48 * 1024 * 1024,
   textPreviewBytes: 12 * 1024,
+  maxArchiveEntries: 80,
+  maxArchiveEntryBytes: 12 * 1024 * 1024,
+  maxArchiveExpandedBytes: 48 * 1024 * 1024,
 });
 
 const TYPE_GROUPS = Object.freeze({
@@ -117,15 +121,21 @@ export function normalizeIncomingAssets(items = [], { existing = [] } = {}) {
       if (existingCount + assets.length >= ASSET_LIBRARY_LIMITS.maxAssetCount) {
         throw new Error(`asset count limit is ${ASSET_LIBRARY_LIMITS.maxAssetCount}`);
       }
-      const asset = normalizeIncomingAsset(rawItem);
-      if (asset.size > ASSET_LIBRARY_LIMITS.maxAssetBytes) {
-        throw new Error(`${asset.name} is larger than ${ASSET_LIBRARY_LIMITS.maxAssetBytes} bytes`);
+      const expanded = normalizeIncomingAssetBundle(rawItem);
+      for (const asset of expanded.assets) {
+        if (existingCount + assets.length >= ASSET_LIBRARY_LIMITS.maxAssetCount) {
+          throw new Error(`asset count limit is ${ASSET_LIBRARY_LIMITS.maxAssetCount}`);
+        }
+        if (asset.size > ASSET_LIBRARY_LIMITS.maxAssetBytes) {
+          throw new Error(`${asset.name} is larger than ${ASSET_LIBRARY_LIMITS.maxAssetBytes} bytes`);
+        }
+        if (totalBytes + asset.size > ASSET_LIBRARY_LIMITS.maxTotalBytes) {
+          throw new Error(`asset library total size limit is ${ASSET_LIBRARY_LIMITS.maxTotalBytes} bytes`);
+        }
+        totalBytes += asset.size;
+        assets.push(asset);
       }
-      if (totalBytes + asset.size > ASSET_LIBRARY_LIMITS.maxTotalBytes) {
-        throw new Error(`asset library total size limit is ${ASSET_LIBRARY_LIMITS.maxTotalBytes} bytes`);
-      }
-      totalBytes += asset.size;
-      assets.push(asset);
+      rejected.push(...expanded.rejected);
     } catch (error) {
       rejected.push({
         name: String(rawItem?.name || "unnamed"),
@@ -137,8 +147,34 @@ export function normalizeIncomingAssets(items = [], { existing = [] } = {}) {
   return { assets, rejected };
 }
 
+export function normalizeIncomingAssetBundle(item = {}) {
+  const root = normalizeIncomingAsset(item);
+  if (root.kind !== "archive" || path.posix.extname(root.name).toLowerCase() !== ".zip") {
+    return { assets: [root], rejected: [] };
+  }
+
+  const buffer = Buffer.from(root.content, BINARY_ENCODING);
+  const unpacked = unpackZipAssets(buffer, root.name);
+  root.summary = {
+    ...root.summary,
+    extractedCount: unpacked.assets.length,
+    rejectedCount: unpacked.rejected.length,
+    signals: [
+      ...root.summary.signals.filter(signal => !signal.includes("Deep unpacking is not enabled")),
+      `ZIP archive extracted ${unpacked.assets.length} supported files for analysis.`,
+      ...unpacked.rejected.slice(0, 3).map(item => `ZIP skipped ${item.name}: ${item.error}`),
+    ],
+  };
+  return {
+    assets: [root, ...unpacked.assets],
+    rejected: unpacked.rejected,
+  };
+}
+
 export function normalizeIncomingAsset(item = {}) {
-  const name = sanitizeAssetName(item.name || item.filename || "asset");
+  const name = item.preservePath
+    ? sanitizeAssetPathName(item.name || item.filename || "asset")
+    : sanitizeAssetName(item.name || item.filename || "asset");
   const mime = String(item.mime || item.type || "").trim().slice(0, 120);
   const rawContent = String(item.content || item.data || "");
   const encoding = String(item.encoding || "").trim().toLowerCase() || inferEncoding(rawContent);
@@ -198,7 +234,7 @@ export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview 
   }
 
   if (kind === "archive") {
-    summary.signals.push("Archive uploaded. Deep unpacking is not enabled yet; upload extracted files for full analysis.");
+    summary.signals.push("Archive uploaded. Supported ZIP files are unpacked into separate analyzed assets.");
   }
   if (kind === "component" && [".html", ".htm"].includes(ext)) {
     summary.signals.push("HTML component can inform layout, but generated hardware app must still be self-contained and contract-safe.");
@@ -206,6 +242,66 @@ export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview 
   if (kind === "video") summary.signals.push("Video can be used as visual reference or compressed media for the 480x360 screen.");
   if (kind === "audio") summary.signals.push("Audio can support startup sounds, alerts, voice UI, or ambience when hardware audio is available.");
   return summary;
+}
+
+export function unpackZipAssets(buffer, archiveName = "assets.zip") {
+  const assets = [];
+  const rejected = [];
+  let offset = 0;
+  let expandedBytes = 0;
+  const prefix = archivePrefix(archiveName);
+
+  while (offset + 30 <= buffer.length && assets.length + rejected.length < ASSET_LIBRARY_LIMITS.maxArchiveEntries) {
+    const signature = buffer.readUInt32LE(offset);
+    if (signature !== 0x04034b50) break;
+    const flags = buffer.readUInt16LE(offset + 6);
+    const method = buffer.readUInt16LE(offset + 8);
+    const compressedSize = buffer.readUInt32LE(offset + 18);
+    const uncompressedSize = buffer.readUInt32LE(offset + 22);
+    const nameLength = buffer.readUInt16LE(offset + 26);
+    const extraLength = buffer.readUInt16LE(offset + 28);
+    const nameStart = offset + 30;
+    const dataStart = nameStart + nameLength + extraLength;
+    const dataEnd = dataStart + compressedSize;
+    if (flags & 0x08) {
+      rejected.push({ name: archiveName, error: "ZIP data descriptors are not supported yet" });
+      break;
+    }
+    if (dataEnd > buffer.length) {
+      rejected.push({ name: archiveName, error: "ZIP entry extends beyond archive size" });
+      break;
+    }
+    const entryName = buffer.toString("utf8", nameStart, nameStart + nameLength);
+    offset = dataEnd;
+    if (!entryName || entryName.endsWith("/")) continue;
+
+    try {
+      const safeName = safeArchiveEntryName(entryName, prefix);
+      if (uncompressedSize > ASSET_LIBRARY_LIMITS.maxArchiveEntryBytes) {
+        throw new Error(`entry exceeds ${ASSET_LIBRARY_LIMITS.maxArchiveEntryBytes} bytes`);
+      }
+      if (expandedBytes + uncompressedSize > ASSET_LIBRARY_LIMITS.maxArchiveExpandedBytes) {
+        throw new Error(`expanded ZIP exceeds ${ASSET_LIBRARY_LIMITS.maxArchiveExpandedBytes} bytes`);
+      }
+      const compressed = buffer.subarray(dataStart, dataEnd);
+      const content = inflateZipEntry(compressed, method);
+      expandedBytes += content.byteLength;
+      assets.push(normalizeIncomingAsset({
+        name: safeName,
+        mime: mimeFromName(safeName),
+        encoding: BINARY_ENCODING,
+        content: content.toString(BINARY_ENCODING),
+        preservePath: true,
+      }));
+    } catch (error) {
+      rejected.push({ name: entryName, error: error.message });
+    }
+  }
+
+  if (assets.length + rejected.length >= ASSET_LIBRARY_LIMITS.maxArchiveEntries) {
+    rejected.push({ name: archiveName, error: `ZIP entry limit is ${ASSET_LIBRARY_LIMITS.maxArchiveEntries}` });
+  }
+  return { assets, rejected };
 }
 
 export function summarizeAssets(assets = []) {
@@ -306,8 +402,69 @@ function publicAsset(asset = {}) {
 
 function sanitizeAssetName(value) {
   const raw = String(value || "asset").replaceAll("\\", "/").split("/").pop().trim();
-  const safe = raw.replace(/[^\w\u4e00-\u9fff .@()+\-[\]]+/g, "_").replace(/\s+/g, " ").slice(0, 120);
+  const safe = sanitizeAssetSegment(raw).slice(0, 120);
   return safe || "asset";
+}
+
+function sanitizeAssetPathName(value) {
+  const normalized = path.posix.normalize(String(value || "asset").replaceAll("\\", "/"));
+  const parts = normalized.split("/").map(part => sanitizeAssetSegment(part)).filter(Boolean);
+  return parts.join("/") || "asset";
+}
+
+function archivePrefix(value) {
+  const base = sanitizeAssetName(String(value || "archive").replace(/\.zip$/i, ""));
+  return base || "archive";
+}
+
+function safeArchiveEntryName(entryName, prefix) {
+  const normalized = path.posix.normalize(String(entryName || "").replaceAll("\\", "/"));
+  if (
+    !normalized ||
+    normalized === "." ||
+    normalized.startsWith("../") ||
+    normalized.includes("/../") ||
+    path.posix.isAbsolute(normalized)
+  ) {
+    throw new Error("unsafe ZIP entry path");
+  }
+  const parts = normalized.split("/").map(part => sanitizeAssetSegment(part)).filter(Boolean);
+  if (!parts.length) throw new Error("empty ZIP entry path");
+  return `${prefix}/${parts.join("/")}`;
+}
+
+function sanitizeAssetSegment(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^\w\u4e00-\u9fff .@()+\-[\]]+/g, "_")
+    .replace(/\s+/g, " ");
+}
+
+function inflateZipEntry(compressed, method) {
+  if (method === 0) return Buffer.from(compressed);
+  if (method === 8) return zlib.inflateRawSync(compressed, {
+    maxOutputLength: ASSET_LIBRARY_LIMITS.maxArchiveEntryBytes,
+  });
+  throw new Error(`unsupported ZIP compression method ${method}`);
+}
+
+function mimeFromName(name) {
+  const ext = path.posix.extname(name).toLowerCase();
+  if ([".png"].includes(ext)) return "image/png";
+  if ([".jpg", ".jpeg"].includes(ext)) return "image/jpeg";
+  if ([".webp"].includes(ext)) return "image/webp";
+  if ([".gif"].includes(ext)) return "image/gif";
+  if ([".svg"].includes(ext)) return "image/svg+xml";
+  if ([".mp4"].includes(ext)) return "video/mp4";
+  if ([".webm"].includes(ext)) return "video/webm";
+  if ([".mp3"].includes(ext)) return "audio/mpeg";
+  if ([".wav"].includes(ext)) return "audio/wav";
+  if ([".html", ".htm"].includes(ext)) return "text/html";
+  if ([".css"].includes(ext)) return "text/css";
+  if ([".js", ".mjs"].includes(ext)) return "text/javascript";
+  if ([".json"].includes(ext)) return "application/json";
+  if (TEXT_LIKE_EXTENSIONS.has(ext)) return "text/plain";
+  return "application/octet-stream";
 }
 
 function inferEncoding(content) {
@@ -340,7 +497,7 @@ function suggestedUse(kind, ext) {
   if (kind === "component") return "layout/component reference to adapt into the generated hardware UI";
   if (kind === "text") return "copy, data, labels, structured content, or design brief";
   if (kind === "font") return "typographic direction if compatible with generated app constraints";
-  if (kind === "archive") return "asset bundle placeholder; upload extracted files for deeper analysis";
+  if (kind === "archive") return "asset bundle; supported ZIP entries are unpacked and analyzed as separate assets";
   if (kind === "data") return "structured data source for labels, dashboards, or state displays";
   return `supporting binary asset${ext ? ` (${ext})` : ""}`;
 }
