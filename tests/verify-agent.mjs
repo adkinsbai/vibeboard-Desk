@@ -168,6 +168,32 @@ function makeZip(entries = []) {
   return Buffer.concat(chunks);
 }
 
+function makeTar(entries = []) {
+  const chunks = [];
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const raw = Buffer.isBuffer(entry.content) ? entry.content : Buffer.from(String(entry.content || ""), "utf8");
+    const header = Buffer.alloc(512, 0);
+    name.copy(header, 0, 0, Math.min(name.length, 100));
+    header.write("0000777\0", 100, 8, "ascii");
+    header.write("0000000\0", 108, 8, "ascii");
+    header.write("0000000\0", 116, 8, "ascii");
+    header.write(raw.length.toString(8).padStart(11, "0") + "\0", 124, 12, "ascii");
+    header.write("00000000000\0", 136, 12, "ascii");
+    header.fill(0x20, 148, 156);
+    header.write("0", 156, 1, "ascii");
+    header.write("ustar\0", 257, 6, "ascii");
+    header.write("00", 263, 2, "ascii");
+    let checksum = 0;
+    for (const byte of header) checksum += byte;
+    header.write(checksum.toString(8).padStart(6, "0") + "\0 ", 148, 8, "ascii");
+    const padding = Buffer.alloc((512 - (raw.length % 512)) % 512, 0);
+    chunks.push(header, raw, padding);
+  }
+  chunks.push(Buffer.alloc(1024, 0));
+  return Buffer.concat(chunks);
+}
+
 function validGeneratedFilesWithAsset() {
   const files = validGeneratedFiles();
   const manifest = JSON.parse(files["manifest.json"]);
@@ -1599,6 +1625,47 @@ await test("asset library rejects unsafe ZIP entry paths", async () => {
   assert(names.includes("unsafe/safe.txt"), "safe entry should be extracted");
   assert(!names.some(name => name.includes("escape")), `unsafe entry should not be accepted, got ${names.join(",")}`);
   assert(result.rejected.some(item => item.error.includes("unsafe ZIP entry path")), `expected unsafe path rejection, got ${JSON.stringify(result.rejected)}`);
+});
+
+await test("asset library expands TGZ bundles and builds a product design brief", async () => {
+  const { normalizeIncomingAssets, formatAssetContext, summarizeAssets } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const tar = makeTar([
+    { name: "brief/brand.md", content: "品牌 palette cyan logo motion dashboard 480x360 音乐 氛围" },
+    { name: "components/player.html", content: "<section><audio src=\"theme.mp3\"></audio><button>Play</button></section>" },
+    { name: "media/theme.mp3", content: Buffer.from([0x49, 0x44, 0x33, 0x03]) },
+  ]);
+  const tgz = zlib.gzipSync(tar);
+  const result = normalizeIncomingAssets([
+    { name: "product-kit.tgz", mime: "application/gzip", encoding: "base64", content: tgz.toString("base64") },
+  ]);
+  const names = result.assets.map(asset => asset.name);
+  const summary = summarizeAssets(result.assets);
+  const context = formatAssetContext(result.assets);
+
+  assert(result.rejected.length === 0, `expected tgz to unpack cleanly, got ${JSON.stringify(result.rejected)}`);
+  assert(names.includes("product-kit.tgz"), "archive itself should be retained");
+  assert(names.includes("product-kit/brief/brand.md"), `brief should be extracted, got ${names.join(",")}`);
+  assert(names.includes("product-kit/components/player.html"), "component should be extracted from tgz");
+  assert(names.includes("product-kit/media/theme.mp3"), "audio should be extracted from tgz");
+  assert(summary.byKind.audio === 1, `audio should be classified, got ${JSON.stringify(summary.byKind)}`);
+  assert(summary.designBrief.priorities.some(item => item.includes("audio") || item.includes("音频")), `design brief should mention audio, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.priorities.some(item => item.includes("dashboard")), "design brief should infer dashboard priority from text");
+  assert(context.includes("Inferred product design brief from assets"), "agent context should include product design brief");
+  assert(context.includes("priority:"), "agent context should expose priorities");
+});
+
+await test("asset library expands single GZ text assets", async () => {
+  const { normalizeIncomingAssets } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const gz = zlib.gzipSync(Buffer.from("480x360 data dashboard status metrics", "utf8"));
+  const result = normalizeIncomingAssets([
+    { name: "metrics.txt.gz", mime: "application/gzip", encoding: "base64", content: gz.toString("base64") },
+  ]);
+  const names = result.assets.map(asset => asset.name);
+
+  assert(result.rejected.length === 0, `expected gz to unpack cleanly, got ${JSON.stringify(result.rejected)}`);
+  assert(names.includes("metrics.txt.gz"), "gz archive should be retained");
+  assert(names.includes("metrics.txt/metrics.txt"), `inner text should be extracted under archive prefix, got ${names.join(",")}`);
+  assert(result.assets.some(asset => asset.name === "metrics.txt/metrics.txt" && asset.kind === "text"), "inner gz text should be classified");
 });
 
 await test("chat planner prompt includes asset context and Codex hardware boundary", async () => {

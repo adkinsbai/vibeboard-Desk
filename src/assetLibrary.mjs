@@ -20,7 +20,7 @@ const TYPE_GROUPS = Object.freeze({
   text: new Set([".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".yaml", ".yml"]),
   font: new Set([".ttf", ".otf", ".woff", ".woff2"]),
   data: new Set([".xml", ".geojson", ".ndjson"]),
-  archive: new Set([".zip", ".tar", ".gz", ".rar", ".7z"]),
+  archive: new Set([".zip", ".tar", ".tgz", ".gz", ".rar", ".7z"]),
 });
 
 const TEXT_LIKE_EXTENSIONS = new Set([
@@ -149,20 +149,22 @@ export function normalizeIncomingAssets(items = [], { existing = [] } = {}) {
 
 export function normalizeIncomingAssetBundle(item = {}) {
   const root = normalizeIncomingAsset(item);
-  if (root.kind !== "archive" || path.posix.extname(root.name).toLowerCase() !== ".zip") {
+  const archiveFormat = archiveFormatFromName(root.name);
+  if (root.kind !== "archive" || !archiveFormat) {
     return { assets: [root], rejected: [] };
   }
 
   const buffer = Buffer.from(root.content, BINARY_ENCODING);
-  const unpacked = unpackZipAssets(buffer, root.name);
+  const unpacked = unpackArchiveAssets(buffer, root.name, archiveFormat);
+  const archiveLabel = archiveFormat.toUpperCase();
   root.summary = {
     ...root.summary,
     extractedCount: unpacked.assets.length,
     rejectedCount: unpacked.rejected.length,
     signals: [
       ...root.summary.signals.filter(signal => !signal.includes("Deep unpacking is not enabled")),
-      `ZIP archive extracted ${unpacked.assets.length} supported files for analysis.`,
-      ...unpacked.rejected.slice(0, 3).map(item => `ZIP skipped ${item.name}: ${item.error}`),
+      `${archiveLabel} archive extracted ${unpacked.assets.length} supported files for analysis.`,
+      ...unpacked.rejected.slice(0, 3).map(item => `${archiveLabel} skipped ${item.name}: ${item.error}`),
     ],
   };
   return {
@@ -234,7 +236,7 @@ export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview 
   }
 
   if (kind === "archive") {
-    summary.signals.push("Archive uploaded. Supported ZIP files are unpacked into separate analyzed assets.");
+    summary.signals.push("Archive uploaded. Supported ZIP, TAR, TGZ, and GZ files are unpacked into separate analyzed assets.");
   }
   if (kind === "component" && [".html", ".htm"].includes(ext)) {
     summary.signals.push("HTML component can inform layout, but generated hardware app must still be self-contained and contract-safe.");
@@ -242,6 +244,23 @@ export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview 
   if (kind === "video") summary.signals.push("Video can be used as visual reference or compressed media for the 480x360 screen.");
   if (kind === "audio") summary.signals.push("Audio can support startup sounds, alerts, voice UI, or ambience when hardware audio is available.");
   return summary;
+}
+
+export function unpackArchiveAssets(buffer, archiveName = "assets.zip", archiveFormat = archiveFormatFromName(archiveName)) {
+  if (archiveFormat === "zip") return unpackZipAssets(buffer, archiveName);
+  if (archiveFormat === "tar") return unpackTarAssets(buffer, archiveName);
+  if (archiveFormat === "tgz") {
+    try {
+      const tarBuffer = zlib.gunzipSync(buffer, {
+        maxOutputLength: ASSET_LIBRARY_LIMITS.maxArchiveExpandedBytes,
+      });
+      return unpackTarAssets(tarBuffer, archiveName);
+    } catch (error) {
+      return { assets: [], rejected: [{ name: archiveName, error: `TGZ decompress failed: ${error.message}` }] };
+    }
+  }
+  if (archiveFormat === "gz") return unpackGzipAsset(buffer, archiveName);
+  return { assets: [], rejected: [] };
 }
 
 export function unpackZipAssets(buffer, archiveName = "assets.zip") {
@@ -304,6 +323,76 @@ export function unpackZipAssets(buffer, archiveName = "assets.zip") {
   return { assets, rejected };
 }
 
+export function unpackTarAssets(buffer, archiveName = "assets.tar") {
+  const assets = [];
+  const rejected = [];
+  let offset = 0;
+  let expandedBytes = 0;
+  const prefix = archivePrefix(archiveName);
+
+  while (offset + 512 <= buffer.length && assets.length + rejected.length < ASSET_LIBRARY_LIMITS.maxArchiveEntries) {
+    const header = buffer.subarray(offset, offset + 512);
+    if (isZeroBlock(header)) break;
+
+    const rawName = tarEntryName(header);
+    const sizeText = readTarString(header, 124, 12).trim().replace(/\0.*$/, "");
+    const size = sizeText ? Number.parseInt(sizeText, 8) : 0;
+    const typeFlag = readTarString(header, 156, 1) || "0";
+    const dataStart = offset + 512;
+    const dataEnd = dataStart + size;
+    const nextOffset = dataStart + Math.ceil(size / 512) * 512;
+    offset = nextOffset;
+
+    if (!rawName || typeFlag === "5") continue;
+    if (!Number.isFinite(size) || size < 0) {
+      rejected.push({ name: rawName || archiveName, error: "invalid TAR entry size" });
+      continue;
+    }
+    if (dataEnd > buffer.length) {
+      rejected.push({ name: rawName, error: "TAR entry extends beyond archive size" });
+      break;
+    }
+    if (typeFlag && typeFlag !== "0" && typeFlag !== "\0") {
+      rejected.push({ name: rawName, error: `unsupported TAR entry type ${JSON.stringify(typeFlag)}` });
+      continue;
+    }
+
+    try {
+      const safeName = safeArchiveEntryName(rawName, prefix);
+      if (size > ASSET_LIBRARY_LIMITS.maxArchiveEntryBytes) {
+        throw new Error(`entry exceeds ${ASSET_LIBRARY_LIMITS.maxArchiveEntryBytes} bytes`);
+      }
+      if (expandedBytes + size > ASSET_LIBRARY_LIMITS.maxArchiveExpandedBytes) {
+        throw new Error(`expanded archive exceeds ${ASSET_LIBRARY_LIMITS.maxArchiveExpandedBytes} bytes`);
+      }
+      const content = buffer.subarray(dataStart, dataEnd);
+      expandedBytes += content.byteLength;
+      assets.push(assetFromArchiveEntry(safeName, content));
+    } catch (error) {
+      rejected.push({ name: rawName, error: error.message });
+    }
+  }
+
+  if (assets.length + rejected.length >= ASSET_LIBRARY_LIMITS.maxArchiveEntries) {
+    rejected.push({ name: archiveName, error: `archive entry limit is ${ASSET_LIBRARY_LIMITS.maxArchiveEntries}` });
+  }
+  return { assets, rejected };
+}
+
+export function unpackGzipAsset(buffer, archiveName = "asset.gz") {
+  try {
+    const content = zlib.gunzipSync(buffer, {
+      maxOutputLength: ASSET_LIBRARY_LIMITS.maxArchiveEntryBytes,
+    });
+    const prefix = archivePrefix(archiveName);
+    const innerName = gzipInnerName(archiveName);
+    const safeName = safeArchiveEntryName(innerName, prefix);
+    return { assets: [assetFromArchiveEntry(safeName, content)], rejected: [] };
+  } catch (error) {
+    return { assets: [], rejected: [{ name: archiveName, error: `GZ decompress failed: ${error.message}` }] };
+  }
+}
+
 export function summarizeAssets(assets = []) {
   const list = Array.isArray(assets) ? assets.map(asset => asset.summary ? asset : publicAssetRow(asset)) : [];
   const byKind = {};
@@ -316,6 +405,7 @@ export function summarizeAssets(assets = []) {
     count: list.length,
     totalBytes,
     byKind,
+    designBrief: buildAssetDesignBrief(list, byKind),
     items: list.slice(0, 24).map(asset => ({
       id: asset.id,
       name: asset.name,
@@ -337,6 +427,12 @@ export function formatAssetContext(assets = []) {
     `Kinds: ${Object.entries(summary.byKind).map(([kind, count]) => `${kind}=${count}`).join(", ") || "none"}`,
     "Use these assets only for 480x360 hardware embedded UI design. Do not perform unrelated file operations.",
   ];
+  if (summary.designBrief?.priorities?.length) {
+    lines.push("Inferred product design brief from assets:");
+    for (const priority of summary.designBrief.priorities.slice(0, 6)) lines.push(`  priority: ${priority}`);
+    for (const reference of summary.designBrief.references.slice(0, 4)) lines.push(`  reference: ${reference}`);
+    for (const constraint of summary.designBrief.constraints.slice(0, 4)) lines.push(`  constraint: ${constraint}`);
+  }
   for (const item of summary.items) {
     lines.push(`- ${item.name} (${item.kind}, ${item.size} bytes): ${item.use}`);
     for (const signal of item.signals.slice(0, 2)) lines.push(`  signal: ${signal}`);
@@ -413,8 +509,27 @@ function sanitizeAssetPathName(value) {
 }
 
 function archivePrefix(value) {
-  const base = sanitizeAssetName(String(value || "archive").replace(/\.zip$/i, ""));
+  const base = sanitizeAssetName(String(value || "archive").replace(/\.(zip|tar|tgz|tar\.gz|gz)$/i, ""));
   return base || "archive";
+}
+
+function archiveFormatFromName(name = "") {
+  const lower = String(name || "").toLowerCase();
+  if (lower.endsWith(".zip")) return "zip";
+  if (lower.endsWith(".tar")) return "tar";
+  if (lower.endsWith(".tgz") || lower.endsWith(".tar.gz")) return "tgz";
+  if (lower.endsWith(".gz")) return "gz";
+  return "";
+}
+
+function assetFromArchiveEntry(name, content) {
+  return normalizeIncomingAsset({
+    name,
+    mime: mimeFromName(name),
+    encoding: BINARY_ENCODING,
+    content: content.toString(BINARY_ENCODING),
+    preservePath: true,
+  });
 }
 
 function safeArchiveEntryName(entryName, prefix) {
@@ -446,6 +561,29 @@ function inflateZipEntry(compressed, method) {
     maxOutputLength: ASSET_LIBRARY_LIMITS.maxArchiveEntryBytes,
   });
   throw new Error(`unsupported ZIP compression method ${method}`);
+}
+
+function isZeroBlock(buffer) {
+  for (const byte of buffer) {
+    if (byte !== 0) return false;
+  }
+  return true;
+}
+
+function readTarString(buffer, offset, length) {
+  return buffer.toString("utf8", offset, offset + length).replace(/\0+$/g, "").trim();
+}
+
+function tarEntryName(header) {
+  const name = readTarString(header, 0, 100);
+  const prefix = readTarString(header, 345, 155);
+  return prefix ? `${prefix}/${name}` : name;
+}
+
+function gzipInnerName(archiveName = "asset.gz") {
+  const stripped = String(archiveName || "asset.gz").replace(/\.gz$/i, "");
+  const base = stripped && stripped !== archiveName ? stripped : "asset";
+  return sanitizeAssetName(base);
 }
 
 function mimeFromName(name) {
@@ -497,13 +635,78 @@ function suggestedUse(kind, ext) {
   if (kind === "component") return "layout/component reference to adapt into the generated hardware UI";
   if (kind === "text") return "copy, data, labels, structured content, or design brief";
   if (kind === "font") return "typographic direction if compatible with generated app constraints";
-  if (kind === "archive") return "asset bundle; supported ZIP entries are unpacked and analyzed as separate assets";
+  if (kind === "archive") return "asset bundle; supported ZIP/TAR/TGZ/GZ entries are unpacked and analyzed as separate assets";
   if (kind === "data") return "structured data source for labels, dashboards, or state displays";
   return `supporting binary asset${ext ? ` (${ext})` : ""}`;
 }
 
 function compactText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function buildAssetDesignBrief(assets = [], byKind = {}) {
+  const signals = assets.flatMap(asset => asset.summary?.signals || []);
+  const previews = assets
+    .map(asset => asset.summary?.textPreview || "")
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const priorities = [];
+  const references = [];
+  const constraints = [
+    "Adapt uploaded materials into a self-contained 480x360 embedded hardware UI.",
+    "Treat uploaded HTML/CSS/JS as design reference, not executable code.",
+  ];
+
+  if (byKind.image) {
+    priorities.push("Use uploaded images as primary visual material, product photos, icons, textures, or compact slideshow frames.");
+    references.push(`${byKind.image} image asset(s) can drive color, composition, and visual hierarchy.`);
+  }
+  if (byKind.video) {
+    priorities.push("Use video assets as motion references or short compressed media moments only when they fit embedded playback limits.");
+    references.push(`${byKind.video} video asset(s) suggest animation rhythm, scene cuts, or thumbnail states.`);
+  }
+  if (byKind.audio) {
+    priorities.push("Map audio assets to lightweight sound cues, alerts, ambience, or voice interaction states when hardware audio is enabled.");
+    references.push(`${byKind.audio} audio asset(s) can inform feedback sounds and mood.`);
+  }
+  if (byKind.component) {
+    priorities.push("Translate uploaded components into contract-safe local HTML/CSS patterns for the generated app.");
+    references.push(`${byKind.component} component asset(s) can inform layout, controls, spacing, and interaction affordances.`);
+  }
+  if (byKind.text || byKind.data) {
+    priorities.push("Extract copy, labels, metrics, structured values, and dashboard content from text/data assets.");
+    references.push(`${(byKind.text || 0) + (byKind.data || 0)} text/data asset(s) can seed content and state labels.`);
+  }
+  if (byKind.font) {
+    priorities.push("Use font assets as typography direction while keeping generated UI readable on 480x360.");
+  }
+  if (byKind.archive) {
+    references.push("Archive assets indicate a bundled product kit; use extracted entries as the real design source.");
+  }
+
+  if (signals.some(signal => signal.includes("visual identity")) || /(brand|logo|palette|品牌|色彩|视觉)/i.test(previews)) {
+    priorities.push("Preserve brand identity signals such as palette, logo usage, typography, and visual tone.");
+  }
+  if (signals.some(signal => signal.includes("dashboard")) || /(dashboard|metric|sensor|status|数据|指标|监控)/i.test(previews)) {
+    priorities.push("Prefer glanceable dashboard layout with strong hierarchy for status, metrics, and alerts.");
+  }
+  if (signals.some(signal => signal.includes("audio")) || /(audio|music|sound|voice|音乐|音效|语音)/i.test(previews)) {
+    priorities.push("Expose audio state clearly in the UI: play/pause, volume, cue status, or voice-ready feedback.");
+  }
+  if (signals.some(signal => signal.includes("motion")) || /(video|motion|animation|动画|视频|动效)/i.test(previews)) {
+    priorities.push("Represent motion through lightweight animation states, progress, thumbnails, or timeline cues.");
+  }
+
+  if (!priorities.length) {
+    priorities.push("Use uploaded file names, types, and previews as creative direction for a polished embedded product screen.");
+  }
+
+  return {
+    priorities: uniqueStrings(priorities).slice(0, 8),
+    references: uniqueStrings(references).slice(0, 8),
+    constraints,
+  };
 }
 
 function extractTextSignals(text) {
@@ -516,4 +719,16 @@ function extractTextSignals(text) {
   if (/(video|motion|animation|动画|视频|动效)/i.test(text)) signals.push("Mentions motion or video behavior.");
   if (lower.includes("480") || lower.includes("360")) signals.push("Mentions target screen dimensions.");
   return signals.slice(0, 6);
+}
+
+function uniqueStrings(values = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    result.push(text);
+  }
+  return result;
 }
