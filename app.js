@@ -2056,6 +2056,11 @@ function assetSummaryTooltip(summary = {}, kinds = "") {
     lines.push("Media profiles:");
     for (const item of mediaProfiles) lines.push(`- ${item}`);
   }
+  const documentProfiles = Array.isArray(brief.documentProfiles) ? brief.documentProfiles.slice(0, 4) : [];
+  if (documentProfiles.length) {
+    lines.push("Document profiles:");
+    for (const item of documentProfiles) lines.push(`- ${item}`);
+  }
   return lines.join("\n");
 }
 
@@ -2084,6 +2089,7 @@ async function uploadAssetFiles(fileList) {
       ...(Array.isArray(designBrief.productIntents) && designBrief.productIntents.length ? [`产品方向：${designBrief.productIntents.slice(0, 3).join("；")}`] : []),
       ...(Array.isArray(designBrief.layoutPlan) && designBrief.layoutPlan.length ? [`布局建议：${designBrief.layoutPlan.slice(0, 2).join("；")}`] : []),
       ...(Array.isArray(designBrief.mediaProfiles) && designBrief.mediaProfiles.length ? [`媒体画像：${designBrief.mediaProfiles.slice(0, 3).join("；")}`] : []),
+      ...(Array.isArray(designBrief.documentProfiles) && designBrief.documentProfiles.length ? [`文档摘要：${designBrief.documentProfiles.slice(0, 3).join("；")}`] : []),
       ...(Array.isArray(designBrief.completionGaps) && designBrief.completionGaps.length ? [`自动补全：${designBrief.completionGaps.slice(0, 2).join("；")}`] : []),
     ];
     const brief = priorities.length || insightLines.length

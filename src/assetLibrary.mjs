@@ -33,6 +33,7 @@ const TYPE_GROUPS = Object.freeze({
   text: new Set([".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".yaml", ".yml"]),
   font: new Set([".ttf", ".otf", ".woff", ".woff2"]),
   data: new Set([".xml", ".geojson", ".ndjson"]),
+  document: new Set([".pdf", ".docx", ".pptx", ".xlsx", ".doc", ".ppt", ".xls", ".rtf"]),
   archive: new Set([".zip", ".tar", ".tgz", ".gz", ".rar", ".7z"]),
 });
 
@@ -212,7 +213,8 @@ export function normalizeIncomingAsset(item = {}) {
   const textPreview = shouldPreviewText(ext, mime, buffer)
     ? buffer.toString("utf8", 0, Math.min(buffer.byteLength, ASSET_LIBRARY_LIMITS.textPreviewBytes))
     : "";
-  const summary = analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview, buffer });
+  const documentProfile = analyzeDocumentProfile({ name, mime, kind, ext, size, buffer });
+  const summary = analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview: textPreview || documentProfile.textPreview || "", buffer, documentProfile });
 
   return {
     id: `asset-${sha256.slice(0, 12)}-${crypto.randomUUID().slice(0, 8)}`,
@@ -295,10 +297,11 @@ export function classifyAsset({ name = "", mime = "", ext = path.posix.extname(n
   return "binary";
 }
 
-export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview = "", buffer = Buffer.alloc(0) }) {
+export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview = "", buffer = Buffer.alloc(0), documentProfile = null }) {
   const compact = textPreview ? compactText(textPreview) : "";
   const mediaProfile = analyzeMediaProfile({ name, mime, kind, ext, size, buffer, text: compact });
-  const insights = extractAssetInsights({ name, mime, kind, ext, text: compact, mediaProfile });
+  const docProfile = documentProfile || analyzeDocumentProfile({ name, mime, kind, ext, size, buffer });
+  const insights = extractAssetInsights({ name, mime, kind, ext, text: compact, mediaProfile, documentProfile: docProfile });
   const summary = {
     name,
     mime,
@@ -311,6 +314,7 @@ export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview 
     textPreview: "",
     insights,
     mediaProfile,
+    documentProfile: docProfile,
   };
 
   if (compact) {
@@ -327,7 +331,9 @@ export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview 
   }
   if (kind === "video") summary.signals.push("Video can be used as visual reference or compressed media for the 480x360 screen.");
   if (kind === "audio") summary.signals.push("Audio can support startup sounds, alerts, voice UI, or ambience when hardware audio is available.");
+  if (kind === "document") summary.signals.push("Document can seed product copy, slide structure, spreadsheet fields, or design requirements without executing uploaded content.");
   if (mediaProfile.summary) summary.signals.push(mediaProfile.summary);
+  if (docProfile.summary) summary.signals.push(docProfile.summary);
   return summary;
 }
 
@@ -501,6 +507,7 @@ export function summarizeAssets(assets = []) {
       textPreview: asset.summary?.textPreview || "",
       insights: compactPublicInsights(asset.summary?.insights || {}),
       mediaProfile: compactMediaProfile(asset.summary?.mediaProfile || {}),
+      documentProfile: compactDocumentProfile(asset.summary?.documentProfile || {}),
     })),
   };
 }
@@ -527,6 +534,7 @@ export function formatAssetContext(assets = []) {
     for (const layout of summary.designBrief.layoutPlan.slice(0, 5)) lines.push(`  layout-plan: ${layout}`);
     for (const media of summary.designBrief.mediaPlan.slice(0, 5)) lines.push(`  media-plan: ${media}`);
     for (const profile of summary.designBrief.mediaProfiles.slice(0, 8)) lines.push(`  media-profile: ${profile}`);
+    for (const profile of summary.designBrief.documentProfiles.slice(0, 8)) lines.push(`  document-profile: ${profile}`);
     for (const gap of summary.designBrief.completionGaps.slice(0, 4)) lines.push(`  completion-gap: ${gap}`);
     for (const interaction of summary.designBrief.interactions.slice(0, 5)) lines.push(`  interaction: ${interaction}`);
   }
@@ -537,6 +545,7 @@ export function formatAssetContext(assets = []) {
     for (const cta of (item.insights?.ctas || []).slice(0, 2)) lines.push(`  cta: ${cta}`);
     for (const field of (item.insights?.dataFields || []).slice(0, 4)) lines.push(`  data-field: ${field}`);
     if (item.mediaProfile?.summary) lines.push(`  media-profile: ${item.mediaProfile.summary}`);
+    if (item.documentProfile?.summary) lines.push(`  document-profile: ${item.documentProfile.summary}`);
     if (item.textPreview) lines.push(`  preview: ${item.textPreview.slice(0, 240)}`);
   }
   return `\n\n${lines.join("\n")}`;
@@ -745,6 +754,10 @@ function mimeFromName(name) {
   if ([".css"].includes(ext)) return "text/css";
   if ([".js", ".mjs"].includes(ext)) return "text/javascript";
   if ([".json"].includes(ext)) return "application/json";
+  if ([".pdf"].includes(ext)) return "application/pdf";
+  if ([".docx"].includes(ext)) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  if ([".pptx"].includes(ext)) return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  if ([".xlsx"].includes(ext)) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   if (TEXT_LIKE_EXTENSIONS.has(ext)) return "text/plain";
   return "application/octet-stream";
 }
@@ -779,6 +792,7 @@ function suggestedUse(kind, ext) {
   if (kind === "component") return "layout/component reference to adapt into the generated hardware UI";
   if (kind === "text") return "copy, data, labels, structured content, or design brief";
   if (kind === "font") return "typographic direction if compatible with generated app constraints";
+  if (kind === "document") return "document reference for copy, requirements, slide flow, tables, or product structure";
   if (kind === "archive") return "asset bundle; supported ZIP/TAR/TGZ/GZ entries are unpacked and analyzed as separate assets";
   if (kind === "data") return "structured data source for labels, dashboards, or state displays";
   return `supporting binary asset${ext ? ` (${ext})` : ""}`;
@@ -792,6 +806,7 @@ function buildAssetDesignBrief(assets = [], byKind = {}) {
   const signals = assets.flatMap(asset => asset.summary?.signals || []);
   const insights = mergeAssetInsights(assets.map(asset => asset.summary?.insights || {}));
   const mediaProfiles = assets.map(asset => asset.summary?.mediaProfile || {}).filter(profile => profile.summary);
+  const documentProfiles = assets.map(asset => asset.summary?.documentProfile || {}).filter(profile => profile.summary);
   const previews = assets
     .map(asset => asset.summary?.textPreview || "")
     .filter(Boolean)
@@ -827,10 +842,17 @@ function buildAssetDesignBrief(assets = [], byKind = {}) {
   if (byKind.font) {
     priorities.push("Use font assets as typography direction while keeping generated UI readable on 480x360.");
   }
+  if (byKind.document) {
+    priorities.push("Extract product requirements, slide structure, spreadsheet fields, and presentation copy from uploaded documents.");
+    references.push(`${byKind.document} document asset(s) can seed product copy, sections, spreadsheet metrics, or storyboard flow.`);
+  }
   if (byKind.archive) {
     references.push("Archive assets indicate a bundled product kit; use extracted entries as the real design source.");
   }
   for (const profile of mediaProfiles.slice(0, 8)) {
+    references.push(profile.summary);
+  }
+  for (const profile of documentProfiles.slice(0, 8)) {
     references.push(profile.summary);
   }
 
@@ -863,9 +885,9 @@ function buildAssetDesignBrief(assets = [], byKind = {}) {
     priorities.push("Represent motion through lightweight animation states, progress, thumbnails, or timeline cues.");
   }
 
-  const productIntents = inferProductIntents({ byKind, insights, mediaProfiles, previews, signals });
-  const layoutPlan = buildLayoutPlan({ byKind, insights, mediaProfiles, productIntents });
-  const completionGaps = inferCompletionGaps({ byKind, insights, mediaProfiles, productIntents });
+  const productIntents = inferProductIntents({ byKind, insights, mediaProfiles, documentProfiles, previews, signals });
+  const layoutPlan = buildLayoutPlan({ byKind, insights, mediaProfiles, documentProfiles, productIntents });
+  const completionGaps = inferCompletionGaps({ byKind, insights, mediaProfiles, documentProfiles, productIntents });
 
   if (!priorities.length) {
     priorities.push("Use uploaded file names, types, and previews as creative direction for a polished embedded product screen.");
@@ -886,6 +908,7 @@ function buildAssetDesignBrief(assets = [], byKind = {}) {
     layoutPlan,
     mediaPlan: buildMediaPlan(byKind, insights, mediaProfiles).slice(0, 8),
     mediaProfiles: mediaProfiles.map(profile => profile.summary).slice(0, 12),
+    documentProfiles: documentProfiles.map(profile => profile.summary).slice(0, 12),
     completionGaps,
     interactions: insights.interactions.slice(0, 10),
   };
@@ -903,7 +926,7 @@ function extractTextSignals(text) {
   return signals.slice(0, 6);
 }
 
-function extractAssetInsights({ name = "", mime = "", kind = "", ext = "", text = "", mediaProfile = {} } = {}) {
+function extractAssetInsights({ name = "", mime = "", kind = "", ext = "", text = "", mediaProfile = {}, documentProfile = {} } = {}) {
   const source = String(text || "");
   const lowerName = String(name || "").toLowerCase();
   const colors = extractColors(source);
@@ -925,7 +948,9 @@ function extractAssetInsights({ name = "", mime = "", kind = "", ext = "", text 
   if (kind === "video") signals.push("Video asset should be represented as thumbnail, loop, timeline, or motion state on the 480x360 UI.");
   if (kind === "audio") signals.push("Audio asset should map to a playback/status/voice feedback control if useful.");
   if (mediaProfile.summary) signals.push(mediaProfile.summary);
+  if (documentProfile.summary) signals.push(documentProfile.summary);
   if (String(mime || "").includes("json") || ext === ".json") signals.push("JSON asset can seed structured dashboard content.");
+  if (kind === "document") signals.push("Document asset can seed product sections, copy, metrics, or storyboard content.");
 
   return {
     colors,
@@ -1027,9 +1052,10 @@ function compactPublicInsights(insights = {}) {
   };
 }
 
-function inferProductIntents({ byKind = {}, insights = {}, mediaProfiles = [], previews = "", signals = [] } = {}) {
+function inferProductIntents({ byKind = {}, insights = {}, mediaProfiles = [], documentProfiles = [], previews = "", signals = [] } = {}) {
   const intents = [];
-  const text = `${previews} ${signals.join(" ")} ${insights.components?.join(" ") || ""} ${insights.dataFields?.join(" ") || ""}`.toLowerCase();
+  const documentText = documentProfiles.map(profile => `${profile.summary || ""} ${profile.tags?.join(" ") || ""}`).join(" ");
+  const text = `${previews} ${signals.join(" ")} ${insights.components?.join(" ") || ""} ${insights.dataFields?.join(" ") || ""} ${documentText}`.toLowerCase();
   const hasHeroImage = mediaProfiles.some(profile => profile.kind === "image" && /hero|brand mark|screen-scale source|product|logo/i.test(`${profile.summary || ""} ${profile.tags?.join(" ") || ""}`));
   const hasAudio = Boolean(byKind.audio) || /audio|music|sound|voice|音乐|音效|语音/.test(text);
   const hasVideo = Boolean(byKind.video) || /video|motion|animation|timeline|视频|动画|动效/.test(text);
@@ -1041,12 +1067,15 @@ function inferProductIntents({ byKind = {}, insights = {}, mediaProfiles = [], p
   if (hasDashboard) intents.push("glanceable data dashboard for status, metrics, and telemetry");
   if (hasAudio || hasVideo) intents.push("media controller screen with playback state, cue feedback, and motion thumbnail");
   if (hasControls) intents.push("hardware control panel with clear primary action and status feedback");
+  if (documentProfiles.some(profile => profile.kind === "presentation")) intents.push("slide/storyboard summary screen adapted from uploaded presentation");
+  if (documentProfiles.some(profile => profile.kind === "spreadsheet")) intents.push("spreadsheet-backed dashboard with key rows, columns, and metrics");
+  if (documentProfiles.some(profile => profile.kind === "document")) intents.push("document-backed product brief screen with extracted sections and copy");
   if (byKind.archive && (byKind.component || byKind.image || byKind.text)) intents.push("bundled product kit adapted into one coherent 480x360 embedded app");
   if (!intents.length && (byKind.image || byKind.text || byKind.component)) intents.push("compact product information screen inferred from uploaded copy and visuals");
   return uniqueStrings(intents).slice(0, 6);
 }
 
-function buildLayoutPlan({ byKind = {}, insights = {}, mediaProfiles = [], productIntents = [] } = {}) {
+function buildLayoutPlan({ byKind = {}, insights = {}, mediaProfiles = [], documentProfiles = [], productIntents = [] } = {}) {
   const plan = [];
   const intentText = productIntents.join(" ").toLowerCase();
   const wideImage = mediaProfiles.find(profile => profile.kind === "image" && profile.width && profile.height && profile.width / profile.height >= 1.25);
@@ -1059,6 +1088,15 @@ function buildLayoutPlan({ byKind = {}, insights = {}, mediaProfiles = [], produ
 
   if (intentText.includes("dashboard") || dataCount >= 3) {
     plan.push(`Use a compact dashboard grid with ${Math.min(Math.max(dataCount, 3), 6)} metric/status tiles and one highlighted primary state.`);
+  }
+  if (documentProfiles.some(profile => profile.kind === "presentation")) {
+    plan.push("Convert presentation structure into a short storyboard: title, 2-3 key slide points, and one action/status row.");
+  }
+  if (documentProfiles.some(profile => profile.kind === "spreadsheet")) {
+    plan.push("Turn spreadsheet rows/columns into compact metric cards or a two-column comparison table.");
+  }
+  if (documentProfiles.some(profile => profile.kind === "document")) {
+    plan.push("Use document headings and extracted copy as concise sections rather than long paragraphs.");
   }
   if (intentText.includes("media") || byKind.audio || byKind.video) {
     plan.push("Add a small media/status strip for play state, progress, volume/cue, or motion thumbnail.");
@@ -1073,7 +1111,7 @@ function buildLayoutPlan({ byKind = {}, insights = {}, mediaProfiles = [], produ
   return uniqueStrings(plan).slice(0, 8);
 }
 
-function inferCompletionGaps({ byKind = {}, insights = {}, mediaProfiles = [], productIntents = [] } = {}) {
+function inferCompletionGaps({ byKind = {}, insights = {}, mediaProfiles = [], documentProfiles = [], productIntents = [] } = {}) {
   const gaps = [];
   const intentText = productIntents.join(" ").toLowerCase();
   if (!byKind.image && !byKind.video) gaps.push("No visual media was uploaded; generate a clean CSS-led visual system from text and data cues.");
@@ -1084,8 +1122,181 @@ function inferCompletionGaps({ byKind = {}, insights = {}, mediaProfiles = [], p
   if ((byKind.audio || byKind.video) && !mediaProfiles.some(profile => profile.durationSec != null || profile.width || profile.height)) {
     gaps.push("Some media lacks detailed dimensions/duration; represent it through safe poster/status states.");
   }
+  if (byKind.document && !documentProfiles.some(profile => profile.textPreview)) {
+    gaps.push("Uploaded documents expose limited extractable text; use filenames and document type as direction.");
+  }
   if (!insights.colors?.length) gaps.push("No palette was extracted; derive a restrained palette from filenames, media role, and screen readability.");
   return uniqueStrings(gaps).slice(0, 6);
+}
+
+function analyzeDocumentProfile({ name = "", mime = "", kind = "", ext = "", size = 0, buffer = Buffer.alloc(0) } = {}) {
+  if (kind !== "document") return { kind, summary: "", textPreview: "", tags: [] };
+  const profile = {
+    kind: documentKind(ext, mime),
+    format: ext ? ext.slice(1) : mediaFormatFromMime(mime),
+    pages: null,
+    sheets: null,
+    slides: null,
+    textPreview: "",
+    tags: [],
+    summary: "",
+  };
+
+  if (ext === ".pdf") Object.assign(profile, pdfDocumentProfile(buffer));
+  if ([".docx", ".pptx", ".xlsx"].includes(ext)) Object.assign(profile, officeDocumentProfile(buffer, ext));
+  if (ext === ".rtf") profile.textPreview = compactText(buffer.toString("utf8", 0, Math.min(buffer.length, ASSET_LIBRARY_LIMITS.textPreviewBytes)).replace(/[{}\\][a-z0-9-]* ?/gi, " "));
+
+  profile.tags.push(...documentNameTags(name, profile.kind));
+  if (profile.textPreview) profile.tags.push("extractable text");
+  if (profile.pages) profile.tags.push(`${profile.pages} page${profile.pages === 1 ? "" : "s"}`);
+  if (profile.slides) profile.tags.push(`${profile.slides} slide${profile.slides === 1 ? "" : "s"}`);
+  if (profile.sheets) profile.tags.push(`${profile.sheets} sheet${profile.sheets === 1 ? "" : "s"}`);
+  profile.tags = uniqueStrings(profile.tags).slice(0, 10);
+  profile.summary = documentSummary({ ...profile, name, size });
+  return profile;
+}
+
+function documentKind(ext = "", mime = "") {
+  if (ext === ".pptx" || ext === ".ppt") return "presentation";
+  if (ext === ".xlsx" || ext === ".xls") return "spreadsheet";
+  if (ext === ".pdf") return "pdf";
+  if (String(mime || "").includes("presentation")) return "presentation";
+  if (String(mime || "").includes("spreadsheet") || String(mime || "").includes("excel")) return "spreadsheet";
+  return "document";
+}
+
+function pdfDocumentProfile(buffer = Buffer.alloc(0)) {
+  const latin = buffer.toString("latin1", 0, Math.min(buffer.length, ASSET_LIBRARY_LIMITS.textPreviewBytes));
+  const pages = (latin.match(/\/Type\s*\/Page\b/g) || []).length || null;
+  const textPreview = extractReadableTokens(latin);
+  return {
+    pages,
+    textPreview,
+    tags: textPreview ? ["pdf text hints"] : ["pdf"],
+  };
+}
+
+function officeDocumentProfile(buffer = Buffer.alloc(0), ext = "") {
+  if (!buffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) {
+    return { tags: ["office container not readable"] };
+  }
+  const zip = readZipEntries(buffer);
+  const names = Object.keys(zip);
+  const xmlTexts = [];
+  let slides = null;
+  let sheets = null;
+  if (ext === ".docx") {
+    for (const name of names.filter(item => /^word\/(document|header|footer|footnotes|endnotes).*\.xml$/i.test(item))) {
+      xmlTexts.push(extractXmlText(zip[name]));
+    }
+  }
+  if (ext === ".pptx") {
+    const slideNames = names.filter(item => /^ppt\/slides\/slide\d+\.xml$/i.test(item));
+    slides = slideNames.length || null;
+    for (const name of slideNames.slice(0, 12)) xmlTexts.push(extractXmlText(zip[name]));
+  }
+  if (ext === ".xlsx") {
+    const sheetNames = names.filter(item => /^xl\/worksheets\/sheet\d+\.xml$/i.test(item));
+    sheets = sheetNames.length || null;
+    if (zip["xl/sharedStrings.xml"]) xmlTexts.push(extractXmlText(zip["xl/sharedStrings.xml"]));
+    for (const name of sheetNames.slice(0, 6)) xmlTexts.push(extractXmlText(zip[name]));
+  }
+
+  const textPreview = compactText(xmlTexts.join(" ")).slice(0, 1200);
+  return {
+    slides,
+    sheets,
+    textPreview,
+    tags: ["office xml"],
+  };
+}
+
+function readZipEntries(buffer = Buffer.alloc(0)) {
+  const entries = {};
+  let offset = 0;
+  while (offset + 30 <= buffer.length && Object.keys(entries).length < ASSET_LIBRARY_LIMITS.maxArchiveEntries) {
+    const signature = buffer.readUInt32LE(offset);
+    if (signature !== 0x04034b50) break;
+    const flags = buffer.readUInt16LE(offset + 6);
+    const method = buffer.readUInt16LE(offset + 8);
+    const compressedSize = buffer.readUInt32LE(offset + 18);
+    const nameLength = buffer.readUInt16LE(offset + 26);
+    const extraLength = buffer.readUInt16LE(offset + 28);
+    const nameStart = offset + 30;
+    const dataStart = nameStart + nameLength + extraLength;
+    const dataEnd = dataStart + compressedSize;
+    if ((flags & 0x08) || dataEnd > buffer.length) break;
+    const name = buffer.toString("utf8", nameStart, nameStart + nameLength);
+    offset = dataEnd;
+    if (!name || name.endsWith("/")) continue;
+    try {
+      const content = inflateZipEntry(buffer.subarray(dataStart, dataEnd), method);
+      if (content.byteLength <= ASSET_LIBRARY_LIMITS.textPreviewBytes * 4) entries[name] = content.toString("utf8");
+    } catch {}
+  }
+  return entries;
+}
+
+function extractXmlText(xml = "") {
+  const raw = String(xml || "");
+  const texts = [];
+  for (const match of raw.matchAll(/<[^:>]*:?t(?:\s[^>]*)?>([\s\S]*?)<\/[^:>]*:?t>/gi)) {
+    texts.push(decodeXmlEntities(match[1]));
+  }
+  if (!texts.length) {
+    for (const match of raw.matchAll(/<[^:>]*:?v(?:\s[^>]*)?>([\s\S]*?)<\/[^:>]*:?v>/gi)) {
+      texts.push(decodeXmlEntities(match[1]));
+    }
+  }
+  return compactText(texts.join(" ").replace(/<[^>]+>/g, " "));
+}
+
+function extractReadableTokens(value = "") {
+  const matches = String(value || "").match(/[A-Za-z0-9][A-Za-z0-9 _.,:%#/\-]{2,80}|[\u4e00-\u9fff]{2,40}/g) || [];
+  return compactText(matches.filter(item => !/^\/?[A-Z][A-Za-z]+$/.test(item)).slice(0, 80).join(" ")).slice(0, 1200);
+}
+
+function decodeXmlEntities(value = "") {
+  return String(value || "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'");
+}
+
+function documentNameTags(name = "", kind = "") {
+  const lower = String(name || "").toLowerCase();
+  const tags = [];
+  if (/(brief|requirement|spec|prd|需求|说明|方案|文档)/i.test(lower)) tags.push("requirements source");
+  if (/(slide|deck|ppt|presentation|演示|汇报|路演)/i.test(lower) || kind === "presentation") tags.push("storyboard source");
+  if (/(sheet|table|excel|metrics|data|表格|数据|指标)/i.test(lower) || kind === "spreadsheet") tags.push("structured table source");
+  return tags;
+}
+
+function documentSummary(profile = {}) {
+  const parts = [];
+  const label = profile.kind === "pdf" ? "PDF" : profile.kind === "presentation" ? "Presentation" : profile.kind === "spreadsheet" ? "Spreadsheet" : "Document";
+  parts.push(`${label} ${profile.name || "asset"}`);
+  if (profile.pages) parts.push(`${profile.pages} pages`);
+  if (profile.slides) parts.push(`${profile.slides} slides`);
+  if (profile.sheets) parts.push(`${profile.sheets} sheets`);
+  if (profile.textPreview) parts.push(`text: ${profile.textPreview.slice(0, 120)}`);
+  if (profile.tags?.length) parts.push(`tags: ${profile.tags.slice(0, 4).join(", ")}`);
+  return parts.join("; ");
+}
+
+function compactDocumentProfile(profile = {}) {
+  return {
+    kind: profile.kind || "",
+    format: profile.format || "",
+    pages: profile.pages ?? null,
+    sheets: profile.sheets ?? null,
+    slides: profile.slides ?? null,
+    textPreview: profile.textPreview || "",
+    tags: Array.isArray(profile.tags) ? profile.tags.slice(0, 6) : [],
+    summary: profile.summary || "",
+  };
 }
 
 function analyzeMediaProfile({ name = "", mime = "", kind = "", ext = "", size = 0, buffer = Buffer.alloc(0), text = "" } = {}) {

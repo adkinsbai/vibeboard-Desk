@@ -225,6 +225,23 @@ function makeWavHeader({ sampleRate = 16000, channels = 1, durationSec = 2 } = {
   return buffer;
 }
 
+function makeDocx(text = "VibeBoard product brief") {
+  return makeZip([
+    { name: "[Content_Types].xml", content: "<?xml version=\"1.0\"?><Types></Types>" },
+    { name: "word/document.xml", content: `<?xml version="1.0"?><w:document><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>` },
+  ]);
+}
+
+function makeXlsx(values = ["temperature", "battery", "status"]) {
+  const shared = values.map((value) => `<si><t>${value}</t></si>`).join("");
+  const cells = values.map((_, index) => `<c r="${String.fromCharCode(65 + index)}1" t="s"><v>${index}</v></c>`).join("");
+  return makeZip([
+    { name: "[Content_Types].xml", content: "<?xml version=\"1.0\"?><Types></Types>" },
+    { name: "xl/sharedStrings.xml", content: `<?xml version="1.0"?><sst>${shared}</sst>` },
+    { name: "xl/worksheets/sheet1.xml", content: `<?xml version="1.0"?><worksheet><sheetData><row r="1">${cells}</row></sheetData></worksheet>` },
+  ]);
+}
+
 function validGeneratedFilesWithAsset() {
   const files = validGeneratedFiles();
   const manifest = JSON.parse(files["manifest.json"]);
@@ -1757,6 +1774,28 @@ await test("asset library infers product defaults when uploads are incomplete", 
   assert(summary.designBrief.completionGaps.some(item => item.includes("No visual media")), `missing visual default should be exposed, got ${JSON.stringify(summary.designBrief)}`);
   assert(summary.designBrief.completionGaps.some(item => item.includes("No explicit CTA")), `missing CTA default should be exposed, got ${JSON.stringify(summary.designBrief)}`);
   assert(context.includes("completion-gap:"), "agent context should expose completion gaps");
+});
+
+await test("asset library extracts lightweight document profiles for agent context", async () => {
+  const { normalizeIncomingAssets, formatAssetContext, summarizeAssets } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const docx = makeDocx("Product Brief Hero screen CTA Start battery dashboard");
+  const xlsx = makeXlsx(["temperature", "battery", "status"]);
+  const result = normalizeIncomingAssets([
+    { name: "product-brief.docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", encoding: "base64", content: docx.toString("base64") },
+    { name: "metrics.xlsx", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", encoding: "base64", content: xlsx.toString("base64") },
+  ]);
+  const summary = summarizeAssets(result.assets);
+  const context = formatAssetContext(result.assets);
+
+  assert(result.assets.length === 2, `expected 2 document assets, got ${JSON.stringify(result)}`);
+  assert(result.assets.every(asset => asset.kind === "document"), `documents should be classified, got ${JSON.stringify(result.assets.map(asset => asset.kind))}`);
+  assert(summary.byKind.document === 2, `summary should count documents, got ${JSON.stringify(summary.byKind)}`);
+  assert(summary.designBrief.documentProfiles.some(item => item.includes("product-brief.docx") && item.includes("Product Brief")), `docx profile should expose text, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.documentProfiles.some(item => item.includes("metrics.xlsx") && item.includes("temperature")), `xlsx profile should expose shared strings, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.productIntents.some(item => item.includes("spreadsheet") || item.includes("document-backed")), `documents should influence product intent, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.layoutPlan.some(item => item.includes("spreadsheet") || item.includes("document")), `documents should influence layout plan, got ${JSON.stringify(summary.designBrief)}`);
+  assert(context.includes("document-profile: Document product-brief.docx"), "agent context should expose docx document profile");
+  assert(context.includes("document-profile: Spreadsheet metrics.xlsx"), "agent context should expose xlsx document profile");
 });
 
 await test("asset library expands single GZ text assets", async () => {
