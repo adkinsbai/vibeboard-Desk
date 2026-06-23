@@ -2036,6 +2036,16 @@ function assetSummaryTooltip(summary = {}, kinds = "") {
   if (ctas.length) lines.push(`CTA: ${ctas.join(", ")}`);
   const dataFields = Array.isArray(brief.dataFields) ? brief.dataFields.slice(0, 6) : [];
   if (dataFields.length) lines.push(`Data: ${dataFields.join(", ")}`);
+  const productIntents = Array.isArray(brief.productIntents) ? brief.productIntents.slice(0, 4) : [];
+  if (productIntents.length) {
+    lines.push("Product intents:");
+    for (const item of productIntents) lines.push(`- ${item}`);
+  }
+  const layoutPlan = Array.isArray(brief.layoutPlan) ? brief.layoutPlan.slice(0, 4) : [];
+  if (layoutPlan.length) {
+    lines.push("Layout plan:");
+    for (const item of layoutPlan) lines.push(`- ${item}`);
+  }
   const mediaPlan = Array.isArray(brief.mediaPlan) ? brief.mediaPlan.slice(0, 3) : [];
   if (mediaPlan.length) {
     lines.push("Media plan:");
@@ -2071,7 +2081,10 @@ async function uploadAssetFiles(fileList) {
       ...(Array.isArray(designBrief.components) && designBrief.components.length ? [`组件结构：${designBrief.components.slice(0, 6).join(", ")}`] : []),
       ...(Array.isArray(designBrief.ctas) && designBrief.ctas.length ? [`操作文案：${designBrief.ctas.slice(0, 4).join(", ")}`] : []),
       ...(Array.isArray(designBrief.dataFields) && designBrief.dataFields.length ? [`数据字段：${designBrief.dataFields.slice(0, 6).join(", ")}`] : []),
+      ...(Array.isArray(designBrief.productIntents) && designBrief.productIntents.length ? [`产品方向：${designBrief.productIntents.slice(0, 3).join("；")}`] : []),
+      ...(Array.isArray(designBrief.layoutPlan) && designBrief.layoutPlan.length ? [`布局建议：${designBrief.layoutPlan.slice(0, 2).join("；")}`] : []),
       ...(Array.isArray(designBrief.mediaProfiles) && designBrief.mediaProfiles.length ? [`媒体画像：${designBrief.mediaProfiles.slice(0, 3).join("；")}`] : []),
+      ...(Array.isArray(designBrief.completionGaps) && designBrief.completionGaps.length ? [`自动补全：${designBrief.completionGaps.slice(0, 2).join("；")}`] : []),
     ];
     const brief = priorities.length || insightLines.length
       ? `\n\n**Assets 设计简报**\n${[

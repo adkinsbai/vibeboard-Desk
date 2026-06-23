@@ -368,6 +368,7 @@ function buildPlannerSystemPrompt(preferences = {}, projectMemory = {}, assetCon
 - 简洁、直接、可执行。
 - 追问时用选择题，不要让用户手写长答案。
 - 不要在聊天阶段声称已经生成、验证或部署代码。
+- 如果资产摘要里有 product-intent、layout-plan、media-plan 或 completion-gap，优先把它们当成默认方案补齐需求；不要再为了素材用途、版式或视觉方向反复追问。
 
 当前 project 旧记忆：
 ${JSON.stringify(memory, null, 2)}

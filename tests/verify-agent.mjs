@@ -1580,7 +1580,7 @@ await test("chat planner supplies fallback choices when clarification omits quic
 });
 
 await test("asset library analyzes mixed user assets for agent context", async () => {
-  const { normalizeIncomingAssets, formatAssetContext } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const { normalizeIncomingAssets, formatAssetContext, summarizeAssets } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
   const html = Buffer.from("<section><img src=\"hero.png\"><button>Deploy</button></section>", "utf8").toString("base64");
   const text = Buffer.from("品牌色彩 palette: cyan. 480x360 dashboard metrics.", "utf8").toString("base64");
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]).toString("base64");
@@ -1594,10 +1594,15 @@ await test("asset library analyzes mixed user assets for agent context", async (
   assert(normalized.assets.some(asset => asset.kind === "image"), "image asset should be classified");
   assert(normalized.assets.some(asset => asset.kind === "component"), "HTML component should be classified");
   assert(normalized.assets.some(asset => asset.summary.signals.includes("Contains UI/component markup.")), "component signal should be extracted");
+  const summary = summarizeAssets(normalized.assets);
+  assert(summary.designBrief.productIntents.some(item => item.includes("dashboard") || item.includes("showcase")), `product intent should be inferred, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.layoutPlan.some(item => item.includes("480x360") || item.includes("control row") || item.includes("dashboard")), `layout plan should be inferred, got ${JSON.stringify(summary.designBrief)}`);
   const context = formatAssetContext(normalized.assets);
   assert(context.includes("Uploaded asset library"), "asset context should have a heading");
   assert(context.includes("component.html"), "asset context should include component names");
   assert(context.includes("480x360"), "asset text preview should be available to the agent");
+  assert(context.includes("product-intent:"), "agent context should expose inferred product intents");
+  assert(context.includes("layout-plan:"), "agent context should expose inferred layout plan");
 });
 
 await test("asset library store returns non-duplicated upload summary", async () => {
@@ -1717,6 +1722,8 @@ await test("asset library expands TGZ bundles and builds a product design brief"
   assert(summary.designBrief.components.some(item => item.includes("player")), `design brief should expose component cues, got ${JSON.stringify(summary.designBrief)}`);
   assert(summary.designBrief.ctas.some(item => /Play|立即开始|Connect/.test(item)), `design brief should expose CTA cues, got ${JSON.stringify(summary.designBrief)}`);
   assert(summary.designBrief.dataFields.includes("temperature"), `design brief should expose JSON fields, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.productIntents.some(item => item.includes("media controller") || item.includes("dashboard")), `design brief should infer product intent, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.layoutPlan.some(item => item.includes("media/status strip") || item.includes("dashboard grid")), `design brief should infer a layout plan, got ${JSON.stringify(summary.designBrief)}`);
   assert(summary.designBrief.mediaPlan.some(item => item.includes("audio") || item.includes("video") || item.includes("image")), `design brief should include media plan, got ${JSON.stringify(summary.designBrief)}`);
   assert(summary.designBrief.mediaProfiles.some(item => item.includes("product.png") && item.includes("480x360")), `design brief should expose image dimensions, got ${JSON.stringify(summary.designBrief)}`);
   assert(summary.designBrief.mediaProfiles.some(item => item.includes("theme.wav") && item.includes("2s")), `design brief should expose audio duration, got ${JSON.stringify(summary.designBrief)}`);
@@ -1727,9 +1734,29 @@ await test("asset library expands TGZ bundles and builds a product design brief"
   assert(context.includes("palette: #12f7d6"), "agent context should expose palette lines");
   assert(context.includes("component:"), "agent context should expose component lines");
   assert(context.includes("data-field: temperature"), "agent context should expose data field lines");
+  assert(context.includes("product-intent:"), "agent context should expose product intent lines");
+  assert(context.includes("layout-plan:"), "agent context should expose layout plan lines");
   assert(context.includes("media-plan:"), "agent context should expose media plan lines");
   assert(context.includes("media-profile: Image product-kit/images/product.png"), "agent context should expose image media profile");
   assert(context.includes("media-profile: Audio product-kit/media/theme.wav"), "agent context should expose audio media profile");
+});
+
+await test("asset library infers product defaults when uploads are incomplete", async () => {
+  const { normalizeIncomingAssets, formatAssetContext, summarizeAssets } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const metrics = Buffer.from("{\"temperature\": 25, \"battery\": 82, \"status\": \"ready\"}", "utf8").toString("base64");
+  const brief = Buffer.from("480x360 sensor dashboard status panel. Use a quiet embedded hardware style.", "utf8").toString("base64");
+  const result = normalizeIncomingAssets([
+    { name: "metrics.json", mime: "application/json", encoding: "base64", content: metrics },
+    { name: "brief.txt", mime: "text/plain", encoding: "base64", content: brief },
+  ]);
+  const summary = summarizeAssets(result.assets);
+  const context = formatAssetContext(result.assets);
+
+  assert(summary.designBrief.productIntents.some(item => item.includes("dashboard")), `dashboard intent should be inferred, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.layoutPlan.some(item => item.includes("dashboard grid")), `dashboard layout should be inferred, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.completionGaps.some(item => item.includes("No visual media")), `missing visual default should be exposed, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.completionGaps.some(item => item.includes("No explicit CTA")), `missing CTA default should be exposed, got ${JSON.stringify(summary.designBrief)}`);
+  assert(context.includes("completion-gap:"), "agent context should expose completion gaps");
 });
 
 await test("asset library expands single GZ text assets", async () => {

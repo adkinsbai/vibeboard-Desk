@@ -523,8 +523,11 @@ export function formatAssetContext(assets = []) {
     for (const component of summary.designBrief.components.slice(0, 6)) lines.push(`  component: ${component}`);
     for (const cta of summary.designBrief.ctas.slice(0, 4)) lines.push(`  cta: ${cta}`);
     for (const field of summary.designBrief.dataFields.slice(0, 8)) lines.push(`  data-field: ${field}`);
+    for (const intent of summary.designBrief.productIntents.slice(0, 5)) lines.push(`  product-intent: ${intent}`);
+    for (const layout of summary.designBrief.layoutPlan.slice(0, 5)) lines.push(`  layout-plan: ${layout}`);
     for (const media of summary.designBrief.mediaPlan.slice(0, 5)) lines.push(`  media-plan: ${media}`);
     for (const profile of summary.designBrief.mediaProfiles.slice(0, 8)) lines.push(`  media-profile: ${profile}`);
+    for (const gap of summary.designBrief.completionGaps.slice(0, 4)) lines.push(`  completion-gap: ${gap}`);
     for (const interaction of summary.designBrief.interactions.slice(0, 5)) lines.push(`  interaction: ${interaction}`);
   }
   for (const item of summary.items) {
@@ -860,8 +863,15 @@ function buildAssetDesignBrief(assets = [], byKind = {}) {
     priorities.push("Represent motion through lightweight animation states, progress, thumbnails, or timeline cues.");
   }
 
+  const productIntents = inferProductIntents({ byKind, insights, mediaProfiles, previews, signals });
+  const layoutPlan = buildLayoutPlan({ byKind, insights, mediaProfiles, productIntents });
+  const completionGaps = inferCompletionGaps({ byKind, insights, mediaProfiles, productIntents });
+
   if (!priorities.length) {
     priorities.push("Use uploaded file names, types, and previews as creative direction for a polished embedded product screen.");
+  }
+  for (const intent of productIntents.slice(0, 3)) {
+    priorities.push(`Default product direction from assets: ${intent}.`);
   }
 
   return {
@@ -872,8 +882,11 @@ function buildAssetDesignBrief(assets = [], byKind = {}) {
     components: insights.components.slice(0, 10),
     ctas: insights.ctas.slice(0, 8),
     dataFields: insights.dataFields.slice(0, 12),
+    productIntents,
+    layoutPlan,
     mediaPlan: buildMediaPlan(byKind, insights, mediaProfiles).slice(0, 8),
     mediaProfiles: mediaProfiles.map(profile => profile.summary).slice(0, 12),
+    completionGaps,
     interactions: insights.interactions.slice(0, 10),
   };
 }
@@ -1012,6 +1025,67 @@ function compactPublicInsights(insights = {}) {
     dataFields: uniqueStrings(insights.dataFields || []).slice(0, 8),
     interactions: uniqueStrings(insights.interactions || []).slice(0, 8),
   };
+}
+
+function inferProductIntents({ byKind = {}, insights = {}, mediaProfiles = [], previews = "", signals = [] } = {}) {
+  const intents = [];
+  const text = `${previews} ${signals.join(" ")} ${insights.components?.join(" ") || ""} ${insights.dataFields?.join(" ") || ""}`.toLowerCase();
+  const hasHeroImage = mediaProfiles.some(profile => profile.kind === "image" && /hero|brand mark|screen-scale source|product|logo/i.test(`${profile.summary || ""} ${profile.tags?.join(" ") || ""}`));
+  const hasAudio = Boolean(byKind.audio) || /audio|music|sound|voice|音乐|音效|语音/.test(text);
+  const hasVideo = Boolean(byKind.video) || /video|motion|animation|timeline|视频|动画|动效/.test(text);
+  const hasDashboard = Boolean(byKind.data) || insights.dataFields?.length || /dashboard|metric|sensor|status|telemetry|monitor|数据|指标|监控|状态/.test(text);
+  const hasControls = insights.ctas?.length || insights.interactions?.length || /button|control|connect|deploy|play|pause|refresh|toggle|按钮|控制|连接|播放|暂停|刷新/.test(text);
+  const hasBrand = insights.colors?.length || /brand|logo|palette|typography|品牌|色彩|视觉|字体/.test(text);
+
+  if (hasHeroImage && hasBrand) intents.push("brand/product showcase screen with hero visual, palette, and concise CTA");
+  if (hasDashboard) intents.push("glanceable data dashboard for status, metrics, and telemetry");
+  if (hasAudio || hasVideo) intents.push("media controller screen with playback state, cue feedback, and motion thumbnail");
+  if (hasControls) intents.push("hardware control panel with clear primary action and status feedback");
+  if (byKind.archive && (byKind.component || byKind.image || byKind.text)) intents.push("bundled product kit adapted into one coherent 480x360 embedded app");
+  if (!intents.length && (byKind.image || byKind.text || byKind.component)) intents.push("compact product information screen inferred from uploaded copy and visuals");
+  return uniqueStrings(intents).slice(0, 6);
+}
+
+function buildLayoutPlan({ byKind = {}, insights = {}, mediaProfiles = [], productIntents = [] } = {}) {
+  const plan = [];
+  const intentText = productIntents.join(" ").toLowerCase();
+  const wideImage = mediaProfiles.find(profile => profile.kind === "image" && profile.width && profile.height && profile.width / profile.height >= 1.25);
+  const squareImage = mediaProfiles.find(profile => profile.kind === "image" && profile.width && profile.height && Math.abs(profile.width / profile.height - 1) < 0.08);
+  const dataCount = Array.isArray(insights.dataFields) ? insights.dataFields.length : 0;
+
+  if (wideImage) plan.push(`Use ${wideImage.name || "the widest image"} as a top hero band or full-bleed background crop with readable overlays.`);
+  else if (squareImage) plan.push(`Place ${squareImage.name || "the square image"} as a large left hero/logo block with content stacked on the right.`);
+  else if (byKind.image) plan.push("Reserve the strongest image asset for the first visual focus; keep text in a separate high-contrast zone.");
+
+  if (intentText.includes("dashboard") || dataCount >= 3) {
+    plan.push(`Use a compact dashboard grid with ${Math.min(Math.max(dataCount, 3), 6)} metric/status tiles and one highlighted primary state.`);
+  }
+  if (intentText.includes("media") || byKind.audio || byKind.video) {
+    plan.push("Add a small media/status strip for play state, progress, volume/cue, or motion thumbnail.");
+  }
+  if (insights.ctas?.length || intentText.includes("control")) {
+    plan.push("Pin the primary action in a stable bottom control row with one secondary status/action at most.");
+  }
+  if (insights.colors?.length) {
+    plan.push("Build the visual system from extracted palette cues while preserving contrast on the 480x360 screen.");
+  }
+  if (!plan.length) plan.push("Use a simple 480x360 hierarchy: header, primary visual/content area, and compact bottom status/action row.");
+  return uniqueStrings(plan).slice(0, 8);
+}
+
+function inferCompletionGaps({ byKind = {}, insights = {}, mediaProfiles = [], productIntents = [] } = {}) {
+  const gaps = [];
+  const intentText = productIntents.join(" ").toLowerCase();
+  if (!byKind.image && !byKind.video) gaps.push("No visual media was uploaded; generate a clean CSS-led visual system from text and data cues.");
+  if (!insights.ctas?.length) gaps.push("No explicit CTA was found; choose one default hardware-friendly primary action.");
+  if ((intentText.includes("dashboard") || byKind.data) && !insights.dataFields?.length) {
+    gaps.push("Structured data exists but no clear fields were extracted; create readable placeholder metrics rather than asking again.");
+  }
+  if ((byKind.audio || byKind.video) && !mediaProfiles.some(profile => profile.durationSec != null || profile.width || profile.height)) {
+    gaps.push("Some media lacks detailed dimensions/duration; represent it through safe poster/status states.");
+  }
+  if (!insights.colors?.length) gaps.push("No palette was extracted; derive a restrained palette from filenames, media role, and screen readability.");
+  return uniqueStrings(gaps).slice(0, 6);
 }
 
 function analyzeMediaProfile({ name = "", mime = "", kind = "", ext = "", size = 0, buffer = Buffer.alloc(0), text = "" } = {}) {

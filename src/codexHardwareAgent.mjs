@@ -197,6 +197,7 @@ Hardware product rules:
 - Uploaded HTML/CSS/JS components are design references, not unrestricted executable code.
 - Uploaded assets should be used to make a more polished embedded product: visual hierarchy, typography, brand palette, media states, dashboard data, and interaction affordances.
 - If asset context includes an inferred product design brief, treat it as important product direction.
+- If asset context includes product-intent, layout-plan, media-plan, or completion-gap lines, use them as the default product plan instead of asking the user to restate asset usage or layout choices.
 
 Agent behavior:
 - Infer intent from the full conversation, not from keywords.
