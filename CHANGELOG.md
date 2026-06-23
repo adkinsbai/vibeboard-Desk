@@ -14,6 +14,7 @@
 - Fixed Taishan Gray deployment by defaulting `taishan-gray` to the deployable `linaro` account.
 - Fixed Windows real-board deployment upload by sending bundle payloads through stdin instead of an overlong SSH command line.
 - Improved Golden Loop verification so board HTTP build-id checks inspect `/`, `/index.html`, `/app.js`, and `/manifest.json`.
+- Improved Agent UX so clarification uses structured `quick_replies` choice buttons, typed confirmations can start the pending build, and deploy intent such as "帮我部署吧" shows a deploy confirmation button for the current verified build instead of re-entering open-ended planning.
 
 ### Gray Board Validation
 

@@ -836,6 +836,28 @@ function currentGeneratedBuildId() {
   }
 }
 
+function hasDeployableBuild() {
+  return Boolean(
+    generatedFiles &&
+    Object.keys(generatedFiles).length &&
+    generatedFiles["index.html"] &&
+    generatedFiles["manifest.json"]
+  );
+}
+
+async function findDeployableBuildId() {
+  const currentBuildId = currentGeneratedBuildId();
+  if (hasDeployableBuild()) return currentBuildId;
+  try {
+    const res = await fetch("/generated/current/manifest.json", { cache: "no-store" });
+    if (!res.ok) return "";
+    const manifest = await res.json();
+    return String(manifest?.id || "").trim();
+  } catch {
+    return "";
+  }
+}
+
 function syncDeviceFrameFromActiveContext() {
   if (currentConversationId) {
     if (Object.keys(generatedFiles || {}).length) {
@@ -1399,6 +1421,37 @@ function addInlineButtons(buttons) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+function addQuickReplyButtons(quickReplies = []) {
+  const choices = normalizeQuickReplyButtons(quickReplies);
+  if (!choices.length) return;
+  addInlineButtons(choices.map((choice, index) => ({
+    label: choice.label,
+    primary: index === 0,
+    action: () => handleChat(choice.value),
+  })));
+}
+
+function normalizeQuickReplyButtons(quickReplies = []) {
+  if (!Array.isArray(quickReplies)) return [];
+  const seen = new Set();
+  const choices = [];
+  for (const item of quickReplies) {
+    const label = truncateButtonText(item?.label || item?.text || item?.value || item, 18);
+    const value = String(item?.value || item?.prompt || item?.text || item?.label || item || "").trim();
+    if (!label || !value || seen.has(value)) continue;
+    seen.add(value);
+    choices.push({ label, value });
+    if (choices.length >= 4) break;
+  }
+  return choices;
+}
+
+function truncateButtonText(value, maxLength) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
 function addBuildPromptAction(buildPrompt, plan = {}) {
   const prompt = String(buildPrompt || "").trim();
   if (!prompt) return;
@@ -1446,6 +1499,62 @@ function addBuildPromptAction(buildPrompt, plan = {}) {
 
 let pendingGeneratePrompt = null; // 暂存完整的生成 prompt
 
+function isNegativeIntent(text) {
+  return /(不要|不用|别|先别|取消|等等|等一下|不是|不对|还不|暂不|稍后|no|cancel|stop)/i.test(text);
+}
+
+function isBuildConfirmationIntent(prompt) {
+  const text = String(prompt || "").trim();
+  if (!text || isNegativeIntent(text)) return false;
+  if (text.length > 30 && !/(按这个|按你说的|就这样|确认这个|开始执行|开始生成|开始构建)/i.test(text)) return false;
+  return /(开始|开工|执行|生成|构建|确认|可以|可以了|就这样|按这个|按你说的|没问题|好的|好吧|行|go|ok|yes|start|build)/i.test(text);
+}
+
+function isDeployIntent(prompt) {
+  const text = String(prompt || "").trim();
+  if (!text || isNegativeIntent(text)) return false;
+  return /(部署|写入真机|写到真机|上板|发到板子|发布到硬件|烧到板|运行到板|deploy|push to board|run on board)/i.test(text);
+}
+
+function showDeployConfirmationForCurrentBuild(prompt = "", buildId = currentGeneratedBuildId()) {
+  const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
+  const reply = `可以，当前对话里已经有可部署的构建${buildId ? `（${buildId}）` : ""}。我不会自动写入真机，点下面按钮就开始部署到 ${profile.label}。`;
+  addMarkdownMessage("agent", reply);
+  persistMessage("agent", reply, buildId || null, currentConversationId);
+  addInlineButtons([
+    { label: `部署到${profile.label}真机`, primary: true, action: () => doDeploy(prompt) },
+    { label: "先不部署", primary: false, action: () => addMarkdownMessage("agent", "好的，先保留当前本地验证结果。") },
+  ]);
+}
+
+function showMissingBuildChoices() {
+  const reply = "我还没找到当前对话里可直接部署的构建。你可以先生成应用，或切回左侧已有构建记录的对话。";
+  addMarkdownMessage("agent", reply);
+  persistMessage("agent", reply, null, currentConversationId);
+  const firstAction = pendingGeneratePrompt
+    ? {
+        label: "先生成并验证",
+        primary: true,
+        action: () => {
+          const buildPrompt = pendingGeneratePrompt;
+          pendingGeneratePrompt = null;
+          startBuild(buildPrompt);
+        },
+      }
+    : {
+        label: "先生成应用",
+        primary: true,
+        action: () => {
+          promptInput.value = "按当前方案先生成一个可部署的小屏应用";
+          promptInput.focus();
+        },
+      };
+  addInlineButtons([
+    firstAction,
+    { label: "选择历史对话", primary: false, action: () => addMarkdownMessage("agent", "请在左侧选择带有构建记录的对话，我会自动恢复预览和部署按钮。") },
+  ]);
+}
+
 function buildChatMessages() {
   const msgs = chatLog.querySelectorAll(".msg");
   const messages = [];
@@ -1462,7 +1571,8 @@ function buildChatMessages() {
 
 async function handleChat(prompt) {
   if (busy) return;
-  setBusy(true);
+  prompt = String(prompt || "").trim();
+  if (!prompt) return;
 
   await ensureConversation();
   const conversationId = currentConversationId;
@@ -1470,6 +1580,24 @@ async function handleChat(prompt) {
   persistMessage("user", prompt, null, conversationId);
   promptInput.value = "";
 
+  if (isDeployIntent(prompt)) {
+    const buildId = await findDeployableBuildId();
+    if (buildId || hasDeployableBuild()) {
+      showDeployConfirmationForCurrentBuild(prompt, buildId);
+    } else {
+      showMissingBuildChoices();
+    }
+    return;
+  }
+
+  if (pendingGeneratePrompt && isBuildConfirmationIntent(prompt)) {
+    const buildPrompt = pendingGeneratePrompt;
+    pendingGeneratePrompt = null;
+    await startBuild(buildPrompt);
+    return;
+  }
+
+  setBusy(true);
   addThinkingAnimation();
 
   try {
@@ -1500,6 +1628,8 @@ async function handleChat(prompt) {
         return;
       }
       addBuildPromptAction(pendingGeneratePrompt, result);
+    } else {
+      addQuickReplyButtons(result.quick_replies);
     }
   } catch (error) {
     removeThinkingAnimation();

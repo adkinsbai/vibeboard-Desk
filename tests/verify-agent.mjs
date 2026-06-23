@@ -1424,6 +1424,79 @@ await test("chat planner requires build_prompt for build_ready", async () => {
   assert(valid.project_memory.requirements.includes("显示当前时间"), "valid build plan should preserve project memory");
 });
 
+await test("chat planner preserves quick replies for choice-based clarification", async () => {
+  const { planChatWithModel } = await import(pathToFileURL(path.join(ROOT, "src", "chatPlanner.mjs")).href);
+  let requestBody = null;
+  const plan = await planChatWithModel({
+    baseUrl: "http://planner.test",
+    apiKey: "test-key",
+    model: "mock-planner",
+  }, [{ role: "user", content: "帮我做一个桌面小助手" }], {}, {}, async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              intent: "clarify",
+              reply: "你想优先展示哪类信息？",
+              ready_to_build: false,
+              build_prompt: "",
+              quick_replies: [
+                { label: "时间天气", value: "优先展示时间、天气和一句 AI 摘要。" },
+                { label: "设备状态", value: "优先展示设备状态、网络、内存和温度。" },
+                { label: "按默认方案", value: "按你推荐的默认方案继续。" },
+              ],
+              project_memory: {
+                summary: "桌面小助手",
+                goal: "做一个小屏助手",
+                requirements: [],
+                constraints: ["480x360"],
+                open_questions: ["优先展示哪类信息？"],
+                decisions: [],
+                build_prompt: "",
+              },
+            }),
+          },
+        }],
+      }),
+    };
+  });
+
+  assert(plan.intent === "clarify", `expected clarify intent, got ${JSON.stringify(plan)}`);
+  assert(plan.ready_to_build === false, "clarify choice should not trigger build");
+  assert(plan.quick_replies.length === 3, `expected quick replies, got ${JSON.stringify(plan.quick_replies)}`);
+  assert(plan.quick_replies[0].label === "时间天气", "quick reply label should be preserved");
+  assert(plan.quick_replies[2].value.includes("默认方案"), "default option should be preserved");
+  assert(requestBody.messages[0].content.includes("quick_replies"), "planner prompt should request structured quick replies");
+  assert(requestBody.messages[0].content.includes("clarify 每轮最多问 1 个"), "planner prompt should limit clarification questions");
+});
+
+await test("chat planner supplies fallback choices when clarification omits quick replies", async () => {
+  const { parseChatPlan } = await import(pathToFileURL(path.join(ROOT, "src", "chatPlanner.mjs")).href);
+  const plan = parseChatPlan(JSON.stringify({
+    intent: "clarify",
+    reply: "还需要确认数据来源。",
+    ready_to_build: false,
+    build_prompt: "",
+    project_memory: {
+      summary: "天气面板",
+      goal: "做天气面板",
+      requirements: ["显示天气"],
+      constraints: ["480x360"],
+      open_questions: ["天气数据用真实接口还是模拟数据？"],
+      decisions: [],
+      build_prompt: "",
+    },
+  }));
+
+  assert(plan.intent === "clarify", `expected clarify, got ${JSON.stringify(plan)}`);
+  assert(plan.quick_replies.length >= 3, `expected fallback choices, got ${JSON.stringify(plan.quick_replies)}`);
+  assert(plan.quick_replies.some(choice => choice.label.includes("默认")), "fallback choices should include a default path");
+  assert(plan.quick_replies.some(choice => choice.label.includes("极简")), "fallback choices should include a minimal version path");
+});
+
 await test("chat planner recovers truncated build_ready JSON when build prompt is complete", async () => {
   const { parseChatPlan } = await import(pathToFileURL(path.join(ROOT, "src", "chatPlanner.mjs")).href);
   const longPrompt = [

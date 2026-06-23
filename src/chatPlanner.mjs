@@ -56,6 +56,7 @@ export function parseChatPlan(rawContent, fallbackMemory = {}) {
       ready_to_build: false,
       build_prompt: "",
       project_memory: existingMemory,
+      quick_replies: [],
     };
   }
 
@@ -84,6 +85,7 @@ export function parseChatPlan(rawContent, fallbackMemory = {}) {
       ready_to_build: false,
       build_prompt: "",
       project_memory: existingMemory,
+      quick_replies: [],
     };
   }
 
@@ -94,9 +96,10 @@ export function parseChatPlan(rawContent, fallbackMemory = {}) {
   if (readyToBuild) {
     projectMemory.build_prompt = buildPrompt;
   }
+  const finalIntent = readyToBuild ? "build_ready" : intent === "build_ready" ? "clarify" : intent;
 
   return {
-    intent: readyToBuild ? "build_ready" : intent === "build_ready" ? "clarify" : intent,
+    intent: finalIntent,
     reply: String(parsed.reply || "").trim() || "我已经理解了，请继续补充你的想法。",
     understanding: stringList(parsed.understanding),
     planned_changes: stringList(parsed.planned_changes),
@@ -104,6 +107,7 @@ export function parseChatPlan(rawContent, fallbackMemory = {}) {
     ready_to_build: readyToBuild,
     build_prompt: readyToBuild ? buildPrompt : "",
     project_memory: projectMemory,
+    quick_replies: readyToBuild ? [] : normalizeQuickReplies(parsed.quick_replies, finalIntent, projectMemory),
   };
 }
 
@@ -140,6 +144,7 @@ function recoverChatPlanFromJsonLikeText(raw, existingMemory = {}) {
     ready_to_build: true,
     build_prompt: buildPrompt.value.trim(),
     project_memory: projectMemory,
+    quick_replies: [],
   };
 }
 
@@ -233,6 +238,46 @@ function stringList(value) {
   return value.map(item => String(item || "").trim()).filter(Boolean).slice(0, 8);
 }
 
+function normalizeQuickReplies(value, intent = "chat", projectMemory = {}) {
+  const replies = [];
+  const seen = new Set();
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const reply = normalizeQuickReply(item);
+      if (!reply.label || !reply.value) continue;
+      const key = `${reply.label}\n${reply.value}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      replies.push(reply);
+      if (replies.length >= 4) break;
+    }
+  }
+  if (replies.length || intent !== "clarify") return replies;
+
+  return [
+    { label: "按默认方案", value: "按你推荐的默认方案继续，细节由你补齐。" },
+    { label: "先做极简版", value: "先做极简版，数据可以用模拟内容，界面保持清晰。" },
+    { label: "我补充细节", value: "我补充更多细节。" },
+  ];
+}
+
+function normalizeQuickReply(item) {
+  if (typeof item === "string") {
+    const text = trimChoiceText(item, 80);
+    return { label: trimChoiceText(text, 18), value: text };
+  }
+  if (!item || typeof item !== "object") return { label: "", value: "" };
+  const label = trimChoiceText(item.label || item.title || item.text || item.value || "", 18);
+  const value = trimChoiceText(item.value || item.prompt || item.text || item.label || "", 120);
+  return { label, value };
+}
+
+function trimChoiceText(value, maxLength) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
 function normalizePlannerMessages(rawMessages) {
   if (!Array.isArray(rawMessages)) return [];
   return rawMessages
@@ -268,6 +313,7 @@ function buildPlannerSystemPrompt(preferences = {}, projectMemory = {}) {
   "target": "chat" | "new_project" | "edit_current_project",
   "ready_to_build": true | false,
   "build_prompt": "只有 ready_to_build 为 true 时填写完整、可直接交给代码生成器的需求；否则为空字符串",
+  "quick_replies": [{"label": "按钮文案，12字以内", "value": "用户点击后发送给你的完整回答"}],
   "project_memory": {
     "summary": "当前项目的一句话摘要",
     "goal": "用户最终想做什么",
@@ -282,6 +328,9 @@ function buildPlannerSystemPrompt(preferences = {}, projectMemory = {}) {
 决策原则：
 - 普通聊天、能力询问、解释流程、讨论方案时，intent 为 chat，ready_to_build 为 false。
 - 信息不足、方案还没理清时，intent 为 clarify，reply 里提出必要问题，ready_to_build 为 false。
+- clarify 每轮最多问 1 个最高影响问题；必须把问题做成 2-4 个 quick_replies 选择项，且至少包含一个“按默认方案/先做基础版”之类的省心选项。
+- 不要连续抛出多道开放题；如果缺很多细节，先给一个默认方案和可点击选项，让用户用点选推进。
+- 只要 reply 里向用户提问，就必须使用 intent=clarify，并返回非空 quick_replies；chat 回复不要要求用户手写长答案。
 - 只有当对话中已经有完整可执行需求，并且用户明确授权开始生成时，intent 才能是 build_ready，ready_to_build 才能为 true。
 - 当用户表达“不满意”“继续修改”“改一下当前预览”等反馈时，先在 reply/understanding/planned_changes 里明确说明你理解到什么、准备如何改；如果需求足够明确，target 应为 edit_current_project，并等待用户点击确认后再构建。
 - ready_to_build 为 true 时，reply 必须包含“我理解你要的是...”和“我准备这样做...”的意思，不能只说“需求已整理”。
@@ -295,6 +344,7 @@ function buildPlannerSystemPrompt(preferences = {}, projectMemory = {}) {
 回复风格：
 - 像一个工程搭档，先帮用户理清思路。
 - 简洁、直接、可执行。
+- 追问时用选择题，不要让用户手写长答案。
 - 不要在聊天阶段声称已经生成、验证或部署代码。
 
 当前 project 旧记忆：

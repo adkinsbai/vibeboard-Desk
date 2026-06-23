@@ -52,9 +52,21 @@ VibeBoard 是一个 **AI + 硬件** 的端到端应用生成平台。用户在 W
 - **灰色版真机部署修复**：`taishan-gray` 默认使用 `linaro` 账号，支持默认 SSH key 或密码认证；Windows 下大包上传改为 stdin 通道，避免 `spawn ENAMETOOLONG`；Golden Loop 会同时检查 HTTP、静态文件、manifest、板端程序、服务和 kiosk 几何。
 - **真实 L4 验证通过**：灰色版 build `vb-mqqmu8pt-d296c7` 已部署到 `taishan-gray`，`/api/verify?id=vb-mqqmu8pt-d296c7&deviceId=taishan-gray` 返回 `goldenLoop.ok: true`。
 - **持久对话与项目快照**：刷新页面后会自动恢复最近对话、消息、项目文件和预览状态；没有内容时设备预览保持纯黑屏，避免空 iframe 白屏。
+- **Agent 交互提速**：澄清问题改为 `quick_replies` 选择题，每轮最多追问一个关键问题；用户输入“开始吧”会直接进入构建，输入“帮我部署吧”会基于当前构建直接显示部署确认按钮。
 - **应用市场扩展**：内置静态市场应用、预览图、二进制资源资产、数据库发布/部署流程，支持从市场一键部署回硬件。
 - **Digital Life Companion**：新增独立 `/digital-life.html` 页面和本地优先的 companion runtime，包含长期记忆、情绪/认知/自主性循环、presence、硬件/音频 API 和 UI smoke 测试。
 - **验证栈升级**：`npm run check` 会扫描主程序、前端脚本、`src/*.mjs`、Digital Life 和测试文件；`npm run verify:all` 汇总 Agent、offline 和 Digital Life 验证。
+
+### Agent 工作流
+
+Agent 的目标不是自动把代码写进真机，而是把风险分成几个明确关口：
+
+1. **理解/规划**：`/api/agent` 调用 chat planner，整理当前对话、项目记忆、目标和约束。
+2. **选择题澄清**：信息不足时只问一个最高影响问题，并返回 2-4 个 `quick_replies` 按钮，用户可以直接点选推进。
+3. **确认构建**：需求完整后显示“我理解你要的是/我准备这样做”的确认卡；用户点按钮或输入“开始吧/按这个方案”都会进入构建。
+4. **本地 L0-L3 验证**：生成文件、硬件契约、语法、模拟运行和 480×360 渲染先在本地通过。
+5. **部署确认**：本地验证完成后才显示部署按钮；如果用户直接输入“帮我部署吧”，前端会检测当前构建并直接给出部署确认按钮，不再重复追问。
+6. **真机 L4 Golden Loop**：点击部署后通过 SSH 写入板端，再检查 HTTP、manifest、服务、kiosk 几何和板端运行结果。
 
 ---
 
