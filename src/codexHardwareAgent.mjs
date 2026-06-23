@@ -13,6 +13,14 @@ export async function planCodexHardwareWithModel({
 } = {}) {
   const normalizedMemory = normalizeProjectMemory(projectMemory);
   const bridge = codexBridgeMetadata({ modeBoundary, assetContext, action: "message" });
+  const scopeDecision = evaluateCodexHardwareScope(rawMessages);
+  if (!scopeDecision.allowed) {
+    return createCodexScopeRedirect({
+      reason: scopeDecision.reason,
+      projectMemory: normalizedMemory,
+      bridge,
+    });
+  }
   const messages = [
     {
       role: "system",
@@ -57,6 +65,36 @@ export async function planCodexHardwareWithModel({
   return attachCodexBridge(plan, bridge);
 }
 
+export function evaluateCodexHardwareScope(rawMessages = []) {
+  const latest = latestUserMessage(rawMessages).toLowerCase();
+  if (!latest) return { allowed: true, reason: "" };
+
+  const hardwareSignals = [
+    "vibeboard", "480", "360", "小屏", "硬件", "嵌入式", "屏幕", "泰山", "rk3566",
+    "部署到板", "真机", "kiosk", "硬件ui", "小屏界面", "小屏app", "assets库", "素材包",
+  ];
+  if (hardwareSignals.some(signal => latest.includes(signal.toLowerCase()))) {
+    return { allowed: true, reason: "" };
+  }
+
+  const outOfScopeChecks = [
+    { reason: "desktop automation", pattern: /(控制|操作|打开|关闭|删除|安装|卸载|重启|点击|输入|复制|移动).*(电脑|windows|桌面|文件夹|浏览器|微信|qq|软件|系统)/i },
+    { reason: "desktop automation", pattern: /(control|operate|open|close|delete|install|uninstall|restart|click|type|copy|move).*(computer|windows|desktop|folder|browser|system|software)/i },
+    { reason: "account or payment task", pattern: /(登录|注册|账号|密码|付款|支付|转账|充值|提现|银行卡|购买|下单|订单)/i },
+    { reason: "account or payment task", pattern: /(login|register|account|password|payment|pay|transfer|checkout|purchase|order)/i },
+    { reason: "trading or finance task", pattern: /(股票|基金|期货|加密货币|交易|买入|卖出|下单|投资|炒股|量化)/i },
+    { reason: "trading or finance task", pattern: /(stock|fund|future|crypto|trade|buy|sell|invest|trading)/i },
+    { reason: "unrelated web task", pattern: /(帮我|替我).*(网页|网站|表单|申请|投递|邮箱|搜索|下载|爬取)/i },
+    { reason: "unrelated web task", pattern: /(help me|for me).*(webpage|website|form|application|email|search|download|scrape)/i },
+  ];
+  for (const check of outOfScopeChecks) {
+    if (check.pattern.test(latest)) {
+      return { allowed: false, reason: check.reason };
+    }
+  }
+  return { allowed: true, reason: "" };
+}
+
 export function codexBridgeMetadata({ modeBoundary = {}, assetContext = "", action = "message" } = {}) {
   return {
     name: "codex-hardware-agent",
@@ -87,7 +125,50 @@ export function attachCodexBridge(plan = {}, bridge = codexBridgeMetadata()) {
   return {
     ...plan,
     project_memory: projectMemory,
-    codex_bridge: bridge,
+    codex_bridge: plan.codex_bridge ? { ...bridge, ...plan.codex_bridge } : bridge,
+  };
+}
+
+export function createCodexScopeRedirect({ reason = "out of scope", projectMemory = {}, bridge = codexBridgeMetadata() } = {}) {
+  return attachCodexBridge(outOfScopePlan({ reason, projectMemory, bridge }), bridge);
+}
+
+function outOfScopePlan({ reason = "out of scope", projectMemory = {}, bridge = codexBridgeMetadata() } = {}) {
+  const memory = normalizeProjectMemory(projectMemory);
+  const question = "这个请求超出了 Codex 硬件模式。我只能继续帮你做 VibeBoard 480x360 小屏硬件应用，要不要把它改成小屏功能？";
+  return {
+    intent: "clarify",
+    reply: question,
+    understanding: [
+      `当前请求被识别为 ${reason}，不属于 VibeBoard 硬件嵌入式设计范围。`,
+      "Codex 模式只能处理 480x360 小屏 UI 设计、生成、本地验证和明确部署确认。",
+    ],
+    planned_changes: [],
+    target: "chat",
+    ready_to_build: false,
+    build_prompt: "",
+    project_memory: {
+      ...memory,
+      open_questions: [
+        "是否把这个想法改写成 VibeBoard 480x360 小屏硬件应用？",
+      ],
+      decisions: [
+        ...memory.decisions,
+        `Codex hardware scope guard redirected an out-of-scope request: ${reason}.`,
+      ].slice(-12),
+    },
+    quick_replies: [
+      { label: "改成小屏", value: "把这个想法改成 VibeBoard 480x360 小屏硬件应用。" },
+      { label: "做基础版", value: "按默认方案做一个 VibeBoard 小屏基础版。" },
+      { label: "先不做", value: "先不做这个，继续讨论硬件小屏应用。" },
+    ],
+    codex_bridge: {
+      ...bridge,
+      scope_guard: {
+        blocked: true,
+        reason,
+      },
+    },
   };
 }
 
@@ -157,6 +238,18 @@ ${String(assetContext || "").trim() || "none"}
 
 User preferences:
 ${preferenceText || "none"}`;
+}
+
+function latestUserMessage(rawMessages = []) {
+  const messages = Array.isArray(rawMessages) ? rawMessages : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const role = String(message?.role || "user").trim();
+    if (role === "assistant" || role === "agent") continue;
+    const content = String(message?.content || "").trim();
+    if (content) return content;
+  }
+  return "";
 }
 
 function normalizeCodexMessages(rawMessages = []) {

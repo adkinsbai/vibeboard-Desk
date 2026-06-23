@@ -16,7 +16,7 @@
 - Improved Golden Loop verification so board HTTP build-id checks inspect `/`, `/index.html`, `/app.js`, and `/manifest.json`.
 - Improved Agent UX so clarification uses structured `quick_replies` choice buttons, typed confirmations can start the pending build, and deploy intent such as "帮我部署吧" shows a deploy confirmation button for the current verified build instead of re-entering open-ended planning.
 - Added the first Asset Library slice: users can upload mixed files from the chat composer, the server stores and analyzes them per conversation, safely expands supported `.zip`, `.tar`, `.tgz`, and `.gz` bundles into individual analyzed assets, and Agent planning/build prompts receive a bounded hardware-focused asset summary plus an inferred product design brief.
-- Added an Agent implementation selector for self-developed VibeBoard Agent versus Codex hardware mode, with Codex mode routed through a dedicated `codex-hardware-agent` bridge, constrained to embedded 480x360 hardware app design/generation/verification/deploy-confirmation, and exposed through backend `mode_boundary` plus `codex_bridge` contracts.
+- Added an Agent implementation selector for self-developed VibeBoard Agent versus Codex hardware mode, with Codex mode routed through a dedicated `codex-hardware-agent` bridge, constrained by a code-level scope guard to embedded 480x360 hardware app design/generation/verification/deploy-confirmation, and exposed through backend `mode_boundary` plus `codex_bridge` contracts.
 
 ### Gray Board Validation
 

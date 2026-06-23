@@ -2253,6 +2253,52 @@ await test("agent orchestrator passes Codex bridge into confirmed builds", async
   assert(result.codex_bridge?.scope?.includes("480x360"), "build result should expose bridge scope");
 });
 
+await test("codex hardware mode redirects unrelated desktop tasks before model call", async () => {
+  const { createAgentOrchestrator } = await import(pathToFileURL(path.join(ROOT, "src", "agentOrchestrator.mjs")).href);
+  let fetchCalled = false;
+  const orchestrator = createAgentOrchestrator({
+    conversationStore: {
+      getProjectMemory: () => ({ summary: "codex scope test" }),
+      setProjectMemory: () => {},
+    },
+    memoryStore: {
+      getAll: () => ({}),
+    },
+    runGenerateRequest: async () => ({ ok: true }),
+    fetchImpl: async () => {
+      fetchCalled = true;
+      throw new Error("fetch should not be called for out-of-scope Codex tasks");
+    },
+  });
+
+  const result = await orchestrator.runAgentRequest({
+    action: "message",
+    agent_mode: "codex",
+    modelSettings: {
+      provider: "custom",
+      baseUrl: "http://planner.test",
+      apiKey: "test-key",
+      model: "mock-planner",
+    },
+    messages: [{ role: "user", content: "帮我操作电脑打开浏览器登录账号付款" }],
+  });
+
+  assert(fetchCalled === false, "out-of-scope Codex task should be redirected before LLM call");
+  assert(result.intent === "clarify", `expected clarify redirect, got ${JSON.stringify(result)}`);
+  assert(result.ready_to_build === false, "out-of-scope redirect should not be build-ready");
+  assert(result.codex_bridge?.scope_guard?.blocked === true, `scope guard metadata should mark block, got ${JSON.stringify(result.codex_bridge)}`);
+  assert(result.reply.includes("VibeBoard") && result.reply.includes("480x360"), "redirect should explain the hardware-only scope");
+  assert(result.quick_replies.some(reply => reply.label.includes("小屏")), "redirect should offer hardware quick replies");
+});
+
+await test("codex hardware scope classifier requires explicit hardware signals", async () => {
+  const { evaluateCodexHardwareScope } = await import(pathToFileURL(path.join(ROOT, "src", "codexHardwareAgent.mjs")).href);
+  assert(evaluateCodexHardwareScope([{ role: "user", content: "帮我操作电脑打开浏览器登录账号付款" }]).allowed === false, "Chinese desktop/payment task should be blocked");
+  assert(evaluateCodexHardwareScope([{ role: "user", content: "please control my Windows desktop, open browser, login account and make a payment" }]).allowed === false, "English desktop/payment task should be blocked");
+  assert(evaluateCodexHardwareScope([{ role: "user", content: "做一个 480x360 小屏天气应用" }]).allowed === true, "explicit small-screen hardware app should be allowed");
+  assert(evaluateCodexHardwareScope([{ role: "user", content: "做一个普通应用" }]).allowed === true, "ambiguous normal app should remain discussable");
+});
+
 await test("build registry tracks current and conversation builds", async () => {
   const { createBuildRegistry } = await import(pathToFileURL(path.join(ROOT, "src", "buildRegistry.mjs")).href);
   const registry = createBuildRegistry();

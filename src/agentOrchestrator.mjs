@@ -1,6 +1,11 @@
 import { runAgentGraph } from "./agentGraph.mjs";
 import { planChatWithModel } from "./chatPlanner.mjs";
-import { codexBridgeMetadata, planCodexHardwareWithModel } from "./codexHardwareAgent.mjs";
+import {
+  codexBridgeMetadata,
+  createCodexScopeRedirect,
+  evaluateCodexHardwareScope,
+  planCodexHardwareWithModel,
+} from "./codexHardwareAgent.mjs";
 import { normalizeProjectMemory } from "./conversationStore.mjs";
 import { normalizeModelSettings } from "./modelSettings.mjs";
 
@@ -42,6 +47,21 @@ export function createAgentOrchestrator({
       modeBoundary,
     }, {
       planMessage: async () => {
+        if (agentMode === "codex") {
+          const scopeDecision = evaluateCodexHardwareScope(rawMessages);
+          if (!scopeDecision.allowed) {
+            const plan = createCodexScopeRedirect({
+              reason: scopeDecision.reason,
+              projectMemory,
+              bridge: codexBridge,
+            });
+            if (conversationId && plan.project_memory) {
+              conversationStore.setProjectMemory(conversationId, plan.project_memory);
+            }
+            return plan;
+          }
+        }
+
         if (!modelSettings.enabled) {
           return {
             intent: "chat",
