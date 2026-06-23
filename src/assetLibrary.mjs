@@ -212,7 +212,7 @@ export function normalizeIncomingAsset(item = {}) {
   const textPreview = shouldPreviewText(ext, mime, buffer)
     ? buffer.toString("utf8", 0, Math.min(buffer.byteLength, ASSET_LIBRARY_LIMITS.textPreviewBytes))
     : "";
-  const summary = analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview });
+  const summary = analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview, buffer });
 
   return {
     id: `asset-${sha256.slice(0, 12)}-${crypto.randomUUID().slice(0, 8)}`,
@@ -295,9 +295,10 @@ export function classifyAsset({ name = "", mime = "", ext = path.posix.extname(n
   return "binary";
 }
 
-export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview = "" }) {
+export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview = "", buffer = Buffer.alloc(0) }) {
   const compact = textPreview ? compactText(textPreview) : "";
-  const insights = extractAssetInsights({ name, mime, kind, ext, text: compact });
+  const mediaProfile = analyzeMediaProfile({ name, mime, kind, ext, size, buffer, text: compact });
+  const insights = extractAssetInsights({ name, mime, kind, ext, text: compact, mediaProfile });
   const summary = {
     name,
     mime,
@@ -309,6 +310,7 @@ export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview 
     signals: [],
     textPreview: "",
     insights,
+    mediaProfile,
   };
 
   if (compact) {
@@ -325,6 +327,7 @@ export function analyzeAsset({ name, mime, kind, ext, size, sha256, textPreview 
   }
   if (kind === "video") summary.signals.push("Video can be used as visual reference or compressed media for the 480x360 screen.");
   if (kind === "audio") summary.signals.push("Audio can support startup sounds, alerts, voice UI, or ambience when hardware audio is available.");
+  if (mediaProfile.summary) summary.signals.push(mediaProfile.summary);
   return summary;
 }
 
@@ -497,6 +500,7 @@ export function summarizeAssets(assets = []) {
       signals: (asset.summary?.signals || []).slice(0, 4),
       textPreview: asset.summary?.textPreview || "",
       insights: compactPublicInsights(asset.summary?.insights || {}),
+      mediaProfile: compactMediaProfile(asset.summary?.mediaProfile || {}),
     })),
   };
 }
@@ -520,6 +524,7 @@ export function formatAssetContext(assets = []) {
     for (const cta of summary.designBrief.ctas.slice(0, 4)) lines.push(`  cta: ${cta}`);
     for (const field of summary.designBrief.dataFields.slice(0, 8)) lines.push(`  data-field: ${field}`);
     for (const media of summary.designBrief.mediaPlan.slice(0, 5)) lines.push(`  media-plan: ${media}`);
+    for (const profile of summary.designBrief.mediaProfiles.slice(0, 8)) lines.push(`  media-profile: ${profile}`);
     for (const interaction of summary.designBrief.interactions.slice(0, 5)) lines.push(`  interaction: ${interaction}`);
   }
   for (const item of summary.items) {
@@ -528,6 +533,7 @@ export function formatAssetContext(assets = []) {
     for (const color of (item.insights?.colors || []).slice(0, 3)) lines.push(`  color: ${color}`);
     for (const cta of (item.insights?.ctas || []).slice(0, 2)) lines.push(`  cta: ${cta}`);
     for (const field of (item.insights?.dataFields || []).slice(0, 4)) lines.push(`  data-field: ${field}`);
+    if (item.mediaProfile?.summary) lines.push(`  media-profile: ${item.mediaProfile.summary}`);
     if (item.textPreview) lines.push(`  preview: ${item.textPreview.slice(0, 240)}`);
   }
   return `\n\n${lines.join("\n")}`;
@@ -782,6 +788,7 @@ function compactText(value) {
 function buildAssetDesignBrief(assets = [], byKind = {}) {
   const signals = assets.flatMap(asset => asset.summary?.signals || []);
   const insights = mergeAssetInsights(assets.map(asset => asset.summary?.insights || {}));
+  const mediaProfiles = assets.map(asset => asset.summary?.mediaProfile || {}).filter(profile => profile.summary);
   const previews = assets
     .map(asset => asset.summary?.textPreview || "")
     .filter(Boolean)
@@ -819,6 +826,9 @@ function buildAssetDesignBrief(assets = [], byKind = {}) {
   }
   if (byKind.archive) {
     references.push("Archive assets indicate a bundled product kit; use extracted entries as the real design source.");
+  }
+  for (const profile of mediaProfiles.slice(0, 8)) {
+    references.push(profile.summary);
   }
 
   if (signals.some(signal => signal.includes("visual identity")) || /(brand|logo|palette|品牌|色彩|视觉)/i.test(previews)) {
@@ -862,7 +872,8 @@ function buildAssetDesignBrief(assets = [], byKind = {}) {
     components: insights.components.slice(0, 10),
     ctas: insights.ctas.slice(0, 8),
     dataFields: insights.dataFields.slice(0, 12),
-    mediaPlan: buildMediaPlan(byKind, insights).slice(0, 8),
+    mediaPlan: buildMediaPlan(byKind, insights, mediaProfiles).slice(0, 8),
+    mediaProfiles: mediaProfiles.map(profile => profile.summary).slice(0, 12),
     interactions: insights.interactions.slice(0, 10),
   };
 }
@@ -879,7 +890,7 @@ function extractTextSignals(text) {
   return signals.slice(0, 6);
 }
 
-function extractAssetInsights({ name = "", mime = "", kind = "", ext = "", text = "" } = {}) {
+function extractAssetInsights({ name = "", mime = "", kind = "", ext = "", text = "", mediaProfile = {} } = {}) {
   const source = String(text || "");
   const lowerName = String(name || "").toLowerCase();
   const colors = extractColors(source);
@@ -900,6 +911,7 @@ function extractAssetInsights({ name = "", mime = "", kind = "", ext = "", text 
   if (kind === "font") signals.push("Font asset can inform typography hierarchy if converted into local CSS safely.");
   if (kind === "video") signals.push("Video asset should be represented as thumbnail, loop, timeline, or motion state on the 480x360 UI.");
   if (kind === "audio") signals.push("Audio asset should map to a playback/status/voice feedback control if useful.");
+  if (mediaProfile.summary) signals.push(mediaProfile.summary);
   if (String(mime || "").includes("json") || ext === ".json") signals.push("JSON asset can seed structured dashboard content.");
 
   return {
@@ -1002,12 +1014,254 @@ function compactPublicInsights(insights = {}) {
   };
 }
 
-function buildMediaPlan(byKind = {}, insights = {}) {
+function analyzeMediaProfile({ name = "", mime = "", kind = "", ext = "", size = 0, buffer = Buffer.alloc(0), text = "" } = {}) {
+  if (!["image", "video", "audio", "font"].includes(kind)) {
+    return { kind, summary: "", width: null, height: null, durationSec: null, tags: [] };
+  }
+
+  const profile = {
+    kind,
+    format: ext ? ext.slice(1) : mediaFormatFromMime(mime),
+    width: null,
+    height: null,
+    aspect: "",
+    durationSec: null,
+    sampleRate: null,
+    channels: null,
+    bitrateKbps: null,
+    tags: [],
+    summary: "",
+  };
+
+  if (kind === "image") Object.assign(profile, imageProfile(buffer, ext, text));
+  if (kind === "audio") Object.assign(profile, audioProfile(buffer, ext));
+  if (kind === "video") Object.assign(profile, videoProfile(buffer, ext));
+  if (kind === "font") profile.tags.push("typography asset");
+
+  profile.tags.push(...mediaNameTags(name, kind));
+  profile.tags = uniqueStrings(profile.tags).slice(0, 10);
+  profile.summary = mediaSummary({ ...profile, name, size });
+  return profile;
+}
+
+function imageProfile(buffer = Buffer.alloc(0), ext = "", text = "") {
+  const dimensions = imageDimensions(buffer, ext, text);
+  const tags = [];
+  if (dimensions.width && dimensions.height) {
+    const ratio = dimensions.width / dimensions.height;
+    if (ratio > 1.4) tags.push("wide visual");
+    else if (ratio < 0.75) tags.push("portrait visual");
+    else tags.push("balanced visual");
+    if (dimensions.width >= 480 || dimensions.height >= 360) tags.push("screen-scale source");
+  }
+  return {
+    ...dimensions,
+    aspect: dimensions.width && dimensions.height ? aspectLabel(dimensions.width, dimensions.height) : "",
+    tags,
+  };
+}
+
+function audioProfile(buffer = Buffer.alloc(0), ext = "") {
+  const tags = [];
+  const wav = ext === ".wav" ? wavProfile(buffer) : {};
+  if (ext === ".mp3" && buffer.subarray(0, 3).toString("latin1") === "ID3") tags.push("mp3 id3 metadata");
+  if (ext === ".ogg" && buffer.subarray(0, 4).toString("latin1") === "OggS") tags.push("ogg stream");
+  if (wav.durationSec != null && wav.durationSec <= 6) tags.push("short sound cue");
+  else if (wav.durationSec != null) tags.push("longer audio bed");
+  return {
+    durationSec: wav.durationSec ?? null,
+    sampleRate: wav.sampleRate ?? null,
+    channels: wav.channels ?? null,
+    bitrateKbps: wav.bitrateKbps ?? null,
+    tags,
+  };
+}
+
+function videoProfile(buffer = Buffer.alloc(0), ext = "") {
+  const tags = [];
+  if (ext === ".webm" && buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) tags.push("webm container");
+  if ([".mp4", ".mov", ".m4v"].includes(ext) && buffer.includes(Buffer.from("ftyp"))) tags.push("mp4-family container");
+  tags.push("use as poster/timeline/motion state");
+  return { tags };
+}
+
+function imageDimensions(buffer = Buffer.alloc(0), ext = "", text = "") {
+  if (ext === ".png" && buffer.length >= 24 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  }
+  if ((ext === ".jpg" || ext === ".jpeg") && buffer.length > 4) return jpegDimensions(buffer);
+  if (ext === ".gif" && buffer.length >= 10 && buffer.subarray(0, 3).toString("latin1") === "GIF") {
+    return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
+  }
+  if (ext === ".webp" && buffer.length >= 30) return webpDimensions(buffer);
+  if (ext === ".svg") return svgDimensions(text);
+  return { width: null, height: null };
+}
+
+function jpegDimensions(buffer = Buffer.alloc(0)) {
+  let offset = 2;
+  while (offset + 9 < buffer.length) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = buffer[offset + 1];
+    const length = buffer.readUInt16BE(offset + 2);
+    if (length < 2) break;
+    if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+      return { width: buffer.readUInt16BE(offset + 7), height: buffer.readUInt16BE(offset + 5) };
+    }
+    offset += 2 + length;
+  }
+  return { width: null, height: null };
+}
+
+function webpDimensions(buffer = Buffer.alloc(0)) {
+  if (buffer.subarray(0, 4).toString("latin1") !== "RIFF" || buffer.subarray(8, 12).toString("latin1") !== "WEBP") {
+    return { width: null, height: null };
+  }
+  const chunk = buffer.subarray(12, 16).toString("latin1");
+  if (chunk === "VP8X" && buffer.length >= 30) {
+    return {
+      width: 1 + buffer.readUIntLE(24, 3),
+      height: 1 + buffer.readUIntLE(27, 3),
+    };
+  }
+  if (chunk === "VP8 " && buffer.length >= 30) {
+    return {
+      width: buffer.readUInt16LE(26) & 0x3fff,
+      height: buffer.readUInt16LE(28) & 0x3fff,
+    };
+  }
+  if (chunk === "VP8L" && buffer.length >= 25) {
+    const bits = buffer.readUInt32LE(21);
+    return {
+      width: (bits & 0x3fff) + 1,
+      height: ((bits >> 14) & 0x3fff) + 1,
+    };
+  }
+  return { width: null, height: null };
+}
+
+function svgDimensions(text = "") {
+  const raw = String(text || "");
+  const width = numberFromSvgLength(raw.match(/\bwidth=["']?([\d.]+)/i)?.[1]);
+  const height = numberFromSvgLength(raw.match(/\bheight=["']?([\d.]+)/i)?.[1]);
+  if (width && height) return { width, height };
+  const viewBox = raw.match(/\bviewBox=["']\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)/i);
+  return {
+    width: numberFromSvgLength(viewBox?.[1]) || null,
+    height: numberFromSvgLength(viewBox?.[2]) || null,
+  };
+}
+
+function wavProfile(buffer = Buffer.alloc(0)) {
+  if (buffer.length < 44 || buffer.subarray(0, 4).toString("latin1") !== "RIFF" || buffer.subarray(8, 12).toString("latin1") !== "WAVE") {
+    return {};
+  }
+  let offset = 12;
+  let channels = null;
+  let sampleRate = null;
+  let byteRate = null;
+  let dataBytes = null;
+  while (offset + 8 <= buffer.length) {
+    const id = buffer.subarray(offset, offset + 4).toString("latin1");
+    const size = buffer.readUInt32LE(offset + 4);
+    const dataStart = offset + 8;
+    if (id === "fmt " && dataStart + 16 <= buffer.length) {
+      channels = buffer.readUInt16LE(dataStart + 2);
+      sampleRate = buffer.readUInt32LE(dataStart + 4);
+      byteRate = buffer.readUInt32LE(dataStart + 8);
+    }
+    if (id === "data") dataBytes = size;
+    offset = dataStart + size + (size % 2);
+  }
+  const durationSec = byteRate && dataBytes != null ? dataBytes / byteRate : null;
+  return {
+    channels,
+    sampleRate,
+    durationSec: durationSec != null ? Number(durationSec.toFixed(2)) : null,
+    bitrateKbps: byteRate ? Math.round((byteRate * 8) / 1000) : null,
+  };
+}
+
+function mediaNameTags(name = "", kind = "") {
+  const lower = String(name || "").toLowerCase();
+  const tags = [];
+  if (/(hero|cover|banner|poster|主视觉|封面|海报)/i.test(lower)) tags.push("hero placement");
+  if (/(logo|icon|brand|标志|图标|品牌)/i.test(lower)) tags.push("brand mark");
+  if (/(loop|ambient|bg|background|背景|循环|氛围)/i.test(lower)) tags.push(kind === "audio" ? "ambient loop" : "background media");
+  if (/(alert|notification|click|success|提示|成功|点击)/i.test(lower)) tags.push("feedback cue");
+  return tags;
+}
+
+function mediaSummary(profile = {}) {
+  const parts = [];
+  if (profile.kind === "image") {
+    parts.push(`Image ${profile.name || "asset"}`);
+    if (profile.width && profile.height) parts.push(`${profile.width}x${profile.height}${profile.aspect ? ` ${profile.aspect}` : ""}`);
+  } else if (profile.kind === "audio") {
+    parts.push(`Audio ${profile.name || "asset"}`);
+    if (profile.durationSec != null) parts.push(`${profile.durationSec}s`);
+    if (profile.sampleRate) parts.push(`${profile.sampleRate}Hz`);
+  } else if (profile.kind === "video") {
+    parts.push(`Video ${profile.name || "asset"}`);
+  } else if (profile.kind === "font") {
+    parts.push(`Font ${profile.name || "asset"}`);
+  }
+  if (profile.tags?.length) parts.push(`tags: ${profile.tags.slice(0, 4).join(", ")}`);
+  return parts.length ? parts.join("; ") : "";
+}
+
+function compactMediaProfile(profile = {}) {
+  return {
+    kind: profile.kind || "",
+    format: profile.format || "",
+    width: profile.width ?? null,
+    height: profile.height ?? null,
+    aspect: profile.aspect || "",
+    durationSec: profile.durationSec ?? null,
+    sampleRate: profile.sampleRate ?? null,
+    channels: profile.channels ?? null,
+    tags: Array.isArray(profile.tags) ? profile.tags.slice(0, 6) : [],
+    summary: profile.summary || "",
+  };
+}
+
+function aspectLabel(width, height) {
+  if (!width || !height) return "";
+  if (width === 480 && height === 360) return "480:360 fit";
+  const ratio = width / height;
+  if (Math.abs(ratio - 4 / 3) < 0.04) return "4:3";
+  if (Math.abs(ratio - 16 / 9) < 0.05) return "16:9";
+  if (Math.abs(ratio - 1) < 0.04) return "square";
+  return `${ratio.toFixed(2)}:1`;
+}
+
+function numberFromSvgLength(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function mediaFormatFromMime(mime = "") {
+  const parts = String(mime || "").split("/");
+  return parts[1] || "";
+}
+
+function buildMediaPlan(byKind = {}, insights = {}, mediaProfiles = []) {
   const plan = [];
   if (byKind.image) plan.push("Use image assets as product hero, icon strip, texture, or compact slideshow with local paths.");
   if (byKind.video) plan.push("Use video assets as motion thumbnails, poster frames, timeline states, or very short local clips when contract-safe.");
   if (byKind.audio) plan.push("Expose audio assets as play/pause/status cues through the existing hardware audio APIs when relevant.");
   if (byKind.font) plan.push("Use font assets for typography direction while keeping fallback fonts readable on 480x360.");
+  for (const profile of mediaProfiles.slice(0, 6)) {
+    if (profile.kind === "image" && profile.width && profile.height) {
+      plan.push(`Fit ${profile.name || "image asset"} (${profile.width}x${profile.height}) into the 480x360 screen without cropping important product content.`);
+    }
+    if (profile.kind === "audio" && profile.durationSec != null) {
+      plan.push(`Represent ${profile.name || "audio asset"} as a ${profile.durationSec <= 6 ? "short sound cue" : "playback state"} with clear controls/status.`);
+    }
+  }
   if (insights.ctas?.length) plan.push(`Map CTA text into concise hardware-friendly controls: ${insights.ctas.slice(0, 4).join(", ")}.`);
   return uniqueStrings(plan);
 }

@@ -2041,6 +2041,11 @@ function assetSummaryTooltip(summary = {}, kinds = "") {
     lines.push("Media plan:");
     for (const item of mediaPlan) lines.push(`- ${item}`);
   }
+  const mediaProfiles = Array.isArray(brief.mediaProfiles) ? brief.mediaProfiles.slice(0, 4) : [];
+  if (mediaProfiles.length) {
+    lines.push("Media profiles:");
+    for (const item of mediaProfiles) lines.push(`- ${item}`);
+  }
   return lines.join("\n");
 }
 
@@ -2066,6 +2071,7 @@ async function uploadAssetFiles(fileList) {
       ...(Array.isArray(designBrief.components) && designBrief.components.length ? [`组件结构：${designBrief.components.slice(0, 6).join(", ")}`] : []),
       ...(Array.isArray(designBrief.ctas) && designBrief.ctas.length ? [`操作文案：${designBrief.ctas.slice(0, 4).join(", ")}`] : []),
       ...(Array.isArray(designBrief.dataFields) && designBrief.dataFields.length ? [`数据字段：${designBrief.dataFields.slice(0, 6).join(", ")}`] : []),
+      ...(Array.isArray(designBrief.mediaProfiles) && designBrief.mediaProfiles.length ? [`媒体画像：${designBrief.mediaProfiles.slice(0, 3).join("；")}`] : []),
     ];
     const brief = priorities.length || insightLines.length
       ? `\n\n**Assets 设计简报**\n${[

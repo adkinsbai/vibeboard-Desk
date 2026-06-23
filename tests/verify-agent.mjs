@@ -194,6 +194,37 @@ function makeTar(entries = []) {
   return Buffer.concat(chunks);
 }
 
+function makePngHeader(width = 480, height = 360) {
+  const buffer = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer, 0);
+  buffer.writeUInt32BE(13, 8);
+  buffer.write("IHDR", 12, 4, "ascii");
+  buffer.writeUInt32BE(width, 16);
+  buffer.writeUInt32BE(height, 20);
+  return buffer;
+}
+
+function makeWavHeader({ sampleRate = 16000, channels = 1, durationSec = 2 } = {}) {
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * channels * bitsPerSample / 8;
+  const dataBytes = Math.round(byteRate * durationSec);
+  const buffer = Buffer.alloc(44);
+  buffer.write("RIFF", 0, 4, "ascii");
+  buffer.writeUInt32LE(36 + dataBytes, 4);
+  buffer.write("WAVE", 8, 4, "ascii");
+  buffer.write("fmt ", 12, 4, "ascii");
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(channels, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(byteRate, 28);
+  buffer.writeUInt16LE(channels * bitsPerSample / 8, 32);
+  buffer.writeUInt16LE(bitsPerSample, 34);
+  buffer.write("data", 36, 4, "ascii");
+  buffer.writeUInt32LE(dataBytes, 40);
+  return buffer;
+}
+
 function validGeneratedFilesWithAsset() {
   const files = validGeneratedFiles();
   const manifest = JSON.parse(files["manifest.json"]);
@@ -1657,9 +1688,9 @@ await test("asset library expands TGZ bundles and builds a product design brief"
     { name: "brief/brand.md", content: "品牌 palette cyan #12f7d6 logo motion dashboard 480x360 音乐 氛围 CTA: 立即开始" },
     { name: "components/player.html", content: "<section class=\"hero player-card\"><audio src=\"theme.mp3\"></audio><button>Play</button><button>Connect Device</button></section>" },
     { name: "data/metrics.json", content: "{\"temperature\": 26, \"battery\": 88, \"status\": \"online\", \"volume\": 64}" },
-    { name: "media/theme.mp3", content: Buffer.from([0x49, 0x44, 0x33, 0x03]) },
+    { name: "media/theme.wav", content: makeWavHeader({ sampleRate: 16000, channels: 1, durationSec: 2 }) },
     { name: "media/loop.webm", content: Buffer.from([0x1a, 0x45, 0xdf, 0xa3]) },
-    { name: "images/product.png", content: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+    { name: "images/product.png", content: makePngHeader(480, 360) },
   ]);
   const tgz = zlib.gzipSync(tar);
   const result = normalizeIncomingAssets([
@@ -1674,7 +1705,7 @@ await test("asset library expands TGZ bundles and builds a product design brief"
   assert(names.includes("product-kit/brief/brand.md"), `brief should be extracted, got ${names.join(",")}`);
   assert(names.includes("product-kit/components/player.html"), "component should be extracted from tgz");
   assert(names.includes("product-kit/data/metrics.json"), "JSON data should be extracted from tgz");
-  assert(names.includes("product-kit/media/theme.mp3"), "audio should be extracted from tgz");
+  assert(names.includes("product-kit/media/theme.wav"), "audio should be extracted from tgz");
   assert(names.includes("product-kit/media/loop.webm"), "video should be extracted from tgz");
   assert(names.includes("product-kit/images/product.png"), "image should be extracted from tgz");
   assert(summary.byKind.audio === 1, `audio should be classified, got ${JSON.stringify(summary.byKind)}`);
@@ -1687,12 +1718,18 @@ await test("asset library expands TGZ bundles and builds a product design brief"
   assert(summary.designBrief.ctas.some(item => /Play|立即开始|Connect/.test(item)), `design brief should expose CTA cues, got ${JSON.stringify(summary.designBrief)}`);
   assert(summary.designBrief.dataFields.includes("temperature"), `design brief should expose JSON fields, got ${JSON.stringify(summary.designBrief)}`);
   assert(summary.designBrief.mediaPlan.some(item => item.includes("audio") || item.includes("video") || item.includes("image")), `design brief should include media plan, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.mediaProfiles.some(item => item.includes("product.png") && item.includes("480x360")), `design brief should expose image dimensions, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.designBrief.mediaProfiles.some(item => item.includes("theme.wav") && item.includes("2s")), `design brief should expose audio duration, got ${JSON.stringify(summary.designBrief)}`);
+  assert(summary.items.some(item => item.name === "product-kit/images/product.png" && item.mediaProfile?.width === 480 && item.mediaProfile?.height === 360), `image item should expose media profile, got ${JSON.stringify(summary.items)}`);
+  assert(summary.items.some(item => item.name === "product-kit/media/theme.wav" && item.mediaProfile?.durationSec === 2), `audio item should expose media profile, got ${JSON.stringify(summary.items)}`);
   assert(context.includes("Inferred product design brief from assets"), "agent context should include product design brief");
   assert(context.includes("priority:"), "agent context should expose priorities");
   assert(context.includes("palette: #12f7d6"), "agent context should expose palette lines");
   assert(context.includes("component:"), "agent context should expose component lines");
   assert(context.includes("data-field: temperature"), "agent context should expose data field lines");
   assert(context.includes("media-plan:"), "agent context should expose media plan lines");
+  assert(context.includes("media-profile: Image product-kit/images/product.png"), "agent context should expose image media profile");
+  assert(context.includes("media-profile: Audio product-kit/media/theme.wav"), "agent context should expose audio media profile");
 });
 
 await test("asset library expands single GZ text assets", async () => {
