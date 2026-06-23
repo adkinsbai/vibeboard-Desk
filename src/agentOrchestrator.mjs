@@ -63,6 +63,10 @@ export function createAgentOrchestrator({
         }
 
         if (!modelSettings.enabled) {
+          const missingModelPlan = agentMode === "codex"
+            ? codexMissingModelPlan({ projectMemory, modeBoundary, bridge: codexBridge })
+            : null;
+          if (missingModelPlan) return missingModelPlan;
           return {
             intent: "chat",
             reply: "Please configure a model first. After that, I will chat with you, organize the requirements, and generate code only after you confirm the build.",
@@ -111,7 +115,14 @@ export function createAgentOrchestrator({
         }
       },
       build: async (_state, prompt) => runGenerateRequest({
-        prompt,
+        prompt: buildExecutionPrompt({
+          prompt,
+          agentMode,
+          modeBoundary,
+          codexBridge,
+          assetContext,
+        }),
+        raw_user_prompt: prompt,
         modelSettings: body.modelSettings || {},
         conversation_id: conversationId,
         agent_mode: agentMode,
@@ -171,4 +182,80 @@ function agentModeBoundary(mode = "vibeboard") {
     scope: "Local VibeBoard planner/generator flow with hardware contracts and explicit deploy confirmation.",
     disallowed: ["automatic hardware writes without deploy confirmation"],
   };
+}
+
+export function buildExecutionPrompt({
+  prompt = "",
+  agentMode = "vibeboard",
+  modeBoundary = agentModeBoundary(agentMode),
+  codexBridge = null,
+  assetContext = "",
+} = {}) {
+  const rawPrompt = String(prompt || "").trim();
+  if (normalizeAgentMode(agentMode) !== "codex") return rawPrompt;
+
+  const lines = [
+    rawPrompt,
+    "",
+    "## Codex hardware execution package",
+    "You are Codex inside VibeBoard. Generate only a VibeBoard 480x360 hardware embedded UI app.",
+    `Scope: ${modeBoundary.scope || "VibeBoard 480x360 hardware UI design, generation, local verification, and explicit deploy confirmation only."}`,
+    "Required behavior:",
+    "- Use uploaded Asset Library insights as product direction: palette, components, CTA copy, data fields, media states, and embedded passive assets.",
+    "- Keep uploaded HTML/CSS/JS as design references only; do not execute uploaded active code as-is.",
+    "- Produce contract-safe index.html, style.css, app.js, hardware_app.py, and manifest.json.",
+    "- Run through local VibeBoard L0-L3 verification before offering deployment.",
+    "- Never write to hardware or claim deployment without an explicit deploy confirmation.",
+    "Disallowed operations:",
+    ...arrayOfStrings(modeBoundary.disallowed).map(item => `- ${item}`),
+  ];
+
+  if (codexBridge) {
+    lines.push("", "Codex bridge:", JSON.stringify(codexBridge, null, 2));
+  }
+  if (String(assetContext || "").trim()) {
+    lines.push("", "Asset Library context:", String(assetContext).trim());
+  }
+
+  return lines.join("\n");
+}
+
+function codexMissingModelPlan({ projectMemory = {}, modeBoundary = agentModeBoundary("codex"), bridge = null } = {}) {
+  const memory = normalizeProjectMemory(projectMemory);
+  return {
+    intent: "clarify",
+    reply: "Codex 硬件模式已经选中，但还没有配置可用模型。我可以先按默认硬件小屏方案整理需求，或者你先配置模型后再让我像 Codex 一样继续规划。",
+    understanding: [
+      "当前聊天模式是 Codex 硬件嵌入式设计模式。",
+      "Codex 模式只处理 VibeBoard 480x360 小屏应用的设计、生成、本地验证和部署确认。",
+    ],
+    planned_changes: [],
+    target: "chat",
+    ready_to_build: false,
+    build_prompt: "",
+    quick_replies: [
+      { label: "先做基础版", value: "先按默认方案整理一个 VibeBoard 480x360 小屏基础版。" },
+      { label: "配置模型", value: "我先配置模型，然后继续用 Codex 硬件模式规划。" },
+      { label: "继续讨论", value: "先继续讨论小屏应用需求，不开始构建。" },
+    ],
+    project_memory: {
+      ...memory,
+      open_questions: [
+        "是否先配置模型，还是按默认硬件小屏方案继续整理？",
+      ],
+      constraints: [
+        ...memory.constraints,
+        modeBoundary.scope,
+      ].filter(Boolean),
+    },
+    agent_mode: "codex",
+    mode_boundary: modeBoundary,
+    codex_bridge: bridge || codexBridgeMetadata({ modeBoundary, action: "message" }),
+  };
+}
+
+function arrayOfStrings(value = []) {
+  return Array.isArray(value)
+    ? value.map(item => String(item || "").trim()).filter(Boolean)
+    : [];
 }

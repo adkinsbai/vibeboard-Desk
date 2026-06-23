@@ -2390,7 +2390,43 @@ await test("agent orchestrator passes Codex bridge into confirmed builds", async
   assert(result.mode === "build_done", `expected build_done, got ${JSON.stringify(result)}`);
   assert(receivedBody?.agent_mode === "codex", "confirmed build should keep codex mode");
   assert(receivedBody?.codex_bridge?.name === "codex-hardware-agent", `confirmed build should receive bridge metadata, got ${JSON.stringify(receivedBody?.codex_bridge)}`);
+  assert(receivedBody?.raw_user_prompt === "Build the Codex hardware dashboard.", "confirmed build should preserve raw user prompt");
+  assert(receivedBody?.prompt?.includes("Codex hardware execution package"), `confirmed build should receive Codex execution package, got ${receivedBody?.prompt}`);
+  assert(receivedBody?.prompt?.includes("Never write to hardware"), "Codex execution package should enforce deploy confirmation");
+  assert(receivedBody?.prompt?.includes("Asset Library insights"), "Codex execution package should require asset insight usage");
   assert(result.codex_bridge?.scope?.includes("480x360"), "build result should expose bridge scope");
+});
+
+await test("agent orchestrator returns Codex quick choices when model is missing", async () => {
+  const { createAgentOrchestrator } = await import(pathToFileURL(path.join(ROOT, "src", "agentOrchestrator.mjs")).href);
+  const orchestrator = createAgentOrchestrator({
+    conversationStore: {
+      getProjectMemory: () => ({ summary: "codex no model" }),
+      setProjectMemory: () => {
+        throw new Error("missing model plan should not persist memory automatically");
+      },
+    },
+    memoryStore: {
+      getAll: () => ({}),
+    },
+    runGenerateRequest: async () => {
+      throw new Error("missing model chat should not build");
+    },
+  });
+
+  const result = await orchestrator.runAgentRequest({
+    action: "message",
+    agent_mode: "codex",
+    modelSettings: { enabled: false },
+    messages: [{ role: "user", content: "用 Codex 做小屏产品展示" }],
+  });
+
+  assert(result.intent === "clarify", `expected clarify, got ${JSON.stringify(result)}`);
+  assert(result.ready_to_build === false, "missing model path should not be build-ready");
+  assert(result.reply.includes("Codex 硬件模式"), "missing model reply should explain Codex hardware mode");
+  assert(result.quick_replies.length >= 3, "missing model reply should provide clickable choices");
+  assert(result.codex_bridge?.name === "codex-hardware-agent", "missing model reply should still expose Codex bridge");
+  assert(result.mode_boundary?.scope?.includes("480x360"), "missing model reply should expose hardware boundary");
 });
 
 await test("codex hardware mode redirects unrelated desktop tasks before model call", async () => {
