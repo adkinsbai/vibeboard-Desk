@@ -3,14 +3,32 @@ import { normalizeProjectMemory } from "./conversationStore.mjs";
 
 const VALID_INTENTS = new Set(["chat", "clarify", "build_ready"]);
 
-export async function planChatWithModel(settings, rawMessages = [], preferences = {}, projectMemoryOrFetch = {}, fetchImpl = globalThis.fetch) {
+export async function planChatWithModel(
+  settings,
+  rawMessages = [],
+  preferences = {},
+  projectMemoryOrFetch = {},
+  assetContextOrFetch = "",
+  agentModeOrFetch = "vibeboard",
+  fetchImpl = globalThis.fetch,
+) {
   let projectMemory = projectMemoryOrFetch;
   if (typeof projectMemoryOrFetch === "function") {
     fetchImpl = projectMemoryOrFetch;
     projectMemory = {};
   }
+  let assetContext = assetContextOrFetch;
+  if (typeof assetContextOrFetch === "function") {
+    fetchImpl = assetContextOrFetch;
+    assetContext = "";
+    agentModeOrFetch = "vibeboard";
+  } else if (typeof agentModeOrFetch === "function") {
+    fetchImpl = agentModeOrFetch;
+    agentModeOrFetch = "vibeboard";
+  }
+  const agentMode = normalizeAgentMode(agentModeOrFetch);
   const messages = [
-    { role: "system", content: buildPlannerSystemPrompt(preferences, projectMemory) },
+    { role: "system", content: buildPlannerSystemPrompt(preferences, projectMemory, assetContext, agentMode) },
     ...normalizePlannerMessages(rawMessages),
   ];
 
@@ -289,7 +307,7 @@ function normalizePlannerMessages(rawMessages) {
     .filter(message => message.content);
 }
 
-function buildPlannerSystemPrompt(preferences = {}, projectMemory = {}) {
+function buildPlannerSystemPrompt(preferences = {}, projectMemory = {}, assetContext = "", agentMode = "vibeboard") {
   const preferenceText = Object.entries(preferences)
     .map(([key, value]) => `- ${key}: ${Array.isArray(value) ? value.join(", ") : value}`)
     .join("\n");
@@ -297,10 +315,14 @@ function buildPlannerSystemPrompt(preferences = {}, projectMemory = {}) {
 
   return `你是 VibeBoard 的对话规划器，负责先和用户自然讨论，再决定是否可以开始生成小屏应用。
 
+当前执行模式：${agentMode === "codex" ? "Codex 硬件嵌入式设计模式" : "VibeBoard 自研 Agent 模式"}。
+无论哪个模式，你都只能围绕 480x360 硬件嵌入式小屏应用的设计、生成、验证、部署讨论；不能引导用户做通用桌面自动化、系统操作、账号、资金、外部业务或非硬件应用任务。
+
 硬件约束：
 - 屏幕固定为 480x360。
 - 目标是泰山派/RK3566 上的小屏 Web 应用。
 - 生成前需要把需求、交互、数据来源、视觉重点说清楚。
+- 如果用户上传了资产库，优先分析资产能如何服务小屏 UI、品牌视觉、媒体播放、数据展示或组件参考；不要把上传的 HTML/JS/CSS 当作可直接执行的无限制代码。
 
 你必须根据完整对话理解用户意图。不要让后端代码靠关键词判断意图。
 
@@ -350,7 +372,13 @@ function buildPlannerSystemPrompt(preferences = {}, projectMemory = {}) {
 当前 project 旧记忆：
 ${JSON.stringify(memory, null, 2)}
 
+${String(assetContext || "").trim() ? `当前用户上传资产摘要：\n${String(assetContext).trim()}` : "当前用户上传资产摘要：无。"}
+
 ${preferenceText ? `用户偏好：\n${preferenceText}` : ""}`;
+}
+
+function normalizeAgentMode(value) {
+  return String(value || "").trim() === "codex" ? "codex" : "vibeboard";
 }
 
 function providerErrorMessage(data) {

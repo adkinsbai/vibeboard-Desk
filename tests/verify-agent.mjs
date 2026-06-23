@@ -1497,6 +1497,88 @@ await test("chat planner supplies fallback choices when clarification omits quic
   assert(plan.quick_replies.some(choice => choice.label.includes("极简")), "fallback choices should include a minimal version path");
 });
 
+await test("asset library analyzes mixed user assets for agent context", async () => {
+  const { normalizeIncomingAssets, formatAssetContext } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const html = Buffer.from("<section><img src=\"hero.png\"><button>Deploy</button></section>", "utf8").toString("base64");
+  const text = Buffer.from("品牌色彩 palette: cyan. 480x360 dashboard metrics.", "utf8").toString("base64");
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]).toString("base64");
+  const normalized = normalizeIncomingAssets([
+    { name: "hero.png", mime: "image/png", encoding: "base64", content: png },
+    { name: "component.html", mime: "text/html", encoding: "base64", content: html },
+    { name: "brief.txt", mime: "text/plain", encoding: "base64", content: text },
+  ]);
+
+  assert(normalized.assets.length === 3, `expected 3 assets, got ${JSON.stringify(normalized)}`);
+  assert(normalized.assets.some(asset => asset.kind === "image"), "image asset should be classified");
+  assert(normalized.assets.some(asset => asset.kind === "component"), "HTML component should be classified");
+  assert(normalized.assets.some(asset => asset.summary.signals.includes("Contains UI/component markup.")), "component signal should be extracted");
+  const context = formatAssetContext(normalized.assets);
+  assert(context.includes("Uploaded asset library"), "asset context should have a heading");
+  assert(context.includes("component.html"), "asset context should include component names");
+  assert(context.includes("480x360"), "asset text preview should be available to the agent");
+});
+
+await test("asset library store returns non-duplicated upload summary", async () => {
+  const initSqlJs = (await import("sql.js")).default;
+  const { createAssetLibraryStore } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  const store = createAssetLibraryStore(db, () => {});
+  store.initSchema();
+  const content = Buffer.from("480x360 launch screen copy", "utf8").toString("base64");
+  const result = store.addAssets("asset-summary-test", [
+    { name: "copy.txt", mime: "text/plain", encoding: "base64", content },
+  ]);
+
+  assert(result.assets.length === 1, `expected one uploaded asset, got ${JSON.stringify(result)}`);
+  assert(result.summary.count === 1, `summary should not double count upload, got ${JSON.stringify(result.summary)}`);
+  assert(result.summary.byKind.text === 1, "summary should count text once");
+  assert(store.listAssets("asset-summary-test").length === 1, "store should persist one asset");
+});
+
+await test("chat planner prompt includes asset context and Codex hardware boundary", async () => {
+  const { planChatWithModel } = await import(pathToFileURL(path.join(ROOT, "src", "chatPlanner.mjs")).href);
+  let requestBody = null;
+  await planChatWithModel({
+    baseUrl: "http://planner.test",
+    apiKey: "test-key",
+    model: "mock-planner",
+  }, [{ role: "user", content: "用我上传的素材做个产品展示屏" }], {}, {}, "## Uploaded asset library\n- hero.png (image): product photo", "codex", async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              intent: "clarify",
+              reply: "产品展示屏优先突出什么？",
+              quick_replies: [{ label: "主视觉", value: "优先突出主视觉和产品名称。" }],
+              ready_to_build: false,
+              build_prompt: "",
+              project_memory: {
+                summary: "产品展示屏",
+                goal: "使用上传素材做小屏产品展示",
+                requirements: [],
+                constraints: ["480x360"],
+                open_questions: ["优先突出什么？"],
+                decisions: [],
+                build_prompt: "",
+              },
+            }),
+          },
+        }],
+      }),
+    };
+  });
+
+  const systemPrompt = requestBody.messages[0].content;
+  assert(systemPrompt.includes("Codex 硬件嵌入式设计模式"), "planner prompt should include Codex hardware mode");
+  assert(systemPrompt.includes("不能引导用户做通用桌面自动化"), "planner prompt should include Codex boundary");
+  assert(systemPrompt.includes("Uploaded asset library"), "planner prompt should include uploaded asset context");
+  assert(systemPrompt.includes("hero.png"), "planner prompt should include asset names");
+});
+
 await test("chat planner recovers truncated build_ready JSON when build prompt is complete", async () => {
   const { parseChatPlan } = await import(pathToFileURL(path.join(ROOT, "src", "chatPlanner.mjs")).href);
   const longPrompt = [

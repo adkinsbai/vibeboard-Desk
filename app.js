@@ -47,6 +47,10 @@ const modelHelpText = el("modelHelpText");
 const clearModelSettings = el("clearModelSettings");
 const goldenLoopState = el("goldenLoopState");
 const verifyList = el("verifyList");
+const assetUploadBtn = el("assetUploadBtn");
+const assetUploadInput = el("assetUploadInput");
+const assetState = el("assetState");
+const agentModeSelect = el("agentModeSelect");
 
 let generatedFiles = {};
 let activeFile = "";
@@ -57,6 +61,7 @@ let conversationLoadToken = 0;
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
 const DEVICE_STORAGE_KEY = "vibeboard-active-device";
 const CONVERSATION_STORAGE_KEY = "vibeboard-current-conversation";
+const AGENT_MODE_STORAGE_KEY = "vibeboard-agent-mode";
 const BLANK_DEVICE_FRAME_HTML = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;}*{box-sizing:border-box;}</style></head><body></body></html>';
 const deviceProfiles = {
   "taishan-transparent": {
@@ -89,6 +94,17 @@ function getActiveDeviceId() {
 }
 
 let activeDeviceId = getActiveDeviceId();
+let currentAssetSummary = { count: 0, totalBytes: 0, byKind: {}, items: [] };
+
+function getAgentMode() {
+  const value = agentModeSelect?.value || localStorage.getItem(AGENT_MODE_STORAGE_KEY) || "vibeboard";
+  return value === "codex" ? "codex" : "vibeboard";
+}
+
+function syncAgentModeUi() {
+  if (!agentModeSelect) return;
+  agentModeSelect.value = getAgentMode();
+}
 
 const providerPresets = {
   deepseek: {
@@ -1606,6 +1622,7 @@ async function handleChat(prompt) {
       action: "message",
       messages,
       conversation_id: conversationId,
+      agent_mode: getAgentMode(),
       modelSettings: getModelPayload(),
     }, { timeout: 60000 });
 
@@ -1685,6 +1702,7 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
       prompt,
       build_prompt: prompt,
       modelSettings: getModelPayload(),
+      agent_mode: getAgentMode(),
       conversation_id: conversationId,
       clarify_answers: [],
       history: chatHistory
@@ -1889,6 +1907,13 @@ closeStatusDrawer?.addEventListener("click", () => setStatusDrawer(false));
 modelConfigBtn?.addEventListener("click", () => setModelModal(true));
 closeModelModal?.addEventListener("click", () => setModelModal(false));
 modelProvider?.addEventListener("change", () => applyProviderPreset(modelProvider.value));
+agentModeSelect?.addEventListener("change", () => {
+  localStorage.setItem(AGENT_MODE_STORAGE_KEY, getAgentMode());
+  const label = getAgentMode() === "codex" ? "Codex 硬件模式" : "自研 Agent";
+  addMarkdownMessage("agent", `已切换到 ${label}。我会继续只处理硬件嵌入式小屏应用相关的设计、生成、验证和部署确认。`);
+});
+assetUploadBtn?.addEventListener("click", () => assetUploadInput?.click());
+assetUploadInput?.addEventListener("change", () => uploadAssetFiles(assetUploadInput.files));
 deviceSelect?.addEventListener("change", () => {
   activeDeviceId = deviceProfiles[deviceSelect.value] ? deviceSelect.value : "taishan-gray";
   localStorage.setItem(DEVICE_STORAGE_KEY, activeDeviceId);
@@ -1923,6 +1948,7 @@ document.querySelectorAll("[data-prompt]").forEach(button => {
 scheduleFitDeviceFrame();
 applyDeviceProfile({ refresh: false });
 syncModelUi();
+syncAgentModeUi();
 window.addEventListener("resize", scheduleFitDeviceFrame);
 if (deviceFrame) {
   deviceFrame.addEventListener("load", scheduleFitDeviceFrame);
@@ -1931,6 +1957,82 @@ const macOverlay = document.querySelector('.mac-screen-overlay');
 if (macOverlay && "ResizeObserver" in window) {
   const observer = new ResizeObserver(scheduleFitDeviceFrame);
   observer.observe(macOverlay);
+}
+
+async function loadConversationAssets(conversationId = currentConversationId) {
+  if (!conversationId) {
+    renderAssetSummary({ count: 0, totalBytes: 0, byKind: {}, items: [] });
+    return;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/conversations/${conversationId}/assets`);
+    const data = await res.json();
+    if (data.ok) renderAssetSummary(data.summary);
+  } catch (error) {
+    console.error("Failed to load assets:", error);
+  }
+}
+
+function renderAssetSummary(summary = {}) {
+  currentAssetSummary = {
+    count: Number(summary.count || 0),
+    totalBytes: Number(summary.totalBytes || 0),
+    byKind: summary.byKind || {},
+    items: Array.isArray(summary.items) ? summary.items : [],
+  };
+  if (!assetState) return;
+  const count = currentAssetSummary.count;
+  if (!count) {
+    assetState.textContent = "0 assets";
+    assetState.title = "No uploaded assets";
+    return;
+  }
+  const kinds = Object.entries(currentAssetSummary.byKind)
+    .map(([kind, value]) => `${kind}:${value}`)
+    .join(" ");
+  assetState.textContent = `${count} assets`;
+  assetState.title = kinds || `${count} assets`;
+}
+
+async function uploadAssetFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  await ensureConversation();
+  const conversationId = currentConversationId;
+  assetState.textContent = "uploading...";
+  try {
+    const assets = await Promise.all(files.map(fileToAssetPayload));
+    const result = await postJson(`${API_BASE}/api/conversations/${conversationId}/assets`, { assets }, { timeout: 120000 });
+    renderAssetSummary(result.summary);
+    const uploaded = result.assets?.length || 0;
+    const rejected = result.rejected?.length || 0;
+    const kinds = Object.entries(result.summary?.byKind || {}).map(([kind, count]) => `${kind} ${count}`).join(", ");
+    addMarkdownMessage("agent", `已解析 ${uploaded} 个资产${rejected ? `，${rejected} 个未导入` : ""}。${kinds ? `类型：${kinds}。` : ""}`);
+  } catch (error) {
+    const f = friendlyError(error.data, error.message);
+    addMarkdownMessage("agent", `资产上传失败：${f}`);
+    renderAssetSummary(currentAssetSummary);
+  } finally {
+    if (assetUploadInput) assetUploadInput.value = "";
+  }
+}
+
+function fileToAssetPayload(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      resolve({
+        name: file.name,
+        mime: file.type || "",
+        size: file.size,
+        encoding: "data-url",
+        content: dataUrl,
+      });
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 // ==================== Conversation Management ====================
@@ -2019,6 +2121,7 @@ function renderConversationList(conversations) {
             rememberConversation(null);
             conversationLoadToken += 1;
             pendingGeneratePrompt = null;
+            renderAssetSummary({ count: 0, totalBytes: 0, byKind: {}, items: [] });
             clearGeneratedOutput("等待生成");
             const chatLog = document.getElementById("chatLog");
             if (chatLog) chatLog.innerHTML = '<div class="msg"><p style="color:var(--text-2)">选择或新建一个对话开始</p></div>';
@@ -2066,14 +2169,16 @@ async function selectConversation(id) {
 
   // Load messages and files in parallel
   try {
-    const [msgRes, fileRes, memoryRes] = await Promise.all([
+    const [msgRes, fileRes, memoryRes, assetRes] = await Promise.all([
       fetch(`${API_BASE}/api/conversations/${id}/messages`),
       fetch(`${API_BASE}/api/conversations/${id}/files`),
-      fetch(`${API_BASE}/api/conversations/${id}/memory`)
+      fetch(`${API_BASE}/api/conversations/${id}/memory`),
+      fetch(`${API_BASE}/api/conversations/${id}/assets`)
     ]);
     const msgData = await msgRes.json();
     const fileData = await fileRes.json();
     const memoryData = await memoryRes.json();
+    const assetData = await assetRes.json();
     if (loadToken !== conversationLoadToken || id !== currentConversationId) return;
 
     // Restore code files if available
@@ -2094,6 +2199,7 @@ async function selectConversation(id) {
         target: fileData.ok && Object.keys(fileData.files || {}).length ? "edit_current_project" : "new_project"
       });
     }
+    if (assetData.ok) renderAssetSummary(assetData.summary);
   } catch (err) {
     console.error("Failed to load conversation:", err);
     if (chatLog) {
@@ -2185,6 +2291,7 @@ async function createConversation({ resetChat = true } = {}) {
       rememberConversation(data.id);
       pendingGeneratePrompt = null;
       conversationLoadToken += 1;
+      renderAssetSummary({ count: 0, totalBytes: 0, byKind: {}, items: [] });
       clearGeneratedOutput("等待生成");
       await loadConversations();
       if (resetChat) {

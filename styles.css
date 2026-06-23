@@ -613,6 +613,59 @@ textarea:focus {
   border-color: var(--accent);
 }
 
+.composer-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.asset-tools,
+.agent-mode-select {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tool-btn {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(56, 189, 248, .24);
+  border-radius: var(--radius);
+  background: rgba(56, 189, 248, .08);
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.asset-state {
+  min-width: 0;
+  max-width: 140px;
+  overflow: hidden;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-mode-select {
+  flex: none;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.agent-mode-select select {
+  min-height: 30px;
+  max-width: 132px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 12px;
+}
+
 .hardware-panel {
   min-height: 0;
   display: grid;

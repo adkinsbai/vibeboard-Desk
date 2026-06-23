@@ -72,6 +72,20 @@
           <form class="composer" id="composer">
             <label for="promptInput">输入想做的硬件应用</label>
             <textarea id="promptInput" rows="3">做一个显示时间、天气、设备状态和一句 AI 摘要的小屏助手</textarea>
+            <div class="composer-tools">
+              <div class="asset-tools">
+                <input id="assetUploadInput" type="file" multiple hidden>
+                <button class="tool-btn" id="assetUploadBtn" type="button">Assets</button>
+                <span class="asset-state" id="assetState">0 assets</span>
+              </div>
+              <label class="agent-mode-select" for="agentModeSelect">
+                <span>实现</span>
+                <select id="agentModeSelect">
+                  <option value="vibeboard">自研 Agent</option>
+                  <option value="codex">Codex 硬件模式</option>
+                </select>
+              </label>
+            </div>
             <button class="primary-btn wide" id="generateBtn" type="submit">开始执行任务</button>
           </form>
         </section>

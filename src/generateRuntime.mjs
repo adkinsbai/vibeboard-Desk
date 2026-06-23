@@ -36,6 +36,7 @@ export function createGenerateRuntime(deps = {}) {
   const {
     conversationStore,
     memoryStore,
+    assetLibraryStore,
     experienceStore,
     runAgent,
     appendServerLog = async () => {},
@@ -75,10 +76,14 @@ export function createGenerateRuntime(deps = {}) {
     const normalizedHistory = normalizeGenerateHistory(rawHistory);
     const clarifyAnswers = Array.isArray(body.clarify_answers) ? body.clarify_answers : [];
     const modelSettings = body.modelSettings || {};
+    const agentMode = normalizeAgentMode(body.agent_mode || body.agentMode);
     const conversationId = String(body.conversation_id || "").trim();
     const projectMemory = conversationId
       ? conversationStore.getProjectMemory(conversationId)
       : normalizeProjectMemory();
+    const assetContext = conversationId && assetLibraryStore?.promptContext
+      ? assetLibraryStore.promptContext(conversationId)
+      : "";
     const conversationFiles = conversationId
       ? conversationStore.loadConversationFiles(conversationId).files
       : {};
@@ -87,7 +92,7 @@ export function createGenerateRuntime(deps = {}) {
     const history = await compressHistory(normalizedHistory, settings);
     const userPreferences = memoryStore.getAll();
     const prompt = buildRefinedPrompt(
-      `${rawPrompt}${formatMemoryForPrompt(projectMemory)}`,
+      `${rawPrompt}${formatMemoryForPrompt(projectMemory)}${formatAgentModeForPrompt(agentMode)}${assetContext}`,
       clarifyAnswers,
       userPreferences,
     );
@@ -120,6 +125,7 @@ export function createGenerateRuntime(deps = {}) {
       userPreferences,
       conversationId,
       isEditing,
+      agentMode,
     }, {
       agentGenerate: async () => runAgentGenerate({
         prompt,
@@ -130,6 +136,7 @@ export function createGenerateRuntime(deps = {}) {
         userPreferences,
         conversationId,
         isEditing,
+        agentMode,
         agentStartedAt,
       }),
       templateGenerate: async () => runTemplateGenerate({ prompt, modelSettings }),
@@ -146,6 +153,7 @@ export function createGenerateRuntime(deps = {}) {
     userPreferences,
     conversationId,
     isEditing,
+    agentMode,
     agentStartedAt,
   }) {
     requireFunction(runAgent, "runAgent");
@@ -162,6 +170,7 @@ export function createGenerateRuntime(deps = {}) {
     await appendServerLog("generate.agent.start", {
       prompt: prompt.slice(0, 160),
       isEditing,
+      agentMode,
       fileCount: Object.keys(fileStore).length,
       files: Object.keys(fileStore).slice(0, 12),
       model: settings.model,
@@ -332,6 +341,17 @@ export function createGenerateRuntime(deps = {}) {
   }
 
   return { runGenerateRequest };
+}
+
+function normalizeAgentMode(value) {
+  return String(value || "").trim() === "codex" ? "codex" : "vibeboard";
+}
+
+function formatAgentModeForPrompt(agentMode = "vibeboard") {
+  const mode = normalizeAgentMode(agentMode);
+  return `\n\n## Agent execution mode\n${mode === "codex"
+    ? "Codex hardware embedded design mode. Stay strictly inside VibeBoard 480x360 hardware UI generation, local verification, and deploy-confirmation boundaries."
+    : "VibeBoard self-developed Agent mode. Use the local VibeBoard generator and hardware contracts."}`;
 }
 
 export function buildGenerateAgentSettings(

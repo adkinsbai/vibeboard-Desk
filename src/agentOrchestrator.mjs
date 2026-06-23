@@ -6,6 +6,7 @@ import { normalizeModelSettings } from "./modelSettings.mjs";
 export function createAgentOrchestrator({
   conversationStore,
   memoryStore,
+  assetLibraryStore,
   recordAgentLearning,
   runGenerateRequest,
   fetchImpl = globalThis.fetch,
@@ -20,7 +21,11 @@ export function createAgentOrchestrator({
     const projectMemory = conversationId
       ? conversationStore.getProjectMemory(conversationId)
       : normalizeProjectMemory();
+    const assetContext = conversationId && assetLibraryStore?.promptContext
+      ? assetLibraryStore.promptContext(conversationId)
+      : "";
     const rawMessages = Array.isArray(body.messages) ? body.messages : [];
+    const agentMode = normalizeAgentMode(body.agent_mode || body.agentMode);
 
     return runAgentGraph({
       action: body.action,
@@ -28,6 +33,7 @@ export function createAgentOrchestrator({
       conversationId,
       projectMemory,
       buildPrompt: body.build_prompt || body.prompt || "",
+      agentMode,
     }, {
       planMessage: async () => {
         if (!modelSettings.enabled) {
@@ -40,6 +46,8 @@ export function createAgentOrchestrator({
             ready_to_build: false,
             build_prompt: "",
             project_memory: projectMemory,
+            quick_replies: [],
+            agent_mode: agentMode,
           };
         }
 
@@ -51,6 +59,8 @@ export function createAgentOrchestrator({
             rawMessages,
             memoryStore.getAll(),
             projectMemory,
+            assetContext,
+            agentMode,
             (url, options = {}) => fetchImpl(url, { ...options, signal: controller.signal })
           );
           if (conversationId && plan.project_memory) {
@@ -65,6 +75,7 @@ export function createAgentOrchestrator({
         prompt,
         modelSettings: body.modelSettings || {},
         conversation_id: conversationId,
+        agent_mode: agentMode,
         clarify_answers: Array.isArray(body.clarify_answers) ? body.clarify_answers : [],
         history: Array.isArray(body.history) ? body.history : rawMessages,
       }),
@@ -87,4 +98,10 @@ export function createAgentOrchestrator({
   }
 
   return { runAgentRequest };
+}
+
+function normalizeAgentMode(value) {
+  const mode = String(value || "vibeboard").trim();
+  if (mode === "codex") return "codex";
+  return "vibeboard";
 }

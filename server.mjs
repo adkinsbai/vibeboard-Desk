@@ -25,6 +25,7 @@ import { runAgent } from "./src/agent.mjs";
 import { chatCompletionsUrl, normalizeModelSettings } from "./src/modelSettings.mjs";
 import { createMemoryStore } from "./src/memoryStore.mjs";
 import { declaredAssetPathsFromFiles } from "./src/assetContract.mjs";
+import { createAssetLibraryStore } from "./src/assetLibrary.mjs";
 import { createDigitalLifeStore } from "./src/digitalLife.mjs";
 import { createDigitalLifeRoutes } from "./src/digitalLifeRoutes.mjs";
 import { createExperienceStore, makePlaybookCandidate } from "./src/experienceStore.mjs";
@@ -195,6 +196,9 @@ experienceStore.initSchema();
 
 const playbookStore = createPlaybookStore(db, saveDb);
 playbookStore.initSchema();
+
+const assetLibraryStore = createAssetLibraryStore(db, saveDb);
+assetLibraryStore.initSchema();
 
 let BOARD = createBoardConfig();
 let knownHosts = process.env.VIBEBOARD_KNOWN_HOSTS || path.join(os.tmpdir(), `${BOARD.id}_known_hosts`);
@@ -659,9 +663,18 @@ async function uploadBundle(entries, timeout = 45000) {
   return sshWithInput(buildUploadBundleStdinCommand(), buildUploadBundleInput(files), timeout);
 }
 
-async function readBody(req) {
+async function readBody(req, { limitBytes = 64 * 1024 * 1024 } = {}) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.byteLength;
+    if (size > limitBytes) {
+      const error = new Error(`Request body is larger than ${limitBytes} bytes.`);
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
   if (!chunks.length) return {};
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
@@ -2152,6 +2165,7 @@ function formatProjectMemoryForPrompt(memory = {}) {
 const generateRuntime = createGenerateRuntime({
   conversationStore,
   memoryStore,
+  assetLibraryStore,
   experienceStore,
   runAgent,
   appendServerLog,
@@ -2212,6 +2226,7 @@ const marketRuntime = createMarketRuntime({
 const { runAgentRequest } = createAgentOrchestrator({
   conversationStore,
   memoryStore,
+  assetLibraryStore,
   recordAgentLearning,
   runGenerateRequest,
 });
@@ -2468,10 +2483,11 @@ async function route(req, res) {
       return;
     }
     // Delete conversation and its messages
-    if (req.method === "DELETE" && url.pathname.startsWith("/api/conversations/")) {
+    if (req.method === "DELETE" && /^\/api\/conversations\/[^/]+$/.test(url.pathname)) {
       const parts = url.pathname.split("/");
       const convId = parts[3];
       if (convId && !parts[4]) {
+        assetLibraryStore.deleteConversationAssets(convId);
         conversationStore.deleteConversation(convId);
         json(res, 200, { ok: true });
       } else {
@@ -2523,6 +2539,42 @@ async function route(req, res) {
       json(res, 200, { ok: true, project_memory: conversationStore.getProjectMemory(convId) });
       return;
     }
+    if (url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/assets")) {
+      const convId = url.pathname.split("/")[3];
+      if (req.method === "GET") {
+        json(res, 200, {
+          ok: true,
+          assets: assetLibraryStore.listAssets(convId),
+          summary: assetLibraryStore.summarize(convId),
+        });
+        return;
+      }
+      if (req.method === "POST") {
+        try {
+          const body = await readBody(req, { limitBytes: 64 * 1024 * 1024 });
+          const result = assetLibraryStore.addAssets(convId, Array.isArray(body.assets) ? body.assets : []);
+          await appendServerLog("assets.uploaded", {
+            conversationId: convId,
+            count: result.assets.length,
+            rejected: result.rejected.length,
+            kinds: result.summary.byKind,
+          });
+          json(res, 200, { ok: true, ...result });
+        } catch (assetErr) {
+          const classified = classifyError(assetErr);
+          json(res, assetErr.statusCode || 400, { ok: false, error: assetErr.message, ...classified });
+        }
+        return;
+      }
+    }
+    if (req.method === "DELETE" && url.pathname.startsWith("/api/conversations/") && url.pathname.includes("/assets/")) {
+      const parts = url.pathname.split("/");
+      const convId = parts[3];
+      const assetId = decodeURIComponent(parts[5] || "");
+      assetLibraryStore.deleteAsset(convId, assetId);
+      json(res, 200, { ok: true });
+      return;
+    }
     if (req.method === "POST" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/messages")) {
       const convId = url.pathname.split("/")[3];
       const body = await readBody(req);
@@ -2532,6 +2584,7 @@ async function route(req, res) {
     }
     if (req.method === "DELETE" && url.pathname.startsWith("/api/conversations/")) {
       const convId = url.pathname.split("/")[3];
+      assetLibraryStore.deleteConversationAssets(convId);
       conversationStore.deleteConversation(convId);
       json(res, 200, { ok: true });
       return;
