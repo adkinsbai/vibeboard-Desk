@@ -2154,6 +2154,7 @@ await test("agent orchestrator routes confirmed build through generator", async 
 
 await test("agent orchestrator exposes Codex hardware mode boundary", async () => {
   const { createAgentOrchestrator } = await import(pathToFileURL(path.join(ROOT, "src", "agentOrchestrator.mjs")).href);
+  let plannerRequest = null;
   const orchestrator = createAgentOrchestrator({
     conversationStore: {
       getProjectMemory: () => ({ summary: "codex test" }),
@@ -2163,31 +2164,34 @@ await test("agent orchestrator exposes Codex hardware mode boundary", async () =
       getAll: () => ({}),
     },
     runGenerateRequest: async () => ({ ok: true }),
-    fetchImpl: async () => ({
-      ok: true,
-      json: async () => ({
-        choices: [{
-          message: {
-            content: JSON.stringify({
-              intent: "clarify",
-              reply: "先确认展示重点。",
-              ready_to_build: false,
-              build_prompt: "",
-              quick_replies: [{ label: "主视觉", value: "优先主视觉。" }],
-              project_memory: {
-                summary: "codex test",
-                goal: "",
-                requirements: [],
-                constraints: [],
-                open_questions: [],
-                decisions: [],
+    fetchImpl: async (_url, options = {}) => {
+      plannerRequest = JSON.parse(options.body);
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                intent: "clarify",
+                reply: "先确认展示重点。",
+                ready_to_build: false,
                 build_prompt: "",
-              },
-            }),
-          },
-        }],
-      }),
-    }),
+                quick_replies: [{ label: "主视觉", value: "优先主视觉。" }],
+                project_memory: {
+                  summary: "codex test",
+                  goal: "",
+                  requirements: [],
+                  constraints: [],
+                  open_questions: [],
+                  decisions: [],
+                  build_prompt: "",
+                },
+              }),
+            },
+          }],
+        }),
+      };
+    },
   });
 
   const result = await orchestrator.runAgentRequest({
@@ -2205,6 +2209,48 @@ await test("agent orchestrator exposes Codex hardware mode boundary", async () =
   assert(result.agent_mode === "codex", `expected codex mode, got ${JSON.stringify(result)}`);
   assert(result.mode_boundary?.scope?.includes("480x360"), "Codex boundary should mention hardware screen scope");
   assert(result.mode_boundary?.disallowed?.some(item => item.includes("general desktop automation")), "Codex boundary should disallow unrelated automation");
+  assert(result.codex_bridge?.name === "codex-hardware-agent", `Codex bridge metadata should be returned, got ${JSON.stringify(result.codex_bridge)}`);
+  assert(result.codex_bridge?.allowed_operations?.some(item => item.includes("local verification")), "Codex bridge should expose allowed hardware operations");
+  const systemPrompt = plannerRequest?.messages?.[0]?.content || "";
+  assert(systemPrompt.includes("You are Codex operating inside VibeBoard"), "Codex mode should use Codex hardware bridge system prompt");
+  assert(systemPrompt.includes("must not perform"), "Codex prompt should include forbidden operation boundary");
+  assert(systemPrompt.includes("Codex hardware bridge metadata"), "Codex prompt should include bridge metadata");
+  assert(result.project_memory.constraints.some(item => item.includes("Codex mode is limited")), "Codex project memory should retain hardware constraints");
+});
+
+await test("agent orchestrator passes Codex bridge into confirmed builds", async () => {
+  const { createAgentOrchestrator } = await import(pathToFileURL(path.join(ROOT, "src", "agentOrchestrator.mjs")).href);
+  let receivedBody = null;
+  const orchestrator = createAgentOrchestrator({
+    conversationStore: {
+      getProjectMemory: () => ({ build_prompt: "Build Codex hardware dashboard." }),
+      setProjectMemory: () => {},
+    },
+    memoryStore: {
+      getAll: () => ({}),
+    },
+    runGenerateRequest: async body => {
+      receivedBody = body;
+      return {
+        ok: true,
+        id: "vb-codex-bridge-build",
+        buildEvidence: { ok: true, issues: [] },
+      };
+    },
+  });
+
+  const result = await orchestrator.runAgentRequest({
+    action: "confirm_build",
+    agent_mode: "codex",
+    conversation_id: "conv-codex-build",
+    build_prompt: "Build the Codex hardware dashboard.",
+    modelSettings: { enabled: false },
+  });
+
+  assert(result.mode === "build_done", `expected build_done, got ${JSON.stringify(result)}`);
+  assert(receivedBody?.agent_mode === "codex", "confirmed build should keep codex mode");
+  assert(receivedBody?.codex_bridge?.name === "codex-hardware-agent", `confirmed build should receive bridge metadata, got ${JSON.stringify(receivedBody?.codex_bridge)}`);
+  assert(result.codex_bridge?.scope?.includes("480x360"), "build result should expose bridge scope");
 });
 
 await test("build registry tracks current and conversation builds", async () => {

@@ -1,5 +1,6 @@
 import { runAgentGraph } from "./agentGraph.mjs";
 import { planChatWithModel } from "./chatPlanner.mjs";
+import { codexBridgeMetadata, planCodexHardwareWithModel } from "./codexHardwareAgent.mjs";
 import { normalizeProjectMemory } from "./conversationStore.mjs";
 import { normalizeModelSettings } from "./modelSettings.mjs";
 
@@ -27,6 +28,9 @@ export function createAgentOrchestrator({
     const rawMessages = Array.isArray(body.messages) ? body.messages : [];
     const agentMode = normalizeAgentMode(body.agent_mode || body.agentMode);
     const modeBoundary = agentModeBoundary(agentMode);
+    const codexBridge = agentMode === "codex"
+      ? codexBridgeMetadata({ modeBoundary, assetContext, action: body.action || "message" })
+      : null;
 
     return runAgentGraph({
       action: body.action,
@@ -51,21 +55,33 @@ export function createAgentOrchestrator({
             quick_replies: [],
             agent_mode: agentMode,
             mode_boundary: modeBoundary,
+            codex_bridge: codexBridge,
           };
         }
 
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 60000);
         try {
-          const plan = await planChatWithModel(
-            modelSettings,
-            rawMessages,
-            memoryStore.getAll(),
-            projectMemory,
-            assetContext,
-            agentMode,
-            (url, options = {}) => fetchImpl(url, { ...options, signal: controller.signal })
-          );
+          const scopedFetch = (url, options = {}) => fetchImpl(url, { ...options, signal: controller.signal });
+          const plan = agentMode === "codex"
+            ? await planCodexHardwareWithModel({
+              settings: modelSettings,
+              rawMessages,
+              preferences: memoryStore.getAll(),
+              projectMemory,
+              assetContext,
+              modeBoundary,
+              fetchImpl: scopedFetch,
+            })
+            : await planChatWithModel(
+              modelSettings,
+              rawMessages,
+              memoryStore.getAll(),
+              projectMemory,
+              assetContext,
+              agentMode,
+              scopedFetch
+            );
           if (conversationId && plan.project_memory) {
             conversationStore.setProjectMemory(conversationId, plan.project_memory);
           }
@@ -81,6 +97,7 @@ export function createAgentOrchestrator({
         agent_mode: agentMode,
         clarify_answers: Array.isArray(body.clarify_answers) ? body.clarify_answers : [],
         history: Array.isArray(body.history) ? body.history : rawMessages,
+        codex_bridge: codexBridge,
       }),
       reflect: async (state) => {
         if (typeof recordAgentLearning !== "function") return;
@@ -101,6 +118,7 @@ export function createAgentOrchestrator({
       ...result,
       agent_mode: agentMode,
       mode_boundary: modeBoundary,
+      codex_bridge: result.codex_bridge || codexBridge,
     }));
   }
 
