@@ -1587,6 +1587,30 @@ await test("asset library store returns non-duplicated upload summary", async ()
   assert(store.listAssets("asset-summary-test").length === 1, "store should persist one asset");
 });
 
+await test("asset library exposes embeddable passive assets for generated builds", async () => {
+  const initSqlJs = (await import("sql.js")).default;
+  const { createAssetLibraryStore } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  const store = createAssetLibraryStore(db, () => {});
+  store.initSchema();
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+  const html = Buffer.from("<section>reference only</section>", "utf8").toString("base64");
+  const text = Buffer.from("copy should be summarized, not embedded as runtime asset", "utf8").toString("base64");
+  store.addAssets("asset-embed-test", [
+    { name: "Hero Image.png", mime: "image/png", encoding: "base64", content: png },
+    { name: "component.html", mime: "text/html", encoding: "base64", content: html },
+    { name: "brief.txt", mime: "text/plain", encoding: "base64", content: text },
+  ]);
+
+  const generated = store.generatedAssets("asset-embed-test");
+  assert(generated.items.length === 1, `expected one embeddable asset, got ${JSON.stringify(generated)}`);
+  assert(generated.items[0].path === "assets/uploaded/Hero Image.png", `expected safe uploaded path, got ${JSON.stringify(generated.items)}`);
+  assert(Buffer.isBuffer(generated.files["assets/uploaded/Hero Image.png"]), "embedded asset content should be a Buffer");
+  assert(generated.rejected.some(item => item.name === "component.html"), "active component asset should remain reference-only");
+  assert(generated.rejected.some(item => item.name === "brief.txt"), "unsupported text runtime asset should remain reference-only");
+});
+
 await test("asset library expands ZIP bundles into analyzed assets", async () => {
   const { normalizeIncomingAssets, formatAssetContext } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
   const zip = makeZip([
@@ -1931,6 +1955,79 @@ await test("generate runtime runs template path and saves snapshot", async () =>
   assert(savedSnapshot?.files?.[HARDWARE_RESULT_FILE], "snapshot should include hardware result file");
 });
 
+await test("generate runtime embeds uploaded passive assets into template builds", async () => {
+  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  const embeddedPng = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  let savedSnapshot = null;
+  let receivedPrompt = "";
+  let receivedEmbeddedAssets = null;
+  const runtime = createGenerateRuntime({
+    conversationStore: {
+      getProjectMemory: () => ({ goal: "use uploaded hero image" }),
+      loadConversationFiles: () => ({ files: {} }),
+      saveConversationFiles: (conversationId, buildId, files) => {
+        savedSnapshot = { conversationId, buildId, files };
+      },
+    },
+    memoryStore: {
+      getAll: () => ({}),
+      set: () => {},
+    },
+    assetLibraryStore: {
+      promptContext: () => "\n\n## Uploaded asset library\n- hero.png (image): product photo",
+      generatedAssets: () => ({
+        files: {
+          "assets/uploaded/hero.png": embeddedPng,
+        },
+        items: [{
+          name: "hero.png",
+          kind: "image",
+          size: embeddedPng.byteLength,
+          path: "assets/uploaded/hero.png",
+          use: "product hero image",
+        }],
+        manifestAssets: ["assets/uploaded/hero.png"],
+        rejected: [{ name: "component.html", error: "component remains a design reference only" }],
+        summary: { count: 1, totalBytes: embeddedPng.byteLength },
+      }),
+    },
+    appendServerLog: async () => {},
+    writeGenerated: async (prompt, modelSettings, history, embeddedAssets) => {
+      receivedPrompt = prompt;
+      receivedEmbeddedAssets = embeddedAssets;
+      return {
+        ok: true,
+        id: "vb-runtime-assets",
+        files: validGeneratedFiles(),
+        manifest: JSON.parse(validGeneratedFiles()["manifest.json"]),
+        agentRun: { spec: { prompt }, evidence: [{ phase: "code", ok: true, summary: "template ok" }] },
+        buildEvidence: { ok: true, issues: [] },
+        intelligenceSummary: { confidence: "local_verified", nextBestAction: "deploy_to_board" },
+        modelSettings,
+        history,
+      };
+    },
+    filesWithHardwareResult: async files => ({ ...files, [HARDWARE_RESULT_FILE]: "{\"ok\":true}" }),
+  });
+
+  const result = await runtime.runGenerateRequest({
+    prompt: "Build a product display with my uploaded hero image.",
+    conversation_id: "conv-runtime-assets",
+    modelSettings: { enabled: false },
+  });
+  const manifest = JSON.parse(result.files["manifest.json"]);
+
+  assert(result.ok === true, `expected runtime ok, got ${JSON.stringify(result)}`);
+  assert(receivedPrompt.includes("Embedded uploaded assets"), "model prompt should expose embedded asset paths");
+  assert(receivedPrompt.includes("./assets/uploaded/hero.png"), "model prompt should include the generated asset path");
+  assert(receivedEmbeddedAssets?.items?.[0]?.path === "assets/uploaded/hero.png", "template generator should receive embedded asset metadata");
+  assert(Buffer.isBuffer(result.files["assets/uploaded/hero.png"]), "runtime result should include embedded binary asset");
+  assert(result.files["assets/uploaded/hero.png"].equals(embeddedPng), "embedded asset bytes should be preserved");
+  assert(manifest.assets.includes("assets/uploaded/hero.png"), "manifest assets[] should declare embedded asset");
+  assert(manifest.files.includes("assets/uploaded/hero.png"), "manifest files[] should include embedded asset");
+  assert(savedSnapshot?.files?.["assets/uploaded/hero.png"], "conversation snapshot should save embedded asset");
+});
+
 await test("generate runtime downgrades snapshot save failures", async () => {
   const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
   const logs = [];
@@ -1974,7 +2071,9 @@ await test("generate runtime passes conversation files into agent path", async (
   const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
   await withTempDir("vibeboard-runtime-agent-", async dir => {
     let receivedFiles = null;
+    let receivedPrompt = "";
     let currentBuild = null;
+    const embeddedPng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
     const runtime = createGenerateRuntime({
       conversationStore: {
         getProjectMemory: () => ({ goal: "edit existing screen" }),
@@ -1991,7 +2090,26 @@ await test("generate runtime passes conversation files into agent path", async (
         getAll: () => ({}),
         set: () => {},
       },
-      runAgent: async (_settings, _prompt, fileStore) => {
+      assetLibraryStore: {
+        promptContext: () => "\n\n## Uploaded asset library\n- agent-hero.png (image): product image",
+        generatedAssets: () => ({
+          files: {
+            "assets/uploaded/agent-hero.png": embeddedPng,
+          },
+          items: [{
+            name: "agent-hero.png",
+            kind: "image",
+            size: embeddedPng.byteLength,
+            path: "assets/uploaded/agent-hero.png",
+            use: "agent product image",
+          }],
+          manifestAssets: ["assets/uploaded/agent-hero.png"],
+          rejected: [],
+          summary: { count: 1, totalBytes: embeddedPng.byteLength },
+        }),
+      },
+      runAgent: async (_settings, prompt, fileStore) => {
+        receivedPrompt = prompt;
         receivedFiles = { ...fileStore };
         return {
           success: true,
@@ -2037,7 +2155,12 @@ await test("generate runtime passes conversation files into agent path", async (
     assert(result.ok === true, `expected agent runtime ok, got ${JSON.stringify(result)}`);
     assert(result.source === "agent", "enabled model settings should use agent path");
     assert(result.intelligenceSummary?.confidence === "local_verified", "runtime should return agent build intelligence summary");
+    assert(receivedPrompt.includes("./assets/uploaded/agent-hero.png"), "agent prompt should expose embedded asset paths");
     assert(receivedFiles?.["app.js"] === "console.log('old')", "agent should receive saved conversation files");
+    assert(Buffer.isBuffer(result.files["assets/uploaded/agent-hero.png"]), "agent result should include embedded passive asset");
+    assert(result.files["assets/uploaded/agent-hero.png"].equals(embeddedPng), "agent embedded asset bytes should be preserved");
+    const manifest = JSON.parse(result.files["manifest.json"]);
+    assert(manifest.assets.includes("assets/uploaded/agent-hero.png"), "agent manifest should declare embedded asset");
     assert(result.buildGraph.some(item => item.node === "agent_generate" && item.status === "done"), "runtime graph should include completed agent node");
   });
 });

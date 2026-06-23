@@ -33,7 +33,10 @@ import { createPlaybookStore } from "./src/playbookStore.mjs";
 import { verifyAllLocal } from "./src/verifiers/index.mjs";
 import { analyzeAndClarify } from "./src/clarifyEngine.mjs";
 import { createAgentOrchestrator } from "./src/agentOrchestrator.mjs";
-import { createGenerateRuntime } from "./src/generateRuntime.mjs";
+import {
+  createGenerateRuntime,
+  embedGeneratedAssetsInFiles,
+} from "./src/generateRuntime.mjs";
 import { createBuildRuntime } from "./src/buildRuntime.mjs";
 import { createPreviewRuntime } from "./src/previewRuntime.mjs";
 import { createMarketRuntime } from "./src/marketRuntime.mjs";
@@ -1754,10 +1757,13 @@ print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 `;
 }
 
-async function writeGenerated(prompt, modelSettings = {}, history = []) {
+async function writeGenerated(prompt, modelSettings = {}, history = [], embeddedAssets = null) {
   const id = buildId();
   await appendServerLog("generate.template.start", { id, prompt: String(prompt || "").slice(0, 160) });
-  const { files, manifest } = await generateFilesForPrompt(prompt, id, modelSettings, history);
+  const generated = await generateFilesForPrompt(prompt, id, modelSettings, history);
+  const embedded = embedGeneratedAssetsInFiles(generated.files, embeddedAssets, generated.manifest);
+  const files = embedded.files;
+  const manifest = embedded.manifest || generated.manifest;
   await writeGeneratedFiles(GENERATED_DIR, files);
   const agentRun = transitionRun(createAgentRun({
     prompt,

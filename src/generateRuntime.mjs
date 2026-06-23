@@ -2,6 +2,7 @@ import { runBuildGraph } from "./buildGraph.mjs";
 import { buildRefinedPrompt } from "./clarifyEngine.mjs";
 import { normalizeProjectMemory } from "./conversationStore.mjs";
 import { normalizeModelSettings } from "./modelSettings.mjs";
+import { normalizeAssetPath } from "./assetContract.mjs";
 import {
   AGENT_PHASES,
   appendEvidence,
@@ -84,6 +85,9 @@ export function createGenerateRuntime(deps = {}) {
     const assetContext = conversationId && assetLibraryStore?.promptContext
       ? assetLibraryStore.promptContext(conversationId)
       : "";
+    const embeddedAssets = conversationId && assetLibraryStore?.generatedAssets
+      ? assetLibraryStore.generatedAssets(conversationId)
+      : emptyEmbeddedAssets();
     const conversationFiles = conversationId
       ? conversationStore.loadConversationFiles(conversationId).files
       : {};
@@ -92,10 +96,18 @@ export function createGenerateRuntime(deps = {}) {
     const history = await compressHistory(normalizedHistory, settings);
     const userPreferences = memoryStore.getAll();
     const prompt = buildRefinedPrompt(
-      `${rawPrompt}${formatMemoryForPrompt(projectMemory)}${formatAgentModeForPrompt(agentMode)}${assetContext}`,
+      `${rawPrompt}${formatMemoryForPrompt(projectMemory)}${formatAgentModeForPrompt(agentMode)}${assetContext}${formatEmbeddedAssetContext(embeddedAssets)}`,
       clarifyAnswers,
       userPreferences,
     );
+
+    if (embeddedAssets.items?.length || embeddedAssets.rejected?.length) {
+      await appendServerLog("generate.assets.selected", {
+        embeddedCount: embeddedAssets.items?.length || 0,
+        rejectedCount: embeddedAssets.rejected?.length || 0,
+        paths: (embeddedAssets.items || []).slice(0, 12).map(item => item.path),
+      });
+    }
 
     if (clarifyAnswers.length > 0) {
       for (const ans of clarifyAnswers) {
@@ -126,6 +138,7 @@ export function createGenerateRuntime(deps = {}) {
       conversationId,
       isEditing,
       agentMode,
+      embeddedAssets,
     }, {
       agentGenerate: async () => runAgentGenerate({
         prompt,
@@ -137,9 +150,10 @@ export function createGenerateRuntime(deps = {}) {
         conversationId,
         isEditing,
         agentMode,
+        embeddedAssets,
         agentStartedAt,
       }),
-      templateGenerate: async () => runTemplateGenerate({ prompt, modelSettings }),
+      templateGenerate: async () => runTemplateGenerate({ prompt, modelSettings, embeddedAssets }),
       saveSnapshot: async state => saveSnapshot({ state, conversationId }),
     });
   }
@@ -154,6 +168,7 @@ export function createGenerateRuntime(deps = {}) {
     conversationId,
     isEditing,
     agentMode,
+    embeddedAssets,
     agentStartedAt,
   }) {
     requireFunction(runAgent, "runAgent");
@@ -218,7 +233,7 @@ export function createGenerateRuntime(deps = {}) {
     }
 
     const id = buildId();
-    const agentFiles = agentResult.files;
+    let agentFiles = agentResult.files;
 
     if (!agentFiles["hardware_app.py"]) {
       const spec = createAppSpec(prompt, id);
@@ -228,7 +243,7 @@ export function createGenerateRuntime(deps = {}) {
 
     const board = getBoard();
     const spec = createAppSpec(prompt, id);
-    const manifest = generatedManifest(prompt, id, spec, {
+    let manifest = generatedManifest(prompt, id, spec, {
       generator: "vibeboard-agent-v1",
       title: prompt.slice(0, 40),
       source: "agent",
@@ -238,6 +253,9 @@ export function createGenerateRuntime(deps = {}) {
       target: board.targetStatic,
     });
     agentFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
+    const embedded = embedGeneratedAssetsInFiles(agentFiles, embeddedAssets, manifest);
+    agentFiles = embedded.files;
+    manifest = embedded.manifest || manifest;
 
     await writeGeneratedFiles(generatedDir, agentFiles);
     let agentRun = transitionRun(createAgentRun({
@@ -304,14 +322,15 @@ export function createGenerateRuntime(deps = {}) {
     };
   }
 
-  async function runTemplateGenerate({ prompt, modelSettings }) {
+  async function runTemplateGenerate({ prompt, modelSettings, embeddedAssets }) {
     requireFunction(writeGenerated, "writeGenerated");
-    const build = await writeGenerated(prompt, modelSettings, []);
+    const build = await writeGenerated(prompt, modelSettings, [], embeddedAssets);
+    const embedded = embedGeneratedAssetsInFiles(build.files, embeddedAssets, build.manifest);
     return {
       ok: true,
       id: build.id,
-      files: build.files,
-      manifest: build.manifest || null,
+      files: embedded.files,
+      manifest: embedded.manifest || build.manifest || null,
       source: "template",
       spec: build.agentRun?.spec || null,
       evidence: formatRunEvidence(build.agentRun || {}),
@@ -341,6 +360,104 @@ export function createGenerateRuntime(deps = {}) {
   }
 
   return { runGenerateRequest };
+}
+
+export function formatEmbeddedAssetContext(embeddedAssets = emptyEmbeddedAssets()) {
+  const items = Array.isArray(embeddedAssets.items) ? embeddedAssets.items : [];
+  const rejected = Array.isArray(embeddedAssets.rejected) ? embeddedAssets.rejected : [];
+  if (!items.length && !rejected.length) return "";
+
+  const lines = [
+    "## Embedded uploaded assets",
+    "The following passive uploaded files will be copied into the generated app. Reference them with ./assets/uploaded/... from HTML, CSS, or JavaScript, and keep them declared in manifest.json assets[].",
+  ];
+  for (const item of items.slice(0, 24)) {
+    lines.push(`- ./${item.path} <= ${item.name} (${item.kind}, ${item.size} bytes): ${item.use || "uploaded passive asset"}`);
+  }
+  if (rejected.length) {
+    lines.push("Reference-only uploaded assets:");
+    for (const item of rejected.slice(0, 8)) {
+      lines.push(`- ${item.name}: ${item.error}`);
+    }
+  }
+  return `\n\n${lines.join("\n")}`;
+}
+
+export function embedGeneratedAssetsInFiles(files = {}, embeddedAssets = emptyEmbeddedAssets(), fallbackManifest = {}) {
+  const nextFiles = { ...(files || {}) };
+  const assetFiles = embeddedAssets?.files && typeof embeddedAssets.files === "object"
+    ? embeddedAssets.files
+    : {};
+  const entries = Object.entries(assetFiles);
+  const parsedManifest = parseManifest(nextFiles["manifest.json"]);
+  const fallback = fallbackManifest && typeof fallbackManifest === "object" && !Array.isArray(fallbackManifest)
+    ? fallbackManifest
+    : {};
+  const manifest = Object.keys(parsedManifest).length || !Object.keys(fallback).length
+    ? { ...parsedManifest }
+    : { ...fallback };
+  if (!entries.length) {
+    return { files: nextFiles, manifest, paths: [], rejected: [] };
+  }
+
+  const manifestAssets = uniqueStrings(manifest.assets);
+  const manifestFiles = uniqueStrings(manifest.files);
+  const paths = [];
+  const rejected = [];
+  const declared = new Set([...manifestAssets, ...manifestFiles]);
+
+  for (const [rawPath, content] of entries) {
+    try {
+      const assetPath = normalizeAssetPath(rawPath);
+      if (!Object.prototype.hasOwnProperty.call(nextFiles, assetPath)) {
+        nextFiles[assetPath] = content;
+      }
+      if (!declared.has(assetPath)) {
+        manifestAssets.push(assetPath);
+        manifestFiles.push(assetPath);
+        declared.add(assetPath);
+      }
+      paths.push(assetPath);
+    } catch (error) {
+      rejected.push({ path: rawPath, error: error.message });
+    }
+  }
+
+  manifest.assets = uniqueStrings(manifestAssets);
+  manifest.files = uniqueStrings(manifestFiles);
+  nextFiles["manifest.json"] = JSON.stringify(manifest, null, 2);
+  return { files: nextFiles, manifest, paths: uniqueStrings(paths), rejected };
+}
+
+function emptyEmbeddedAssets() {
+  return {
+    files: {},
+    items: [],
+    manifestAssets: [],
+    rejected: [],
+    summary: { count: 0, totalBytes: 0 },
+  };
+}
+
+function parseManifest(raw) {
+  if (raw && typeof raw === "object" && !Buffer.isBuffer(raw)) return raw;
+  try {
+    return typeof raw === "string" && raw.trim() ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function uniqueStrings(values = []) {
+  const result = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    result.push(text);
+  }
+  return result;
 }
 
 function normalizeAgentMode(value) {

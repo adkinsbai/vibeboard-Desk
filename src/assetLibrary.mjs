@@ -1,6 +1,12 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import zlib from "node:zlib";
+import {
+  ALLOWED_ASSET_EXTENSIONS,
+  MAX_ASSET_BYTES,
+  MAX_TOTAL_ASSET_BYTES,
+  normalizeAssetPath,
+} from "./assetContract.mjs";
 
 export const ASSET_LIBRARY_LIMITS = Object.freeze({
   maxAssetCount: 80,
@@ -10,6 +16,13 @@ export const ASSET_LIBRARY_LIMITS = Object.freeze({
   maxArchiveEntries: 80,
   maxArchiveEntryBytes: 12 * 1024 * 1024,
   maxArchiveExpandedBytes: 48 * 1024 * 1024,
+});
+
+export const GENERATED_ASSET_LIMITS = Object.freeze({
+  root: "assets/uploaded",
+  maxAssetCount: 24,
+  maxAssetBytes: MAX_ASSET_BYTES,
+  maxTotalBytes: MAX_TOTAL_ASSET_BYTES,
 });
 
 const TYPE_GROUPS = Object.freeze({
@@ -30,6 +43,7 @@ const TEXT_LIKE_EXTENSIONS = new Set([
   ".svg",
 ]);
 
+const GENERATED_ASSET_KINDS = new Set(["image", "video", "audio", "font", "text", "data"]);
 const BINARY_ENCODING = "base64";
 
 export function createAssetLibraryStore(db, saveDb = () => {}) {
@@ -102,6 +116,16 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
 
     promptContext(conversationId = "") {
       return formatAssetContext(this.listAssets(conversationId));
+    },
+
+    generatedAssets(conversationId = "") {
+      const rows = query(db, `
+        SELECT id, conversation_id, name, mime, kind, size, sha256, encoding, content, summary_json, created_at
+        FROM asset_library
+        WHERE conversation_id = ? OR conversation_id = ''
+        ORDER BY created_at ASC
+      `, [conversationId]);
+      return selectGeneratedAssets(rows.map(storedAssetRow));
     },
 
     summarize(conversationId = "") {
@@ -200,6 +224,61 @@ export function normalizeIncomingAsset(item = {}) {
     encoding: BINARY_ENCODING,
     content: buffer.toString(BINARY_ENCODING),
     summary,
+  };
+}
+
+export function selectGeneratedAssets(assets = []) {
+  const files = {};
+  const items = [];
+  const rejected = [];
+  const usedPaths = new Set();
+  let totalBytes = 0;
+
+  for (const asset of Array.isArray(assets) ? assets : []) {
+    try {
+      if (items.length >= GENERATED_ASSET_LIMITS.maxAssetCount) {
+        throw new Error(`generated asset count limit is ${GENERATED_ASSET_LIMITS.maxAssetCount}`);
+      }
+      const targetPath = generatedAssetPath(asset, usedPaths);
+      const content = decodeStoredAssetContent(asset);
+      const size = content.byteLength;
+      if (size > GENERATED_ASSET_LIMITS.maxAssetBytes) {
+        throw new Error(`${asset.name || "asset"} is larger than ${GENERATED_ASSET_LIMITS.maxAssetBytes} bytes`);
+      }
+      if (totalBytes + size > GENERATED_ASSET_LIMITS.maxTotalBytes) {
+        throw new Error(`generated asset total size limit is ${GENERATED_ASSET_LIMITS.maxTotalBytes} bytes`);
+      }
+      totalBytes += size;
+      files[targetPath] = content;
+      items.push({
+        id: asset.id || "",
+        name: asset.name || targetPath,
+        kind: asset.kind || "binary",
+        mime: asset.mime || "",
+        size,
+        sha256: asset.sha256 || crypto.createHash("sha256").update(content).digest("hex"),
+        path: targetPath,
+        use: asset.summary?.use || suggestedUse(asset.kind, path.posix.extname(asset.name || "").toLowerCase()),
+      });
+    } catch (error) {
+      rejected.push({
+        id: asset?.id || "",
+        name: asset?.name || "asset",
+        kind: asset?.kind || "binary",
+        error: error.message,
+      });
+    }
+  }
+
+  return {
+    files,
+    items,
+    manifestAssets: items.map(item => item.path),
+    rejected,
+    summary: {
+      count: items.length,
+      totalBytes,
+    },
   };
 }
 
@@ -482,6 +561,14 @@ function publicAssetRow(row = {}) {
   return publicAsset({ ...row, summary });
 }
 
+function storedAssetRow(row = {}) {
+  return {
+    ...publicAssetRow(row),
+    encoding: row.encoding || BINARY_ENCODING,
+    content: row.content || "",
+  };
+}
+
 function publicAsset(asset = {}) {
   return {
     id: asset.id,
@@ -506,6 +593,41 @@ function sanitizeAssetPathName(value) {
   const normalized = path.posix.normalize(String(value || "asset").replaceAll("\\", "/"));
   const parts = normalized.split("/").map(part => sanitizeAssetSegment(part)).filter(Boolean);
   return parts.join("/") || "asset";
+}
+
+function generatedAssetPath(asset = {}, usedPaths = new Set()) {
+  if (!GENERATED_ASSET_KINDS.has(asset.kind)) {
+    throw new Error(`${asset.name || "asset"} is ${asset.kind || "binary"} and remains a design reference only`);
+  }
+  const safeName = sanitizeAssetPathName(asset.name || asset.id || "asset");
+  const ext = path.posix.extname(safeName).toLowerCase();
+  if (!ALLOWED_ASSET_EXTENSIONS.includes(ext)) {
+    throw new Error(`asset extension is not embeddable in generated builds: ${ext || "(none)"}`);
+  }
+
+  const normalized = normalizeAssetPath(`${GENERATED_ASSET_LIMITS.root}/${safeName}`);
+  if (!usedPaths.has(normalized)) {
+    usedPaths.add(normalized);
+    return normalized;
+  }
+
+  const suffix = String(asset.sha256 || crypto.createHash("sha256").update(safeName).digest("hex")).slice(0, 8);
+  const dir = path.posix.dirname(normalized);
+  const base = path.posix.basename(normalized, ext);
+  for (let index = 0; index < 100; index += 1) {
+    const infix = index === 0 ? suffix : `${suffix}-${index + 1}`;
+    const deduped = normalizeAssetPath(`${dir}/${base}-${infix}${ext}`);
+    if (!usedPaths.has(deduped)) {
+      usedPaths.add(deduped);
+      return deduped;
+    }
+  }
+  throw new Error(`could not create a unique generated path for ${asset.name || "asset"}`);
+}
+
+function decodeStoredAssetContent(asset = {}) {
+  if (!asset.content) throw new Error(`${asset.name || "asset"} has no stored content`);
+  return decodeAssetContent(String(asset.content || ""), String(asset.encoding || BINARY_ENCODING).toLowerCase());
 }
 
 function archivePrefix(value) {
