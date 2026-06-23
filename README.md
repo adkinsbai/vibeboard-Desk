@@ -53,8 +53,8 @@ VibeBoard 是一个 **AI + 硬件** 的端到端应用生成平台。用户在 W
 - **真实 L4 验证通过**：灰色版 build `vb-mqqmu8pt-d296c7` 已部署到 `taishan-gray`，`/api/verify?id=vb-mqqmu8pt-d296c7&deviceId=taishan-gray` 返回 `goldenLoop.ok: true`。
 - **持久对话与项目快照**：刷新页面后会自动恢复最近对话、消息、项目文件和预览状态；没有内容时设备预览保持纯黑屏，避免空 iframe 白屏。
 - **Agent 交互提速**：澄清问题改为 `quick_replies` 选择题，每轮最多追问一个关键问题；用户输入“开始吧”会直接进入构建，输入“帮我部署吧”会基于当前构建直接显示部署确认按钮。
-- **会话级资产库**：聊天框支持上传多文件资产，后端会分析图片、视频、音频、HTML/CSS/JS 组件、文本、字体、数据文件；`.zip`、`.tar`、`.tgz`、`.gz` 资源包会在安全路径和大小限制内展开，并聚合成面向 480×360 小屏的产品设计简报。
-- **Agent 实现模式选择**：聊天框右下角可切换“自研 Agent / Codex 硬件模式”。Codex 模式现在走独立 `codex-hardware-agent` 桥接层，被限制在 VibeBoard 480×360 硬件嵌入式 UI 设计、生成、验证和部署确认范围内；明显非硬件请求会被代码层 scope guard 拦截并转回小屏设计选择题，后端会返回 `mode_boundary` 与 `codex_bridge`。
+- **会话级资产库**：聊天框支持上传多文件资产，后端会分析图片、视频、音频、HTML/CSS/JS 组件、文本、字体、数据文件；`.zip`、`.tar`、`.tgz`、`.gz` 资源包会在安全路径和大小限制内展开，并聚合成面向 480×360 小屏的产品设计简报，上传反馈和 Assets 状态 tooltip 会展示简报重点。
+- **Agent 实现模式选择**：聊天框右下角可切换“自研 Agent / Codex 硬件模式”。Codex 模式现在走独立 `codex-hardware-agent` 桥接层，被限制在 VibeBoard 480×360 硬件嵌入式 UI 设计、生成、验证和部署确认范围内；明显非硬件请求会被代码层 scope guard 拦截并转回小屏设计选择题，前端会显示 `mode_boundary`、`codex_bridge` 状态和拦截原因。
 - **应用市场扩展**：内置静态市场应用、预览图、二进制资源资产、数据库发布/部署流程，支持从市场一键部署回硬件。
 - **Digital Life Companion**：新增独立 `/digital-life.html` 页面和本地优先的 companion runtime，包含长期记忆、情绪/认知/自主性循环、presence、硬件/音频 API 和 UI smoke 测试。
 - **验证栈升级**：`npm run check` 会扫描主程序、前端脚本、`src/*.mjs`、Digital Life 和测试文件；`npm run verify:all` 汇总 Agent、offline 和 Digital Life 验证。

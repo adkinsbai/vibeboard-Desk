@@ -1475,6 +1475,20 @@ function renderModeBoundary(boundary = {}) {
   body?.classList.add("mode-boundary-note");
 }
 
+function renderCodexBridge(bridge = {}) {
+  if (!bridge || bridge.name !== "codex-hardware-agent") return;
+  if (bridge.scope_guard?.blocked) {
+    const reason = bridge.scope_guard.reason || "out of scope";
+    const body = addMarkdownMessage("agent", `Codex scope guard 已拦截非硬件请求：${reason}。请把需求改成 VibeBoard 480x360 小屏应用。`);
+    body?.classList.add("codex-bridge-note", "codex-bridge-warning");
+    return;
+  }
+  const allowed = Array.isArray(bridge.allowed_operations) ? bridge.allowed_operations.slice(0, 3).join(" / ") : "";
+  const assetText = bridge.asset_context_attached ? "已接入当前 Assets 分析上下文" : "暂无上传资产上下文";
+  const body = addMarkdownMessage("agent", `Codex hardware bridge active。${assetText}${allowed ? `。允许范围：${allowed}` : ""}`);
+  body?.classList.add("codex-bridge-note");
+}
+
 function addBuildPromptAction(buildPrompt, plan = {}) {
   const prompt = String(buildPrompt || "").trim();
   if (!prompt) return;
@@ -1644,6 +1658,7 @@ async function handleChat(prompt) {
     addMarkdownMessage("agent", reply);
     persistMessage("agent", reply, null, conversationId);
     renderModeBoundary(result.mode_boundary);
+    renderCodexBridge(result.codex_bridge);
 
     // 检测是否准备好构建
     if (result.ready_to_build) {
@@ -1732,6 +1747,7 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
 4. Hardware write waits for your later deploy confirmation`);
     }
     renderModeBoundary(gen.mode_boundary);
+    renderCodexBridge(gen.codex_bridge);
     addEvidenceCard(gen);
 
     if (!conversationId || conversationId === currentConversationId) {
@@ -1987,6 +2003,7 @@ function renderAssetSummary(summary = {}) {
     count: Number(summary.count || 0),
     totalBytes: Number(summary.totalBytes || 0),
     byKind: summary.byKind || {},
+    designBrief: summary.designBrief || {},
     items: Array.isArray(summary.items) ? summary.items : [],
   };
   if (!assetState) return;
@@ -2000,7 +2017,19 @@ function renderAssetSummary(summary = {}) {
     .map(([kind, value]) => `${kind}:${value}`)
     .join(" ");
   assetState.textContent = `${count} assets`;
-  assetState.title = kinds || `${count} assets`;
+  assetState.title = assetSummaryTooltip(currentAssetSummary, kinds);
+}
+
+function assetSummaryTooltip(summary = {}, kinds = "") {
+  const lines = [`${summary.count || 0} assets`, kinds].filter(Boolean);
+  const priorities = Array.isArray(summary.designBrief?.priorities)
+    ? summary.designBrief.priorities.slice(0, 4)
+    : [];
+  if (priorities.length) {
+    lines.push("Design brief:");
+    for (const item of priorities) lines.push(`- ${item}`);
+  }
+  return lines.join("\n");
 }
 
 async function uploadAssetFiles(fileList) {
@@ -2016,7 +2045,13 @@ async function uploadAssetFiles(fileList) {
     const uploaded = result.assets?.length || 0;
     const rejected = result.rejected?.length || 0;
     const kinds = Object.entries(result.summary?.byKind || {}).map(([kind, count]) => `${kind} ${count}`).join(", ");
-    addMarkdownMessage("agent", `已解析 ${uploaded} 个资产${rejected ? `，${rejected} 个未导入` : ""}。${kinds ? `类型：${kinds}。` : ""}`);
+    const priorities = Array.isArray(result.summary?.designBrief?.priorities)
+      ? result.summary.designBrief.priorities.slice(0, 3)
+      : [];
+    const brief = priorities.length
+      ? `\n\n**Assets 设计简报**\n${priorities.map(item => `- ${item}`).join("\n")}`
+      : "";
+    addMarkdownMessage("agent", `已解析 ${uploaded} 个资产${rejected ? `，${rejected} 个未导入` : ""}。${kinds ? `类型：${kinds}。` : ""}${brief}`);
   } catch (error) {
     const f = friendlyError(error.data, error.message);
     addMarkdownMessage("agent", `资产上传失败：${f}`);
