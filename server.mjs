@@ -31,6 +31,7 @@ import { createDigitalLifeRoutes } from "./src/digitalLifeRoutes.mjs";
 import { createExperienceStore, makePlaybookCandidate } from "./src/experienceStore.mjs";
 import { createPlaybookStore } from "./src/playbookStore.mjs";
 import { verifyAllLocal } from "./src/verifiers/index.mjs";
+import { classifyError } from "./src/errorClassifier.mjs";
 import { analyzeAndClarify } from "./src/clarifyEngine.mjs";
 import { createAgentOrchestrator } from "./src/agentOrchestrator.mjs";
 import {
@@ -2104,58 +2105,6 @@ async function readServerLogTail(limit = 80) {
   }
 }
 
-
-// ==================== Error Classification ====================
-function classifyError(error) {
-  const text = `${error?.message || ""}\n${error?.stack || ""}`;
-  if (/timed?out|timeout/i.test(text)) {
-    return { errorType: "timeout", errorLabel: "Operation timed out" };
-  }
-  if (/Connection reset|Connection closed|EOFError/i.test(text)) {
-    return { errorType: "connection_dropped", errorLabel: "Connection dropped" };
-  }
-  if (/mkdir|No space left|ENOSPC/i.test(text)) {
-    return { errorType: "deploy_mkdir", errorLabel: "Unable to create deploy directory" };
-  }
-  if (/scp|upload|copy/i.test(text) && /fail|error/i.test(text)) {
-    return { errorType: "deploy_copy", errorLabel: "File upload failed" };
-  }
-  if (/syntax.?error|SyntaxError|unexpected token/i.test(text)) {
-    return { errorType: "syntax_error", errorLabel: "Generated code has a syntax error" };
-  }
-  if (/IndentationError|TabError|NameError|python/i.test(text) && /error/i.test(text)) {
-    return { errorType: "python_syntax", errorLabel: "Generated Python has an error" };
-  }
-  if (/systemctl|service.*restart|Failed to restart/i.test(text)) {
-    return { errorType: "deploy_service", errorLabel: "Device service restart failed" };
-  }
-  if (/HTTP.*(?:502|503|504)|connection refused.*curl/i.test(text)) {
-    return { errorType: "deploy_http", errorLabel: "Device HTTP service did not respond" };
-  }
-  if (/not configured|no api key|NO_API_KEY/i.test(text)) {
-    return { errorType: "no_api_key", errorLabel: "AI provider is not configured" };
-  }
-  if (/LLM_CALL_FAILED|llm.*fail|model.*fail/i.test(text)) {
-    return { errorType: "llm_failed", errorLabel: "AI model call failed" };
-  }
-  if (/LLM_TIMEOUT|llm.*timeout|model.*timeout/i.test(text)) {
-    return { errorType: "llm_timeout", errorLabel: "AI model call timed out" };
-  }
-  if (/maximum iterations|max iterations/i.test(text)) {
-    return { errorType: "generate_failed", errorLabel: "AI generation reached its iteration limit" };
-  }
-  if (/Prompt is required|empty.*prompt/i.test(text)) {
-    return { errorType: "empty_prompt", errorLabel: "Prompt is required" };
-  }
-  if (/no code|has no code/i.test(text)) {
-    return { errorType: "no_code", errorLabel: "Generated app has no code" };
-  }
-  if (/Deploy failed/i.test(text)) {
-    return { errorType: "deploy_failed", errorLabel: "Deploy failed" };
-  }
-  return { errorType: "unknown", errorLabel: error?.message || "Unknown failure" };
-}
-
 function formatProjectMemoryForPrompt(memory = {}) {
   const normalized = normalizeProjectMemory(memory);
   const lines = [];
@@ -2345,7 +2294,7 @@ async function route(req, res) {
         json(res, 200, await runAgentRequest({ ...(body || {}), action: "message" }));
       } catch (err) {
         const classified = classifyError(err);
-        json(res, 500, { ok: false, error: err.message, ...classified });
+        json(res, classified.statusCode || err.statusCode || 500, { ok: false, error: err.message, ...classified });
       }
       return;
     }
@@ -2416,15 +2365,26 @@ async function route(req, res) {
         json(res, 200, await runAgentRequest(body || {}));
       } catch (err) {
         const classified = classifyError(err);
-        json(res, 500, { ok: false, error: err.message, ...classified });
+        json(res, classified.statusCode || err.statusCode || 500, { ok: false, error: err.message, ...classified });
       }
       return;
     }
 
     // --- Generate: AI 浠ｇ爜鐢熸垚 ---
     if (req.method === "POST" && url.pathname === "/api/generate") {
-      const body = await readBody(req);
-      json(res, 200, await runGenerateRequest(body || {}));
+      try {
+        const body = await readBody(req);
+        json(res, 200, await runGenerateRequest(body || {}));
+      } catch (error) {
+        const classified = classifyError(error, { stage: "generate" });
+        json(res, classified.statusCode || error.statusCode || 500, {
+          ok: false,
+          error: error.message,
+          ...classified,
+          stdout: error.stdout,
+          stderr: error.stderr,
+        });
+      }
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/build") {
@@ -2466,7 +2426,7 @@ async function route(req, res) {
         if (error.stdout) console.error("[deploy] stdout:", error.stdout);
         if (error.stderr) console.error("[deploy] stderr:", error.stderr);
         const classified = classifyError(error);
-        json(res, 500, {
+        json(res, classified.statusCode || error.statusCode || 500, {
           ok: false,
           error: error.message,
           ...classified,
@@ -2568,7 +2528,7 @@ async function route(req, res) {
           json(res, 200, { ok: true, ...result });
         } catch (assetErr) {
           const classified = classifyError(assetErr);
-          json(res, assetErr.statusCode || 400, { ok: false, error: assetErr.message, ...classified });
+          json(res, classified.statusCode || assetErr.statusCode || 400, { ok: false, error: assetErr.message, ...classified });
         }
         return;
       }
@@ -2607,7 +2567,7 @@ async function route(req, res) {
         json(res, 200, await marketRuntime.publishApp(body || {}));
       } catch (publishErr) {
         const classified = classifyError(publishErr);
-        json(res, publishErr.statusCode || 500, {
+        json(res, classified.statusCode || publishErr.statusCode || 500, {
           ok: false,
           error: publishErr.message,
           ...classified,
@@ -2622,7 +2582,7 @@ async function route(req, res) {
         json(res, 200, marketRuntime.getApp(appId));
       } catch (marketErr) {
         const classified = classifyError(marketErr);
-        json(res, marketErr.statusCode || 500, { ok: false, error: marketErr.message, ...classified });
+        json(res, classified.statusCode || marketErr.statusCode || 500, { ok: false, error: marketErr.message, ...classified });
       }
       return;
     }
@@ -2635,9 +2595,9 @@ async function route(req, res) {
       } catch (deployErr) {
         const classified = classifyError(deployErr);
         if (deployErr.statusCode) {
-          json(res, deployErr.statusCode, { ok: false, error: deployErr.message, ...classified });
+          json(res, classified.statusCode || deployErr.statusCode, { ok: false, error: deployErr.message, ...classified });
         } else {
-          json(res, 500, { ok: false, error: deployErr.message, ...classified });
+          json(res, classified.statusCode || 500, { ok: false, error: deployErr.message, ...classified });
         }
       }
       return;
@@ -2669,7 +2629,7 @@ async function route(req, res) {
     await serveStatic(req, res);
   } catch (error) {
     const classified = classifyError(error);
-    json(res, 500, {
+    json(res, classified.statusCode || error.statusCode || 500, {
       ok: false,
       error: error.message,
       ...classified,

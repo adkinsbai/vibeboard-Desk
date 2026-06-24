@@ -615,6 +615,22 @@ await test("toolResult keeps blocking failures non-ok", () => {
   assert(merged.ok === false, "merged result should fail when a blocking issue exists");
 });
 
+await test("error classifier returns actionable generation failure details", async () => {
+  const { classifyError, createStructuredError } = await import(pathToFileURL(path.join(ROOT, "src", "errorClassifier.mjs")).href);
+  const auth = classifyError(new Error("LLM_CALL_FAILED: HTTP 401; provider=invalid api key"));
+  assert(auth.errorType === "llm_auth", `expected llm_auth, got ${JSON.stringify(auth)}`);
+  assert(auth.userMessage.includes("API Key"), "auth error should explain API key");
+  assert(auth.suggestion && auth.nextActions.length, "auth error should include suggestions");
+
+  const render = classifyError(new Error("480x360 HTTP render failed. LAYOUT_OVERFLOW"));
+  assert(render.errorType === "render_failed", `expected render_failed, got ${JSON.stringify(render)}`);
+  assert(render.errorStage === "local_verify", "render error should point to local verification");
+
+  const busy = classifyError(createStructuredError("Another generation is already running.", "generate_busy"));
+  assert(busy.statusCode === 409, "busy generation should be an HTTP 409 conflict");
+  assert(busy.retryable === true, "busy generation should be retryable after the active task finishes");
+});
+
 await test("bad JavaScript is rejected by node --check", async () => {
   await withTempDir("vibeboard-bad-js-", async dir => {
     const badJs = path.join(dir, "app.js");
@@ -2100,6 +2116,68 @@ await test("generate runtime runs template path and saves snapshot", async () =>
   assert(savedSnapshot?.files?.[HARDWARE_RESULT_FILE], "snapshot should include hardware result file");
 });
 
+await test("generate runtime rejects overlapping generation requests with actionable error", async () => {
+  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  let releaseFirst;
+  const firstStarted = new Promise(resolve => {
+    releaseFirst = resolve;
+  });
+  let allowFirstToFinish;
+  const firstCanFinish = new Promise(resolve => {
+    allowFirstToFinish = resolve;
+  });
+  const runtime = createGenerateRuntime({
+    conversationStore: {
+      getProjectMemory: () => ({}),
+      loadConversationFiles: () => ({ files: {} }),
+      saveConversationFiles: () => {},
+    },
+    memoryStore: {
+      getAll: () => ({}),
+      set: () => {},
+    },
+    appendServerLog: async () => {},
+    writeGenerated: async () => {
+      releaseFirst();
+      await firstCanFinish;
+      return {
+        ok: true,
+        id: "vb-runtime-lock",
+        files: { "index.html": "<html></html>" },
+        manifest: { id: "vb-runtime-lock" },
+        agentRun: { spec: {}, evidence: [] },
+        buildEvidence: { ok: true, issues: [] },
+        intelligenceSummary: { confidence: "local_verified" },
+      };
+    },
+    filesWithHardwareResult: async files => ({ ...files, [HARDWARE_RESULT_FILE]: "{\"ok\":true}" }),
+  });
+
+  const first = runtime.runGenerateRequest({
+    prompt: "first long running task",
+    modelSettings: { enabled: false },
+  });
+  await firstStarted;
+
+  let overlapError = null;
+  try {
+    await runtime.runGenerateRequest({
+      prompt: "second task while first is active",
+      modelSettings: { enabled: false },
+    });
+  } catch (error) {
+    overlapError = error;
+  } finally {
+    allowFirstToFinish();
+  }
+  const firstResult = await first;
+
+  assert(firstResult.ok === true, "first generation should finish after the lock is released");
+  assert(overlapError?.errorType === "generate_busy", `expected generate_busy, got ${overlapError?.message} ${JSON.stringify(overlapError)}`);
+  assert(overlapError?.statusCode === 409, "overlapping generation should be reported as HTTP 409");
+  assert(overlapError?.userMessage?.includes("当前已经有一个生成任务"), "busy error should be user-actionable");
+});
+
 await test("generate runtime embeds uploaded passive assets into template builds", async () => {
   const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
   const embeddedPng = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
@@ -2418,6 +2496,32 @@ await test("agent orchestrator routes confirmed build through generator", async 
   assert(receivedBody?.prompt === "Build the confirmed village simulator.", "confirmed prompt should reach generator");
   assert(receivedBody?.conversation_id === "conv-agent-orchestrator", "conversation id should reach generator");
   assert(Array.isArray(receivedBody?.history) && receivedBody.history.length === 1, "history should reach generator");
+});
+
+await test("agent orchestrator returns choice-based guidance when model is missing", async () => {
+  const { createAgentOrchestrator } = await import(pathToFileURL(path.join(ROOT, "src", "agentOrchestrator.mjs")).href);
+  const orchestrator = createAgentOrchestrator({
+    conversationStore: {
+      getProjectMemory: () => ({}),
+      setProjectMemory: () => {},
+    },
+    memoryStore: {
+      getAll: () => ({}),
+    },
+    runGenerateRequest: async () => ({ ok: true }),
+  });
+
+  const result = await orchestrator.runAgentRequest({
+    action: "message",
+    modelSettings: { enabled: false },
+    messages: [{ role: "user", content: "帮我生成一个天气小屏" }],
+  });
+
+  assert(result.ok === true, `expected ok response, got ${JSON.stringify(result)}`);
+  assert(result.ready_to_build === false, "missing model should not auto-build from chat message");
+  assert(result.reply.includes("没有配置可用的 AI 模型"), `missing model reply should be localized, got ${result.reply}`);
+  assert(Array.isArray(result.quick_replies) && result.quick_replies.length >= 2, "missing model should offer quick reply choices");
+  assert(result.quick_replies.some(item => item.label.includes("本地生成")), "missing model should offer local template generation choice");
 });
 
 await test("agent orchestrator exposes Codex hardware mode boundary", async () => {

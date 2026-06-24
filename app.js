@@ -195,6 +195,11 @@ const FRIENDLY_ERRORS = {
     detail: "无法在规定时间内连接到泰山派设备。",
     suggestion: "请检查：① 设备是否已开机 ② 设备是否连接了网络 ③ FRP 隧道是否正常"
   },
+  timeout: {
+    title: "请求超时",
+    detail: "操作没有在预期时间内完成。",
+    suggestion: "请稍后重试；如果连续超时，缩短需求、减少上传上下文或检查网络。"
+  },
   connection_refused: {
     title: "设备拒绝连接",
     detail: "泰山派设备的 SSH 服务没有响应。",
@@ -240,10 +245,30 @@ const FRIENDLY_ERRORS = {
     detail: "部署完成后，设备上的网页服务没有正常启动。",
     suggestion: "应用可能启动缓慢，请等待几秒后刷新页面查看"
   },
+  generate_busy: {
+    title: "已有任务正在执行",
+    detail: "当前已经有一个生成任务在运行，新的任务没有启动，避免覆盖当前构建。",
+    suggestion: "请等待当前任务结束；如果刚刷新页面，先查看当前对话是否已经恢复出最新预览。"
+  },
   no_api_key: {
     title: "未配置 AI 模型",
     detail: "还没有设置 AI 模型的 API Key，将使用本地模板生成。",
     suggestion: "点击右上角「Model」按钮配置 DeepSeek 或其他模型"
+  },
+  llm_quota: {
+    title: "模型额度不可用",
+    detail: "模型服务返回额度、余额或配额不足，代码生成在部署设备前已经停止。",
+    suggestion: "请检查模型账号余额和限额，或切换到另一个可用模型。"
+  },
+  llm_rate_limited: {
+    title: "模型请求被限流",
+    detail: "模型服务暂时拒绝了当前请求，Agent 还没有拿到完整代码。",
+    suggestion: "请稍后重试，或切换到并发额度更高的模型配置。"
+  },
+  llm_network: {
+    title: "模型网络不可达",
+    detail: "服务端无法连接模型 API，可能是 Base URL、代理、DNS 或网络问题。",
+    suggestion: "请检查 Base URL、代理、网络连通性和防火墙设置。"
   },
   llm_failed: {
     title: "AI 模型调用失败",
@@ -260,6 +285,11 @@ const FRIENDLY_ERRORS = {
     detail: "AI 模型没有在规定时间内返回结果。",
     suggestion: "可能是模型服务繁忙，请稍后重试"
   },
+  model_output_invalid: {
+    title: "模型输出不符合代码合同",
+    detail: "模型返回内容缺少必需文件、不是可解析 JSON，或没有按 VibeBoard 硬件合同输出。",
+    suggestion: "请重试生成；如果连续出现，换一个模型或把需求拆得更具体。"
+  },
   syntax_error: {
     title: "代码语法错误",
     detail: "生成的 JavaScript 代码有语法问题。",
@@ -274,6 +304,16 @@ const FRIENDLY_ERRORS = {
     title: "生成的文件为空",
     detail: "代码生成过程中出现了问题，文件内容为空。",
     suggestion: "请重新生成，如果持续出现请联系管理员"
+  },
+  hardware_contract: {
+    title: "硬件合同不完整",
+    detail: "生成应用缺少 VibeBoard 必需的硬件合同字段或运行结果。",
+    suggestion: "请重新生成，并保留 hardware_app.py、hardware-result.json、build_id 和 runtime API。"
+  },
+  render_failed: {
+    title: "480×360 渲染验证失败",
+    detail: "页面没有通过小屏渲染验证，可能是白屏、溢出、资源加载失败或前端运行错误。",
+    suggestion: "请重试生成，或根据技术详情修复布局尺寸、资源路径和控制台错误。"
   },
   no_code: {
     title: "此应用为示例预览",
@@ -295,6 +335,26 @@ const FRIENDLY_ERRORS = {
     detail: "生成应用代码时出现问题。",
     suggestion: "请检查模型配置后重试"
   },
+  storage_failed: {
+    title: "项目快照保存失败",
+    detail: "项目快照或会话文件保存失败，刷新后可能无法恢复这次生成。",
+    suggestion: "请检查 runtime 数据库、磁盘权限和剩余空间，然后重试。"
+  },
+  storage_corrupt: {
+    title: "项目数据库损坏",
+    detail: "本地项目数据库无法读取，可能导致对话、资产或快照恢复失败。",
+    suggestion: "请先备份 runtime 数据库，再修复或重建数据库文件。"
+  },
+  asset_rejected: {
+    title: "资产未通过检查",
+    detail: "上传资产没有通过安全、类型或大小检查，因此没有进入生成上下文。",
+    suggestion: "请检查资产路径、文件类型、压缩包结构和大小限制后重新上传。"
+  },
+  request_too_large: {
+    title: "请求或资产包太大",
+    detail: "这次请求超过后端大小限制，生成还没有开始。",
+    suggestion: "请拆分资产包，先上传关键素材，再分批补充其它素材。"
+  },
   server_unreachable: {
     title: "无法连接到服务器",
     detail: "VibeBoard 服务器没有响应，可能已停止运行。",
@@ -310,10 +370,15 @@ const FRIENDLY_ERRORS = {
 function friendlyError(data, fallbackMsg) {
   const type = data?.errorType || "unknown";
   const info = FRIENDLY_ERRORS[type] || FRIENDLY_ERRORS.unknown;
+  const nextActions = Array.isArray(data?.nextActions) ? data.nextActions.filter(Boolean).slice(0, 4) : [];
   return {
-    title: info.title,
-    detail: info.detail,
-    suggestion: info.suggestion,
+    title: data?.userTitle || info.title || data?.errorLabel,
+    detail: data?.userMessage || info.detail,
+    suggestion: data?.suggestion || info.suggestion,
+    stage: data?.errorStage || "",
+    retryable: data?.retryable,
+    nextActions,
+    technicalDetail: data?.technicalDetail || "",
     type,
     raw: data?.error || fallbackMsg || ""
   };
@@ -321,7 +386,44 @@ function friendlyError(data, fallbackMsg) {
 
 function formatFriendlyError(data, fallbackMsg) {
   const f = friendlyError(data, fallbackMsg);
-  return f.title + "。" + f.detail + "\n💡 " + f.suggestion;
+  return `${f.title}。${f.detail}\n💡 ${f.suggestion}`;
+}
+
+function friendlyErrorMarkdown(data, fallbackMsg, { includeRaw = true } = {}) {
+  const f = friendlyError(data, fallbackMsg);
+  const lines = [
+    `**${f.title}**`,
+    "",
+    f.detail,
+    "",
+    `💡 ${f.suggestion}`,
+  ];
+  if (f.stage) lines.push("", `阶段：\`${f.stage}\``);
+  if (f.nextActions.length) {
+    lines.push("", "**下一步可以选：**");
+    for (const action of f.nextActions) lines.push(`- ${action}`);
+  }
+  const detail = f.technicalDetail || (includeRaw ? f.raw : "");
+  if (detail) lines.push("", `<details><summary>技术详情</summary>\n\n\`${String(detail).slice(0, 800)}\`\n\n</details>`);
+  return lines.join("\n");
+}
+
+function notifyBusyAttempt(prompt = "") {
+  const message = friendlyErrorMarkdown({
+    errorType: "generate_busy",
+    nextActions: ["等待当前任务完成", "稍后重新提交", "先查看当前预览"],
+    errorStage: "generate",
+  }, "busy", { includeRaw: false });
+  addMarkdownMessage("agent", `❌ ${message}`);
+  if (prompt) {
+    addInlineButtons([
+      { label: "稍后重试", primary: true, action: () => {
+        promptInput.value = prompt;
+        promptInput.focus();
+      }},
+      { label: "查看当前预览", primary: false, action: () => syncDeviceFrameFromCurrent() },
+    ]);
+  }
 }
 
 function addMessage(role, text) {
@@ -558,7 +660,7 @@ async function postJson(url, payload = {}, { timeout = 120000 } = {}) {
   } catch (error) {
     if (error.name === "AbortError") {
       const err = new Error("请求超时");
-      err.data = { errorType: "ssh_timeout" };
+      err.data = { errorType: "timeout", errorStage: "request" };
       throw err;
     }
     // Network error (server down, connection reset, etc.)
@@ -588,7 +690,7 @@ async function getJson(url, { timeout = 30000 } = {}) {
   } catch (error) {
     if (error.name === "AbortError") {
       const err = new Error("请求超时");
-      err.data = { errorType: "ssh_timeout" };
+      err.data = { errorType: "timeout", errorStage: "request" };
       throw err;
     }
     if (error instanceof TypeError && /fetch|network|Failed to fetch/i.test(error.message)) {
@@ -998,8 +1100,7 @@ async function refreshBoard() {
   } catch (error) {
     const sshState = el("sshState");
     if (sshState) sshState.textContent = "offline";
-    const f = friendlyError(error.data, error.message);
-    addMessage("agent", `⚠️ ${f.title}。${f.detail}\n💡 ${f.suggestion}`);
+    addMarkdownMessage("agent", `⚠️ ${friendlyErrorMarkdown(error.data, error.message, { includeRaw: false })}`);
   } finally {
     if (refreshBoardBtn) refreshBoardBtn.disabled = false;
   }
@@ -1607,7 +1708,10 @@ function buildChatMessages() {
 }
 
 async function handleChat(prompt) {
-  if (busy) return;
+  if (busy) {
+    notifyBusyAttempt(prompt);
+    return;
+  }
   prompt = String(prompt || "").trim();
   if (!prompt) return;
 
@@ -1673,8 +1777,7 @@ async function handleChat(prompt) {
     }
   } catch (error) {
     removeThinkingAnimation();
-    const f = friendlyError(error.data, error.message);
-    addMarkdownMessage("agent", `❌ **请求失败**：${f}`);
+    addMarkdownMessage("agent", `❌ ${friendlyErrorMarkdown(error.data, error.message)}`);
   } finally {
     setBusy(false);
   }
@@ -1696,7 +1799,10 @@ async function startBuild(originalPrompt) {
 }
 
 async function runFlow(prompt, history = [], conversationId = currentConversationId) {
-  if (busy) return;
+  if (busy) {
+    notifyBusyAttempt(prompt);
+    return;
+  }
   setBusy(true);
   deployState.textContent = labels.preparing;
   const progress = addStageCard();
@@ -1814,8 +1920,7 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
     const current = stages.find(stage => document.querySelector(`[data-stage="${stage.id}"].active`));
     if (current) progress.set(current.id, "fail", "fail");
     deployState.textContent = labels.failed;
-    const f = friendlyError(error.data, error.message);
-    const errorMessage = `❌ **${f.title}**\n\n${f.detail}\n\n💡 ${f.suggestion}`;
+    const errorMessage = `❌ ${friendlyErrorMarkdown(error.data, error.message)}`;
     addMarkdownMessage("agent", errorMessage);
     persistMessage("agent", errorMessage, null, conversationId);
   } finally {
@@ -1844,7 +1949,10 @@ function addDeployButton(prompt) {
 
 async function doDeploy(prompt) {
   const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
-  if (busy) return;
+  if (busy) {
+    notifyBusyAttempt(prompt);
+    return;
+  }
   setBusy(true);
   deployState.textContent = labels.deploying;
 
@@ -1864,8 +1972,7 @@ async function doDeploy(prompt) {
     }
   } catch (error) {
     deployState.textContent = labels.failed;
-    const f = friendlyError(error.data, error.message);
-    addMarkdownMessage("agent", `❌ **部署失败**\n\n${f.title}\n\n${f.detail}\n\n💡 ${f.suggestion}`);
+    addMarkdownMessage("agent", `❌ **部署失败**\n\n${friendlyErrorMarkdown(error.data, error.message)}`);
   } finally {
     setBusy(false);
   }
@@ -1873,7 +1980,10 @@ async function doDeploy(prompt) {
 
 async function runDeploy(btn) {
   const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
-  if (busy) return;
+  if (busy) {
+    notifyBusyAttempt();
+    return;
+  }
   setBusy(true);
   btn.disabled = true;
   btn.textContent = `部署到${profile.label}中...`;
@@ -1897,8 +2007,7 @@ async function runDeploy(btn) {
     }
   } catch (error) {
     deployState.textContent = labels.failed;
-    const f = friendlyError(error.data, error.message);
-    addMessage("agent", `❌ ${f.title}\n${f.detail}\n💡 ${f.suggestion}`);
+    addMarkdownMessage("agent", `❌ ${friendlyErrorMarkdown(error.data, error.message)}`);
     btn.textContent = "❌ 部署失败，点击重试";
     btn.disabled = false;
   } finally {
@@ -2106,8 +2215,7 @@ async function uploadAssetFiles(fileList) {
       : "";
     addMarkdownMessage("agent", `已解析 ${uploaded} 个资产${rejected ? `，${rejected} 个未导入` : ""}。${kinds ? `类型：${kinds}。` : ""}${brief}`);
   } catch (error) {
-    const f = friendlyError(error.data, error.message);
-    addMarkdownMessage("agent", `资产上传失败：${f}`);
+    addMarkdownMessage("agent", `❌ **资产上传失败**\n\n${friendlyErrorMarkdown(error.data, error.message)}`);
     renderAssetSummary(currentAssetSummary);
   } finally {
     if (assetUploadInput) assetUploadInput.value = "";
@@ -2522,7 +2630,7 @@ if (deployMarketBtn && deployMarketModal) {
         alert("发布成功！你的应用已上架应用市场。");
         closeModal();
       } else {
-        alert("发布失败：" + (data.error || "未知错误"));
+        alert("发布失败：" + formatFriendlyError(data, data.error || "未知错误"));
       }
     } catch (err) {
       alert("发布失败：" + err.message);

@@ -17,6 +17,17 @@ assert(generate.verificationMode === "local-simulated", "generate should expose 
 assert(Array.isArray(generate.buildGraph), "generate should include BuildGraph trace");
 assert(generate.buildGraph.some(item => item.node === "template_generate"), "BuildGraph trace should include template_generate");
 
+const emptyGenerateResponse = await fetch(`${baseUrl}/api/generate`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ prompt: "", modelSettings: { enabled: false } }),
+});
+const emptyGenerate = await emptyGenerateResponse.json();
+assert(emptyGenerateResponse.status === 400, "/api/generate should return 400 for empty prompt");
+assert(emptyGenerate.ok === false, "empty generate should return ok:false");
+assert(emptyGenerate.errorType === "empty_prompt", `empty prompt should be classified, got ${JSON.stringify(emptyGenerate)}`);
+assert(emptyGenerate.userMessage && emptyGenerate.suggestion, "empty prompt should include user-facing guidance");
+
 const published = await json("/api/market/publish", {
   method: "POST",
   body: JSON.stringify({

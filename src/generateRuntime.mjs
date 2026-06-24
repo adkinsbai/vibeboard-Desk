@@ -3,6 +3,7 @@ import { buildRefinedPrompt } from "./clarifyEngine.mjs";
 import { normalizeProjectMemory } from "./conversationStore.mjs";
 import { normalizeModelSettings } from "./modelSettings.mjs";
 import { normalizeAssetPath } from "./assetContract.mjs";
+import { classifyError, createStructuredError } from "./errorClassifier.mjs";
 import {
   AGENT_PHASES,
   appendEvidence,
@@ -69,81 +70,83 @@ export function createGenerateRuntime(deps = {}) {
 
   requireObject(conversationStore, "conversationStore");
   requireObject(memoryStore, "memoryStore");
+  let activeGenerate = null;
 
   async function runGenerateRequest(body = {}) {
-    const rawPrompt = String(body.prompt || "").trim();
-    if (!rawPrompt) throw new Error("Prompt is required.");
-    const rawHistory = Array.isArray(body.history) ? body.history : [];
-    const normalizedHistory = normalizeGenerateHistory(rawHistory);
-    const clarifyAnswers = Array.isArray(body.clarify_answers) ? body.clarify_answers : [];
-    const modelSettings = body.modelSettings || {};
-    const agentMode = normalizeAgentMode(body.agent_mode || body.agentMode);
-    const conversationId = String(body.conversation_id || "").trim();
-    const projectMemory = conversationId
-      ? conversationStore.getProjectMemory(conversationId)
-      : normalizeProjectMemory();
-    const assetContext = conversationId && assetLibraryStore?.promptContext
-      ? assetLibraryStore.promptContext(conversationId)
-      : "";
-    const embeddedAssets = conversationId && assetLibraryStore?.generatedAssets
-      ? assetLibraryStore.generatedAssets(conversationId)
-      : emptyEmbeddedAssets();
-    const conversationFiles = conversationId
-      ? conversationStore.loadConversationFiles(conversationId).files
-      : {};
-
-    const settings = normalizeModelSettings(modelSettings);
-    const history = await compressHistory(normalizedHistory, settings);
-    const userPreferences = memoryStore.getAll();
-    const prompt = buildRefinedPrompt(
-      `${rawPrompt}${formatMemoryForPrompt(projectMemory)}${formatAgentModeForPrompt(agentMode)}${assetContext}${formatEmbeddedAssetContext(embeddedAssets)}`,
-      clarifyAnswers,
-      userPreferences,
-    );
-
-    if (embeddedAssets.items?.length || embeddedAssets.rejected?.length) {
-      await appendServerLog("generate.assets.selected", {
-        embeddedCount: embeddedAssets.items?.length || 0,
-        rejectedCount: embeddedAssets.rejected?.length || 0,
-        paths: (embeddedAssets.items || []).slice(0, 12).map(item => item.path),
+    if (activeGenerate) {
+      throw createStructuredError("Another generation is already running.", "generate_busy", {
+        statusCode: 409,
+        activeGenerate,
       });
     }
+    activeGenerate = {
+      id: `pending-${Date.now()}`,
+      startedAt: new Date().toISOString(),
+      conversationId: String(body.conversation_id || "").trim(),
+      promptPreview: String(body.prompt || body.build_prompt || "").trim().slice(0, 120),
+    };
+    try {
+      const rawPrompt = String(body.prompt || "").trim();
+      if (!rawPrompt) throw createStructuredError("Prompt is required.", "empty_prompt", { statusCode: 400 });
+      const rawHistory = Array.isArray(body.history) ? body.history : [];
+      const normalizedHistory = normalizeGenerateHistory(rawHistory);
+      const clarifyAnswers = Array.isArray(body.clarify_answers) ? body.clarify_answers : [];
+      const modelSettings = body.modelSettings || {};
+      const agentMode = normalizeAgentMode(body.agent_mode || body.agentMode);
+      const conversationId = String(body.conversation_id || "").trim();
+      const projectMemory = conversationId
+        ? conversationStore.getProjectMemory(conversationId)
+        : normalizeProjectMemory();
+      const assetContext = conversationId && assetLibraryStore?.promptContext
+        ? assetLibraryStore.promptContext(conversationId)
+        : "";
+      const embeddedAssets = conversationId && assetLibraryStore?.generatedAssets
+        ? assetLibraryStore.generatedAssets(conversationId)
+        : emptyEmbeddedAssets();
+      const conversationFiles = conversationId
+        ? conversationStore.loadConversationFiles(conversationId).files
+        : {};
 
-    if (clarifyAnswers.length > 0) {
-      for (const ans of clarifyAnswers) {
-        if (ans.key && ans.answer) {
-          memoryStore.set(ans.key, ans.answer, {
-            label: ans.question || ans.key,
-            category: "clarify",
-            source: "auto_extract",
-          });
+      const settings = normalizeModelSettings(modelSettings);
+      const history = await compressHistory(normalizedHistory, settings);
+      const userPreferences = memoryStore.getAll();
+      const prompt = buildRefinedPrompt(
+        `${rawPrompt}${formatMemoryForPrompt(projectMemory)}${formatAgentModeForPrompt(agentMode)}${assetContext}${formatEmbeddedAssetContext(embeddedAssets)}`,
+        clarifyAnswers,
+        userPreferences,
+      );
+
+      if (embeddedAssets.items?.length || embeddedAssets.rejected?.length) {
+        await appendServerLog("generate.assets.selected", {
+          embeddedCount: embeddedAssets.items?.length || 0,
+          rejectedCount: embeddedAssets.rejected?.length || 0,
+          paths: (embeddedAssets.items || []).slice(0, 12).map(item => item.path),
+        });
+      }
+
+      if (clarifyAnswers.length > 0) {
+        for (const ans of clarifyAnswers) {
+          if (ans.key && ans.answer) {
+            memoryStore.set(ans.key, ans.answer, {
+              label: ans.question || ans.key,
+              category: "clarify",
+              source: "auto_extract",
+            });
+          }
         }
       }
-    }
 
-    const fileStore = { ...conversationFiles };
-    const isEditing = Object.keys(fileStore).some(name => name !== "manifest.json");
-    const agentStartedAt = Date.now();
-    const agentSettings = buildGenerateAgentSettings(settings, env, positiveInt, defaults);
+      const fileStore = { ...conversationFiles };
+      const isEditing = Object.keys(fileStore).some(name => name !== "manifest.json");
+      const agentStartedAt = Date.now();
+      const agentSettings = buildGenerateAgentSettings(settings, env, positiveInt, defaults);
 
-    return runBuildGraph({
-      prompt,
-      rawPrompt,
-      settings,
-      agentSettings,
-      modelSettings,
-      fileStore,
-      history,
-      userPreferences,
-      conversationId,
-      isEditing,
-      agentMode,
-      embeddedAssets,
-    }, {
-      agentGenerate: async () => runAgentGenerate({
+      return await runBuildGraph({
         prompt,
+        rawPrompt,
         settings,
         agentSettings,
+        modelSettings,
         fileStore,
         history,
         userPreferences,
@@ -151,11 +154,37 @@ export function createGenerateRuntime(deps = {}) {
         isEditing,
         agentMode,
         embeddedAssets,
-        agentStartedAt,
-      }),
-      templateGenerate: async () => runTemplateGenerate({ prompt, modelSettings, embeddedAssets }),
-      saveSnapshot: async state => saveSnapshot({ state, conversationId }),
-    });
+      }, {
+        agentGenerate: async () => runAgentGenerate({
+          prompt,
+          settings,
+          agentSettings,
+          fileStore,
+          history,
+          userPreferences,
+          conversationId,
+          isEditing,
+          agentMode,
+          embeddedAssets,
+          agentStartedAt,
+        }),
+        templateGenerate: async () => runTemplateGenerate({ prompt, modelSettings, embeddedAssets }),
+        saveSnapshot: async state => saveSnapshot({ state, conversationId }),
+      });
+    } catch (error) {
+      const classified = classifyError(error, { stage: "generate" });
+      await appendServerLog("generate.request.failed", {
+        error: error.message,
+        ...classified,
+        conversationId: activeGenerate?.conversationId || "",
+        activeGenerate,
+        durationMs: activeGenerate?.startedAt ? Date.now() - Date.parse(activeGenerate.startedAt) : null,
+      }).catch(() => {});
+      Object.assign(error, classified);
+      throw error;
+    } finally {
+      activeGenerate = null;
+    }
   }
 
   async function runAgentGenerate({

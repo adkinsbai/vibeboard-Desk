@@ -22,6 +22,7 @@
 - Added Asset Library product inference so uploaded bundles now produce product-intent, layout-plan, and completion-gap guidance, helping Agent/Codex modes use sensible defaults instead of repeatedly asking how to use obvious assets.
 - Added lightweight document profiling for uploaded `.pdf`, `.docx`, `.pptx`, `.xlsx`, and related office files so Agent/Codex modes can use extracted text, slide/storyboard hints, and spreadsheet fields as hardware UI design references.
 - Added lightweight design-source profiling for uploaded `.fig`, `.sketch`, `.psd`, `.ai`, `.xd`, design-token, and related files so Agent/Codex modes can use palette, component, spacing, and visual hierarchy cues without embedding proprietary design files.
+- Added structured generation failure diagnostics and concurrency protection: `/api/generate`, `/api/agent` confirmed builds, uploads, publishing, and deploy failures now expose actionable `errorType`, `errorStage`, `userMessage`, `suggestion`, `nextActions`, and `technicalDetail`; overlapping generation requests return `409 generate_busy`; missing-model chat now returns Chinese quick-reply choices; `npm run smoke:generation` exercises random direct generation, Agent-confirmed generation, refresh-style preview restore, empty-prompt diagnostics, and concurrent task starts.
 - Added an Agent implementation selector for self-developed VibeBoard Agent versus Codex hardware mode, with Codex mode routed through a dedicated `codex-hardware-agent` bridge, constrained by a code-level scope guard to embedded 480x360 hardware app design/generation/verification/deploy-confirmation, and exposed through backend `mode_boundary` plus `codex_bridge` contracts.
 - Strengthened confirmed Codex builds with a Codex hardware execution package that preserves the raw user request while injecting hardware scope, Asset Library usage rules, contract-safe file requirements, local verification gates, and the no-auto-deploy boundary into generation.
 - Surfaced Codex bridge status, scope-guard warnings, and inferred Assets design-brief priorities directly in the chat UI so users can see what the Agent understood and why a request was redirected.
@@ -49,6 +50,7 @@ Run:
 npm run check
 npm run verify:agent
 npm run verify:offline
+npm run smoke:generation
 npm run verify:digital-life
 ```
 
