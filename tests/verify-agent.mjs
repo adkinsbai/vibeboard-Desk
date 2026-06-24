@@ -2388,6 +2388,171 @@ await test("generate runtime passes conversation files into agent path", async (
   });
 });
 
+await test("generate runtime auto-repairs local verification failures before returning to user", async () => {
+  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  await withTempDir("vibeboard-runtime-repair-", async dir => {
+    let runAgentCalls = 0;
+    let buildCalls = 0;
+    let currentBuild = null;
+    const logs = [];
+    const runtime = createGenerateRuntime({
+      conversationStore: {
+        getProjectMemory: () => ({}),
+        loadConversationFiles: () => ({ files: {} }),
+        saveConversationFiles: () => {},
+      },
+      memoryStore: {
+        getAll: () => ({}),
+        set: () => {},
+      },
+      appendServerLog: async (event, detail) => logs.push({ event, detail }),
+      runAgent: async (_settings, prompt) => {
+        runAgentCalls += 1;
+        if (runAgentCalls === 1) {
+          return {
+            success: true,
+            summary: "initial broken files",
+            files: {
+              "index.html": "<html><script src=\"./app.js\"></script></html>",
+              "style.css": "body{}",
+              "app.js": "console.log('broken')",
+              "hardware_app.py": "print('broken')",
+            },
+            actions: [{ tool: "done", args: { summary: "initial" } }],
+          };
+        }
+        assert(prompt.includes("部署前 L0-L3 本地验证失败"), "repair prompt should include local verification failure framing");
+        assert(prompt.includes("local verification failed"), "repair prompt should include build failure evidence");
+        return {
+          success: true,
+          summary: "repair applied",
+          files: validGeneratedFiles(),
+          actions: [{ tool: "edit_file", args: { path: "app.js", summary: "fixed" } }],
+        };
+      },
+      buildId: () => "vb-runtime-repair",
+      createAppSpec: (prompt, id) => ({ prompt, id }),
+      generatedHardwareApp: (_prompt, id) => validGeneratedFiles()["hardware_app.py"].replace("vb-test-valid", id),
+      injectHardwareAppContracts: source => source,
+      generatedManifest: (_prompt, id) => ({ id, files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+      buildCurrent: async () => {
+        buildCalls += 1;
+        if (buildCalls === 1) throw new Error("local verification failed: LAYOUT_OVERFLOW: screen overflows 480x360");
+        currentBuild.built = true;
+        currentBuild.buildEvidence = { ok: true, issues: [], phase: "local_verify", summary: "L0-L3 local verification passed" };
+        currentBuild.intelligenceSummary = { confidence: "local_verified", nextBestAction: "deploy_to_board" };
+      },
+      setCurrentBuild: build => {
+        currentBuild = build;
+      },
+      getCurrentBuild: () => currentBuild,
+      generatedDir: dir,
+      filesWithHardwareResult: async files => files,
+    });
+
+    const result = await runtime.runGenerateRequest({
+      prompt: "Build a screen that needs repair.",
+      modelSettings: {
+        provider: "custom",
+        baseUrl: "http://mock.local",
+        model: "mock",
+        apiKey: "key",
+      },
+    });
+
+    assert(result.ok === true, `expected repaired generation to pass, got ${JSON.stringify(result)}`);
+    assert(runAgentCalls === 2, `expected initial agent plus repair agent, got ${runAgentCalls}`);
+    assert(buildCalls === 2, `expected build to run before and after repair, got ${buildCalls}`);
+    assert(result.repairAttempts === 1, `expected one repair attempt, got ${result.repairAttempts}`);
+    assert(result.repairSummary.includes("自动修复 1 轮"), `expected repair summary, got ${result.repairSummary}`);
+    assert(result.buildEvidence?.ok === true, "repaired result should include passing build evidence");
+    assert(logs.some(item => item.event === "generate.agent.auto_repair.start"), "repair start should be logged");
+    assert(logs.some(item => item.event === "generate.agent.auto_repair.done"), "repair completion should be logged");
+  });
+});
+
+await test("generate runtime surfaces user-actionable repair model failures", async () => {
+  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  await withTempDir("vibeboard-runtime-repair-auth-", async dir => {
+    let runAgentCalls = 0;
+    let currentBuild = null;
+    const runtime = createGenerateRuntime({
+      conversationStore: {
+        getProjectMemory: () => ({}),
+        loadConversationFiles: () => ({ files: {} }),
+        saveConversationFiles: () => {},
+      },
+      memoryStore: {
+        getAll: () => ({}),
+        set: () => {},
+      },
+      runAgent: async () => {
+        runAgentCalls += 1;
+        if (runAgentCalls === 1) {
+          return {
+            success: true,
+            summary: "initial files",
+            files: validGeneratedFiles(),
+            actions: [],
+          };
+        }
+        return {
+          success: false,
+          summary: "LLM auth failed during repair",
+          error: {
+            type: "llm_auth",
+            code: "LLM_CALL_FAILED",
+            status: 401,
+            message: "LLM_CALL_FAILED: HTTP 401; provider=invalid api key",
+          },
+          actions: [],
+          files: validGeneratedFiles(),
+        };
+      },
+      buildId: () => "vb-runtime-repair-auth",
+      createAppSpec: (prompt, id) => ({ prompt, id }),
+      generatedHardwareApp: (_prompt, id) => validGeneratedFiles()["hardware_app.py"].replace("vb-test-valid", id),
+      injectHardwareAppContracts: source => source,
+      generatedManifest: (_prompt, id) => ({ id, files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+      buildCurrent: async () => {
+        throw new Error("local verification failed: LAYOUT_OVERFLOW: screen overflows 480x360");
+      },
+      setCurrentBuild: build => {
+        currentBuild = build;
+      },
+      getCurrentBuild: () => currentBuild,
+      generatedDir: dir,
+      filesWithHardwareResult: async files => files,
+    });
+
+    let error = null;
+    try {
+      await runtime.runGenerateRequest({
+        prompt: "Build should fail then repair model auth should ask user.",
+        modelSettings: {
+          provider: "custom",
+          baseUrl: "http://mock.local",
+          model: "mock",
+          apiKey: "bad-key",
+        },
+      });
+    } catch (err) {
+      error = err;
+    }
+
+    assert(error, "expected repair auth failure to throw");
+    assert(error.errorType === "llm_auth", `expected llm_auth, got ${error?.errorType}: ${error?.message}`);
+    assert(error.userMessage?.includes("API Key"), "repair auth failure should be user-actionable");
+    assert(runAgentCalls === 2, `expected initial generation plus repair attempt, got ${runAgentCalls}`);
+  });
+});
+
+await test("generate runtime allows disabling auto repair with zero attempts", async () => {
+  const { buildGenerateAgentSettings } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  const settings = buildGenerateAgentSettings({}, { VIBEBOARD_AGENT_REPAIR_ATTEMPTS: "0" });
+  assert(settings.repairAttempts === 0, `expected zero repair attempts, got ${settings.repairAttempts}`);
+});
+
 await test("agent graph keeps chat behind confirmation gate", async () => {
   const { runAgentGraph } = await import(pathToFileURL(path.join(ROOT, "src", "agentGraph.mjs")).href);
   let buildCalled = false;

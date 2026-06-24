@@ -17,6 +17,7 @@ import { writeGeneratedFiles } from "./buildArtifact.mjs";
 export const GENERATE_RUNTIME_DEFAULTS = Object.freeze({
   maxIterations: 18,
   maxVerificationAttempts: 1,
+  repairAttempts: 2,
   timeoutMs: 120000,
   llmTimeoutMs: 60000,
 });
@@ -221,6 +222,7 @@ export function createGenerateRuntime(deps = {}) {
       provider: settings.provider,
       maxIterations: agentSettings.maxIterations,
       maxVerificationAttempts: agentSettings.maxVerificationAttempts,
+      repairAttempts: agentSettings.repairAttempts,
       timeoutMs: agentSettings.timeoutMs,
       llmTimeoutMs: agentSettings.llmTimeoutMs,
     });
@@ -308,13 +310,21 @@ export function createGenerateRuntime(deps = {}) {
     });
     setCurrentBuild({ id, prompt, files: agentFiles, dir: generatedDir, built: false, deployed: false, manifest, agentRun, conversationId });
 
-    try {
-      await buildCurrent();
-    } catch (buildErr) {
-      log.error?.("[generate] Build error:", buildErr.message);
-      await appendServerLog("generate.agent.build_failed", { id, error: buildErr.message });
-      throw new Error(`Generated app failed validation: ${buildErr.message}`);
-    }
+    const repairReport = await buildWithAutoRepair({
+      id,
+      prompt,
+      settings,
+      agentSettings,
+      agentFiles,
+      manifest,
+      embeddedAssets,
+      agentResult,
+      history,
+      userPreferences,
+      agentStartedAt,
+    });
+    agentFiles = repairReport.files || agentFiles;
+    manifest = repairReport.manifest || manifest;
 
     const currentBuild = getCurrentBuild();
     recordAgentLearning({
@@ -342,6 +352,8 @@ export function createGenerateRuntime(deps = {}) {
       intelligenceSummary: currentBuild?.intelligenceSummary || null,
       verificationMode: isBoardPasswordConfigured() ? "real-ready" : "local-simulated",
       agentSummary: agentResult.summary,
+      repairSummary: repairReport.summary || "",
+      repairAttempts: repairReport.attempts || 0,
       agentActions: (agentResult.actions || []).map(a => ({
         tool: a.tool,
         path: a.args?.path,
@@ -349,6 +361,233 @@ export function createGenerateRuntime(deps = {}) {
         summary: a.args?.summary,
       })),
     };
+  }
+
+  async function buildWithAutoRepair({
+    id,
+    prompt,
+    settings,
+    agentSettings,
+    agentFiles,
+    manifest,
+    embeddedAssets,
+    agentResult,
+    history,
+    userPreferences,
+    agentStartedAt,
+  }) {
+    let files = agentFiles;
+    let currentManifest = manifest;
+    let lastError = null;
+    const maxAttempts = Math.max(0, Number(agentSettings.repairAttempts || 0));
+
+    for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
+      try {
+        await buildCurrent();
+        if (attempt > 0) {
+          await appendServerLog("generate.agent.auto_repair.done", {
+            id,
+            attempts: attempt,
+            durationMs: Date.now() - agentStartedAt,
+          });
+        }
+        return {
+          ok: true,
+          files,
+          manifest: currentManifest,
+          attempts: attempt,
+          summary: attempt > 0 ? `Agent 自动修复 ${attempt} 轮后通过 L0-L3 验证。` : "",
+        };
+      } catch (buildErr) {
+        lastError = buildErr;
+        log.error?.("[generate] Build error:", buildErr.message);
+        await appendServerLog("generate.agent.build_failed", {
+          id,
+          error: buildErr.message,
+          attempt,
+          repairAttempts: maxAttempts,
+        });
+        if (attempt >= maxAttempts || !isAutoRepairableError(buildErr)) break;
+        if (!settings.enabled) break;
+
+        const repair = await runRepairAgent({
+          id,
+          prompt,
+          settings,
+          agentSettings,
+          files,
+          buildErr,
+          attempt: attempt + 1,
+          maxAttempts,
+          history,
+          userPreferences,
+          embeddedAssets,
+          agentResult,
+        });
+        if (!repair.ok) {
+          lastError = repair.error || buildErr;
+          break;
+        }
+        const finalized = finalizeAgentFiles({
+          id,
+          prompt,
+          files: repair.files,
+          manifest: currentManifest,
+          embeddedAssets,
+          agentSummary: `${agentResult.summary || ""}\nAuto repair ${attempt + 1}: ${repair.summary || "repair applied"}`.trim(),
+          provider: settings.provider,
+          model: settings.model,
+        });
+        files = finalized.files;
+        currentManifest = finalized.manifest;
+        await writeGeneratedFiles(generatedDir, files);
+        const currentBuild = getCurrentBuild();
+        if (currentBuild) {
+          currentBuild.files = files;
+          currentBuild.manifest = currentManifest;
+          currentBuild.built = false;
+          currentBuild.buildEvidence = null;
+        }
+      }
+    }
+
+    const classified = classifyError(lastError, { stage: "auto_repair" });
+    const error = createStructuredError(
+      `Automatic repair could not finish before deployment: ${lastError?.message || "local verification failed"}`,
+      shouldAskUserForRepair(classified.errorType) ? classified.errorType : "auto_repair_failed",
+      {
+        statusCode: shouldAskUserForRepair(classified.errorType) ? classified.statusCode : 422,
+        cause: lastError,
+        technicalDetail: classified.technicalDetail || lastError?.message || "",
+      },
+    );
+    await appendServerLog("generate.agent.auto_repair.failed", {
+      id,
+      error: error.message,
+      errorType: error.errorType,
+      attempts: maxAttempts,
+      lastError: lastError?.message || "",
+    });
+    throw error;
+  }
+
+  async function runRepairAgent({
+    id,
+    prompt,
+    settings,
+    agentSettings,
+    files,
+    buildErr,
+    attempt,
+    maxAttempts,
+    history,
+    userPreferences,
+    embeddedAssets,
+    agentResult,
+  }) {
+    const repairPrompt = buildRepairPrompt({
+      prompt,
+      buildErr,
+      attempt,
+      maxAttempts,
+      embeddedAssets,
+    });
+    await appendServerLog("generate.agent.auto_repair.start", {
+      id,
+      attempt,
+      maxAttempts,
+      error: buildErr.message,
+      model: settings.model,
+      provider: settings.provider,
+    });
+    try {
+      const repairResult = await runAgent(
+        {
+          ...agentSettings,
+          maxIterations: Math.max(4, Math.min(Number(agentSettings.maxIterations || 8), 8)),
+          maxVerificationAttempts: 1,
+        },
+        repairPrompt,
+        { ...files },
+        [
+          ...history.slice(-6),
+          { role: "assistant", content: agentResult.summary || "Initial generation completed but local L0-L3 verification failed." },
+          { role: "user", content: `Local verification failure: ${buildErr.message}` },
+        ],
+        action => {
+          log.log?.(`[repair-agent] ${action.tool}: ${action.args?.path || action.args?.query || action.args?.summary || ""}`);
+          appendServerLog("generate.agent.auto_repair.action", {
+            attempt,
+            tool: action.tool,
+            path: action.args?.path || "",
+            query: action.args?.query || "",
+            summary: action.args?.summary || "",
+          }).catch(() => {});
+        },
+        userPreferences,
+        experienceStore,
+        { ssh, scp, board: getBoard() },
+      );
+      if (!repairResult.success) {
+        const error = new Error(repairResult.summary || "Auto repair agent failed");
+        if (repairResult.error && typeof repairResult.error === "object") Object.assign(error, repairResult.error);
+        return { ok: false, error };
+      }
+      await appendServerLog("generate.agent.auto_repair.applied", {
+        id,
+        attempt,
+        actionCount: repairResult.actions?.length || 0,
+        summary: repairResult.summary || "",
+      });
+      return {
+        ok: true,
+        files: repairResult.files,
+        summary: repairResult.summary || "",
+        actions: repairResult.actions || [],
+      };
+    } catch (error) {
+      await appendServerLog("generate.agent.auto_repair.failed", {
+        id,
+        attempt,
+        error: error.message,
+        ...structuredErrorFieldsForLog(error),
+      });
+      return { ok: false, error };
+    }
+  }
+
+  function finalizeAgentFiles({
+    id,
+    prompt,
+    files,
+    manifest,
+    embeddedAssets,
+    agentSummary,
+    provider,
+    model,
+  }) {
+    let nextFiles = { ...(files || {}) };
+    if (!nextFiles["hardware_app.py"]) {
+      const spec = createAppSpec(prompt, id);
+      nextFiles["hardware_app.py"] = generatedHardwareApp(prompt, id, spec);
+    }
+    nextFiles["hardware_app.py"] = injectHardwareAppContracts(nextFiles["hardware_app.py"], id);
+    const spec = createAppSpec(prompt, id);
+    let nextManifest = generatedManifest(prompt, id, spec, {
+      ...(manifest && typeof manifest === "object" ? manifest : {}),
+      generator: "vibeboard-agent-v1",
+      title: prompt.slice(0, 40),
+      source: "agent",
+      model,
+      provider,
+      notes: agentSummary,
+      target: getBoard().targetStatic,
+    });
+    nextFiles["manifest.json"] = JSON.stringify(nextManifest, null, 2);
+    const embedded = embedGeneratedAssetsInFiles(nextFiles, embeddedAssets, nextManifest);
+    nextFiles = embedded.files;
+    nextManifest = embedded.manifest || nextManifest;
+    return { files: nextFiles, manifest: nextManifest };
   }
 
   async function runTemplateGenerate({ prompt, modelSettings, embeddedAssets }) {
@@ -500,6 +739,65 @@ function formatAgentModeForPrompt(agentMode = "vibeboard") {
     : "VibeBoard self-developed Agent mode. Use the local VibeBoard generator and hardware contracts."}`;
 }
 
+function buildRepairPrompt({
+  prompt = "",
+  buildErr = null,
+  attempt = 1,
+  maxAttempts = 2,
+  embeddedAssets = emptyEmbeddedAssets(),
+} = {}) {
+  const assetContext = formatEmbeddedAssetContext(embeddedAssets);
+  return [
+    "部署前 L0-L3 本地验证失败，请自动修复当前 VibeBoard 生成文件。",
+    "",
+    `原始需求：${String(prompt || "").slice(0, 4000)}`,
+    `修复轮次：${attempt}/${maxAttempts}`,
+    "",
+    "失败证据：",
+    String(buildErr?.message || buildErr || "local verification failed").slice(0, 4000),
+    "",
+    "修复规则：",
+    "- 只修改 index.html、style.css、app.js、hardware_app.py、manifest.json。",
+    "- 优先做最小修复，不要重写无关功能和视觉方向。",
+    "- 必须保持 480x360 无滚动小屏合同。",
+    "- 必须保持 window.VibeBoardHardware.getStatus/getProgramResult/getSnapshot。",
+    "- 必须保持 hardware_app.py 输出包含 build_id、runtime、available_apis 的 JSON。",
+    "- 修复后调用 done；不要请求部署硬件。",
+    assetContext,
+  ].filter(Boolean).join("\n");
+}
+
+function isAutoRepairableError(error) {
+  const classified = classifyError(error, { stage: "auto_repair" });
+  if (shouldAskUserForRepair(classified.errorType)) return false;
+  return new Set([
+    "syntax_error",
+    "python_syntax",
+    "hardware_contract",
+    "render_failed",
+    "model_output_invalid",
+    "no_code",
+    "auto_repair_failed",
+    "unknown",
+  ]).has(classified.errorType);
+}
+
+function shouldAskUserForRepair(errorType = "") {
+  return new Set([
+    "no_api_key",
+    "llm_auth",
+    "llm_quota",
+    "llm_rate_limited",
+    "llm_network",
+    "request_too_large",
+    "asset_rejected",
+    "storage_failed",
+    "storage_corrupt",
+    "generate_busy",
+    "empty_prompt",
+  ]).has(String(errorType || ""));
+}
+
 export function buildGenerateAgentSettings(
   settings = {},
   env = process.env,
@@ -513,6 +811,7 @@ export function buildGenerateAgentSettings(
       env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS,
       defaults.maxVerificationAttempts,
     ),
+    repairAttempts: nonNegativeInt(env.VIBEBOARD_AGENT_REPAIR_ATTEMPTS, defaults.repairAttempts),
     timeoutMs: positiveInt(env.VIBEBOARD_AGENT_TIMEOUT_MS, defaults.timeoutMs),
     llmTimeoutMs: positiveInt(env.VIBEBOARD_AGENT_LLM_TIMEOUT_MS, defaults.llmTimeoutMs),
   };
@@ -527,6 +826,11 @@ function defaultNormalizeGenerateHistory(rawHistory) {
 function defaultPositiveInt(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function nonNegativeInt(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
 }
 
 function requireFunction(value, name) {

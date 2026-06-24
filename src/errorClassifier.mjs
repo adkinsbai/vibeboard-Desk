@@ -108,6 +108,15 @@ const ERROR_PROFILES = Object.freeze({
     statusCode: 422,
     nextActions: ["重试生成", "换模型", "简化需求"],
   },
+  auto_repair_failed: {
+    label: "Automatic repair could not finish",
+    stage: "auto_repair",
+    userMessage: "Agent 已经尝试自动修复部署前的本地验证问题，但仍未通过 L0-L3 验证。",
+    suggestion: "请查看技术详情中的最后一次失败原因；如果是需求冲突或缺少素材，请补充信息后重新生成。",
+    retryable: true,
+    statusCode: 422,
+    nextActions: ["查看失败详情", "补充需求", "重新生成"],
+  },
   empty_prompt: {
     label: "Prompt is required",
     stage: "intake",
@@ -289,6 +298,7 @@ function detectType(text, lower, context = {}) {
   if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|fetch failed|getaddrinfo|network|socket hang up/i.test(text) && /llm|model|chat\/completions|provider|api\./i.test(text)) return "llm_network";
   if (/LLM_CALL_FAILED|llm.*fail|model.*fail|chat\/completions|provider=/i.test(text)) return "llm_failed";
   if (/missing index\.html|missing.*style\.css|missing.*app\.js|Model output is missing|not.*valid JSON|JSON.*parse|empty content/i.test(text)) return "model_output_invalid";
+  if (/automatic repair|auto repair|repair.*exhausted|修复.*仍未通过|自动修复/i.test(text)) return "auto_repair_failed";
   if (/database disk image is malformed|SQLITE_CORRUPT|malformed database/i.test(text)) return "storage_corrupt";
   if (/SQLITE|database|snapshot|conversation.*save|save.*failed|EACCES|EPERM|ENOENT/i.test(text)) return "storage_failed";
   if (/unsafe ZIP|unsafe path|asset.*reject|unsupported archive|too large.*asset|archive/i.test(text) && /asset|upload|zip|tar|gz/i.test(text)) return "asset_rejected";

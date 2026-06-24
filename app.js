@@ -290,6 +290,11 @@ const FRIENDLY_ERRORS = {
     detail: "模型返回内容缺少必需文件、不是可解析 JSON，或没有按 VibeBoard 硬件合同输出。",
     suggestion: "请重试生成；如果连续出现，换一个模型或把需求拆得更具体。"
   },
+  auto_repair_failed: {
+    title: "自动修复未完成",
+    detail: "Agent 已经尝试自动修复部署前的本地验证问题，但仍未通过 L0-L3 验证。",
+    suggestion: "请查看技术详情中的最后一次失败原因；如果是需求冲突或缺少素材，请补充信息后重新生成。"
+  },
   syntax_error: {
     title: "代码语法错误",
     detail: "生成的 JavaScript 代码有语法问题。",
@@ -1899,7 +1904,8 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
     }
 
     const agentSummary = gen.agentSummary ? `\n\n> ${gen.agentSummary}` : "";
-    const successMessage = `**本地生成与验证完成**\n\n已生成 **${fileCount}** 个文件，并通过本地 L0-L3 验证。${verifyNote}${agentSummary}\n\n我还没有写入硬件。你可以先在右侧预览确认效果；确认后再点击下方部署按钮。`;
+    const repairNote = gen.repairSummary ? `\n\n${gen.repairSummary}` : "";
+    const successMessage = `**本地生成与验证完成**\n\n已生成 **${fileCount}** 个文件，并通过本地 L0-L3 验证。${verifyNote}${repairNote}${agentSummary}\n\n我还没有写入硬件。你可以先在右侧预览确认效果；确认后再点击下方部署按钮。`;
     addMarkdownMessage("agent", successMessage);
     persistMessage("agent", successMessage, gen.id || null, conversationId);
 
