@@ -75,6 +75,44 @@ assert(deploy.goldenLoop?.skipped === true, "offline deploy should include skipp
 assert(deploy.buildEvidence?.ok === true, "offline deploy should carry local buildEvidence");
 assert(deploy.intelligenceSummary?.confidence === "local_verified", "offline deploy should carry build intelligence summary");
 
+async function waitForJob(id, label) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const data = await json(`/api/jobs/${encodeURIComponent(id)}`);
+    assert(data.ok === true && data.job?.id === id, `${label} job should be readable`);
+    if (["succeeded", "failed", "canceled"].includes(data.job.status)) return data.job;
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
+  throw new Error(`${label} job did not finish`);
+}
+
+const backgroundAgent = await json("/api/agent", {
+  method: "POST",
+  body: JSON.stringify({
+    action: "confirm_build",
+    build_prompt: "background job smoke dashboard",
+    conversation_id: "",
+    background: true,
+    modelSettings: { enabled: false },
+  }),
+});
+assert(backgroundAgent.ok === true && backgroundAgent.job?.id, "/api/agent background mode should create a job");
+const backgroundAgentDone = await waitForJob(backgroundAgent.job.id, "agent background");
+assert(backgroundAgentDone.status === "succeeded", `background agent job should succeed: ${JSON.stringify(backgroundAgentDone.error)}`);
+assert(backgroundAgentDone.output?.mode === "build_done", "background agent job should keep build_done output");
+assert(backgroundAgentDone.choices?.some(choice => choice.action === "open_result"), "background generate job should expose open_result choice");
+
+const backgroundDeploy = await json("/api/deploy", {
+  method: "POST",
+  body: JSON.stringify({ background: true }),
+});
+assert(backgroundDeploy.ok === true && backgroundDeploy.job?.id, "/api/deploy background mode should create a job");
+const backgroundDeployDone = await waitForJob(backgroundDeploy.job.id, "deploy background");
+assert(backgroundDeployDone.status === "succeeded", `background deploy should succeed offline: ${JSON.stringify(backgroundDeployDone.error)}`);
+assert(backgroundDeployDone.output?.skipped === true, "background deploy should preserve offline skipped result");
+
+const listedJobs = await json("/api/jobs?limit=10");
+assert(listedJobs.jobs?.some(job => job.id === backgroundAgent.job.id), "/api/jobs should list background jobs");
+
 const verify = await json(`/api/verify?id=${encodeURIComponent(generate.id)}`);
 assert(verify.ok === true, "/api/verify should return ok wrapper in offline mode");
 assert(verify.skipped === true, "/api/verify should be skipped offline");

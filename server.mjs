@@ -30,6 +30,8 @@ import { createDigitalLifeStore } from "./src/digitalLife.mjs";
 import { createDigitalLifeRoutes } from "./src/digitalLifeRoutes.mjs";
 import { createExperienceStore, makePlaybookCandidate } from "./src/experienceStore.mjs";
 import { createPlaybookStore } from "./src/playbookStore.mjs";
+import { createJobStore } from "./src/jobStore.mjs";
+import { createJobRuntime } from "./src/jobRuntime.mjs";
 import { verifyAllLocal } from "./src/verifiers/index.mjs";
 import { classifyError } from "./src/errorClassifier.mjs";
 import { analyzeAndClarify } from "./src/clarifyEngine.mjs";
@@ -202,6 +204,10 @@ experienceStore.initSchema();
 const playbookStore = createPlaybookStore(db, saveDb);
 playbookStore.initSchema();
 experienceStore.setPlaybookStore?.(playbookStore);
+
+const jobStore = createJobStore(db, saveDb);
+jobStore.initSchema();
+jobStore.markInterruptedRunningJobs();
 
 const assetLibraryStore = createAssetLibraryStore(db, saveDb);
 assetLibraryStore.initSchema();
@@ -2296,6 +2302,77 @@ const { runAgentRequest } = createAgentOrchestrator({
   runGenerateRequest,
 });
 
+async function runDeployRequest(body = {}) {
+  const deviceId = deviceIdFrom(body || {}, BOARD.id);
+  if (!hasBoardCredentials()) {
+    if (!currentBuild) await loadGeneratedBuild();
+    if (currentBuild && (!currentBuild.built || !currentBuild.buildEvidence)) await buildCurrent();
+    const result = buildOfflineDeployResult();
+    setLastDeploy(result);
+    await appendServerLog("deploy.skipped", { id: currentBuild?.id || "", mode: result.mode });
+    return { ok: true, deviceId, ...result };
+  }
+  console.log("[deploy] Starting deploy...");
+  await appendServerLog("deploy.start", { id: currentBuild?.id || "", deviceId });
+  const result = await withDeployLock(() => withDevice(deviceId, () => deployCurrent()));
+  console.log("[deploy] Deploy completed successfully");
+  await appendServerLog("deploy.done", { id: result.id, goldenLoopOk: result.goldenLoop?.ok });
+  return { ok: true, deviceId, ...result };
+}
+
+function withoutBackgroundFlags(body = {}) {
+  const { background, as_job, ...rest } = body || {};
+  return rest;
+}
+
+function wantsBackgroundJob(body = {}) {
+  return body?.background === true || body?.as_job === true;
+}
+
+function jobTitle(type, body = {}) {
+  const prompt = String(body.prompt || body.build_prompt || body.message || "").replace(/\s+/g, " ").trim();
+  if (type === "deploy") return "Deploy current build";
+  if (type === "generate" || body.action === "confirm_build") return `Generate${prompt ? `: ${prompt.slice(0, 80)}` : ""}`;
+  return `Agent${prompt ? `: ${prompt.slice(0, 80)}` : ""}`;
+}
+
+function enqueueBackgroundJob(type, body = {}) {
+  const input = withoutBackgroundFlags(body || {});
+  return jobRuntime.enqueue(type, input, {
+    conversationId: String(input.conversation_id || ""),
+    title: jobTitle(type, input),
+  });
+}
+
+const jobRuntime = createJobRuntime({
+  jobStore,
+  classifyError,
+  appendServerLog,
+});
+
+jobRuntime.register("agent", async (body = {}, ctx) => {
+  ctx.phase("agent", "Agent request is running.");
+  const result = await runAgentRequest(body || {});
+  ctx.phase("done", "Agent request finished.");
+  return result;
+});
+
+jobRuntime.register("generate", async (body = {}, ctx) => {
+  ctx.phase("generate", "Code generation is running.");
+  const result = await runGenerateRequest(body || {});
+  ctx.phase("done", "Generation finished.");
+  return result;
+});
+
+jobRuntime.register("deploy", async (body = {}, ctx) => {
+  ctx.phase("deploy", "Deploy is running.");
+  const result = await runDeployRequest(body || {});
+  ctx.phase("done", "Deploy finished.");
+  return result;
+});
+
+jobRuntime.resumeQueuedJobs();
+
 async function route(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -2469,8 +2546,55 @@ async function route(req, res) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/jobs") {
+      const jobs = jobStore.listJobs({
+        limit: Number(url.searchParams.get("limit") || 50),
+        conversationId: url.searchParams.get("conversation_id") || "",
+        status: url.searchParams.get("status") || "",
+      });
+      json(res, 200, { ok: true, jobs });
+      return;
+    }
+    if (req.method === "GET" && /^\/api\/jobs\/[^/]+$/.test(url.pathname)) {
+      const jobId = decodeURIComponent(url.pathname.split("/")[3] || "");
+      const job = jobStore.getJob(jobId);
+      if (!job) {
+        json(res, 404, { ok: false, error: "Job not found" });
+        return;
+      }
+      json(res, 200, { ok: true, job });
+      return;
+    }
+    if (req.method === "POST" && /^\/api\/jobs\/[^/]+\/cancel$/.test(url.pathname)) {
+      const jobId = decodeURIComponent(url.pathname.split("/")[3] || "");
+      try {
+        const job = jobStore.requestCancel(jobId);
+        json(res, 200, { ok: true, job });
+      } catch (cancelErr) {
+        json(res, 404, { ok: false, error: cancelErr.message });
+      }
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/jobs") {
+      const body = await readBody(req);
+      const type = String(body?.type || "").trim();
+      if (!["agent", "generate", "deploy"].includes(type)) {
+        json(res, 400, { ok: false, error: "Unsupported job type" });
+        return;
+      }
+      const payload = body?.payload && typeof body.payload === "object" ? body.payload : body;
+      const job = enqueueBackgroundJob(type, payload || {});
+      json(res, 202, { ok: true, job });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/agent") {
       const body = await readBody(req);
+      if (wantsBackgroundJob(body || {})) {
+        const job = enqueueBackgroundJob("agent", body || {});
+        json(res, 202, { ok: true, job });
+        return;
+      }
       try {
         json(res, 200, await runAgentRequest(body || {}));
       } catch (err) {
@@ -2484,6 +2608,11 @@ async function route(req, res) {
     if (req.method === "POST" && url.pathname === "/api/generate") {
       try {
         const body = await readBody(req);
+        if (wantsBackgroundJob(body || {})) {
+          const job = enqueueBackgroundJob("generate", body || {});
+          json(res, 202, { ok: true, job });
+          return;
+        }
         json(res, 200, await runGenerateRequest(body || {}));
       } catch (error) {
         const classified = classifyError(error, { stage: "generate" });
@@ -2514,22 +2643,12 @@ async function route(req, res) {
     if (req.method === "POST" && url.pathname === "/api/deploy") {
       try {
         const body = await readBody(req);
-        const deviceId = deviceIdFrom(body || {}, BOARD.id);
-        if (!hasBoardCredentials()) {
-          if (!currentBuild) await loadGeneratedBuild();
-          if (currentBuild && (!currentBuild.built || !currentBuild.buildEvidence)) await buildCurrent();
-          const result = buildOfflineDeployResult();
-          setLastDeploy(result);
-          await appendServerLog("deploy.skipped", { id: currentBuild?.id || "", mode: result.mode });
-          json(res, 200, { ok: true, deviceId, ...result });
+        if (wantsBackgroundJob(body || {})) {
+          const job = enqueueBackgroundJob("deploy", body || {});
+          json(res, 202, { ok: true, job });
           return;
         }
-        console.log("[deploy] Starting deploy...");
-        await appendServerLog("deploy.start", { id: currentBuild?.id || "", deviceId });
-        const result = await withDeployLock(() => withDevice(deviceId, () => deployCurrent()));
-        console.log("[deploy] Deploy completed successfully");
-        await appendServerLog("deploy.done", { id: result.id, goldenLoopOk: result.goldenLoop?.ok });
-        json(res, 200, { ok: true, deviceId, ...result });
+        json(res, 200, await runDeployRequest(body || {}));
       } catch (error) {
         console.error("[deploy] Error:", error.message);
         console.error("[deploy] Stack:", error.stack);

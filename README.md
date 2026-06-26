@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-06-27 Update: Task Center and Background Jobs
+
+- Long Agent generation and deploy actions now run as persisted background jobs. Refreshing the page no longer loses the running task state.
+- The main dashboard has a `Tasks` drawer with job status, phase logs, classified failures, and choice-style next actions such as retry, cancel, open model settings, open board status, open result, and deploy.
+- `/api/jobs`, `/api/jobs/:id`, `/api/jobs/:id/cancel`, plus `background: true` on `/api/agent`, `/api/generate`, and `/api/deploy`, provide the server-side task center API.
+- The UI can switch conversations, create a new conversation, and queue another task while an earlier job is still running.
+- Verification now covers job persistence, runtime failure choices, background Agent generation, background deploy, and the Task Center UI smoke path.
+
+---
+
 ## 目录
 
 - [项目简介](#项目简介)

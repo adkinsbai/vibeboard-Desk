@@ -29,6 +29,23 @@ await withServer(async ({ baseUrl, json }) => {
             headers: { "content-type": "application/json" }
           }));
         }
+        if (url.includes("/api/jobs") && method === "GET") {
+          return Promise.resolve(new Response(JSON.stringify({
+            ok: true,
+            jobs: [{
+              id: "job-ui-smoke",
+              type: "agent",
+              status: "running",
+              phase: "generate",
+              title: "UI smoke job",
+              logs: [{ phase: "generate", message: "running" }],
+              choices: []
+            }]
+          }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }));
+        }
         return originalFetch(input, init);
       };
       window.setBusy(true);
@@ -44,6 +61,10 @@ await withServer(async ({ baseUrl, json }) => {
     await page.waitForFunction(count => document.querySelectorAll(".conv-item").length > count, beforeCreate);
     const afterCreate = await page.locator(".conv-item").count();
     assert(afterCreate > beforeCreate, "busy state should not block new conversation creation");
+
+    await page.locator("#jobCenterBtn").click();
+    await page.locator("#jobDrawer.open").waitFor({ timeout: 3000 });
+    await page.locator(".job-card").first().waitFor({ timeout: 3000 });
 
     await page.evaluate(() => window.setBusy(false));
     await page.locator("#promptInput").fill("Enter should submit from the main composer");

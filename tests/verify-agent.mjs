@@ -21,6 +21,9 @@ import {
 } from "../src/assetContract.mjs";
 import { failResult, okResult, mergeResults, SEVERITY } from "../src/toolResult.mjs";
 import { createPlaybookStore, signatureFromIssues } from "../src/playbookStore.mjs";
+import { createJobStore } from "../src/jobStore.mjs";
+import { createJobRuntime } from "../src/jobRuntime.mjs";
+import { classifyError } from "../src/errorClassifier.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NODE_BIN = process.env.VIBEBOARD_NODE || "node";
@@ -1398,6 +1401,70 @@ await test("main UI keeps navigation usable during running tasks", async () => {
   assert(js.includes('event.key !== "Enter" || event.shiftKey || event.isComposing'), "Enter handling should preserve shift-enter and IME composition");
   assert(!js.includes("generateBtn.disabled = value"), "running state should not disable the send button");
   assert(!js.includes("if (busy) return; // Don't switch while a flow is running"), "running state should not block conversation selection");
+  assert(html.includes('id="jobCenterBtn"'), "main UI should expose a task center button");
+  assert(js.includes("background: true"), "main UI should start long generation/deploy actions as background jobs");
+});
+
+await test("job store persists lifecycle logs and cancellation", async () => {
+  const db = new SQL.Database();
+  let saves = 0;
+  const store = createJobStore(db, () => { saves += 1; }, {
+    idFactory: () => `job_test_${saves}`,
+  });
+  store.initSchema();
+  const job = store.createJob({
+    type: "agent",
+    conversationId: "conv-a",
+    title: "Generate clock",
+    input: { prompt: "clock" },
+  });
+  assert(job.status === "queued", "new job should start queued");
+  store.appendLog(job.id, "queued for generation", { step: 1 }, "queued");
+  const running = store.transition(job.id, { status: "running", phase: "generate" });
+  assert(running.started_at, "running job should record started_at");
+  const done = store.transition(job.id, {
+    status: "succeeded",
+    phase: "done",
+    output: { ok: true },
+    choices: [{ label: "Open result", action: "open_result" }],
+  });
+  assert(done.completed_at, "final job should record completed_at");
+  assert(done.logs.some(item => item.message === "queued for generation"), "job logs should persist");
+  assert(store.listJobs({ conversationId: "conv-a" }).length === 1, "jobs should be listable by conversation");
+
+  const cancelJob = store.createJob({ type: "deploy", title: "Deploy", input: {} });
+  const canceled = store.requestCancel(cancelJob.id);
+  assert(canceled.status === "canceled", "queued job cancellation should finish the job");
+  assert(saves >= 5, "job operations should persist to disk");
+});
+
+await test("job runtime queues work and turns failures into choices", async () => {
+  const db = new SQL.Database();
+  const store = createJobStore(db, () => {});
+  store.initSchema();
+  const runtime = createJobRuntime({ jobStore: store, classifyError });
+  runtime.register("generate", async (body, ctx) => {
+    ctx.phase("generate", "running fixture");
+    if (body.fail) {
+      const error = new Error("missing api key");
+      error.errorType = "no_api_key";
+      throw error;
+    }
+    return { ok: true, files: { "index.html": "<!doctype html>" } };
+  });
+
+  const okJob = runtime.enqueue("generate", { prompt: "ok" }, { title: "ok" });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const ok = store.getJob(okJob.id);
+  assert(ok.status === "succeeded", `expected succeeded, got ${ok.status}`);
+  assert(ok.choices.some(choice => choice.action === "open_result"), "successful generate job should expose open result choice");
+
+  const failJob = runtime.enqueue("generate", { fail: true }, { title: "fail" });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const failed = store.getJob(failJob.id);
+  assert(failed.status === "failed", `expected failed, got ${failed.status}`);
+  assert(failed.error.errorType === "no_api_key", `failure should be classified, got ${JSON.stringify(failed.error)}`);
+  assert(failed.choices.some(choice => choice.action === "open_model_settings"), "missing model config should offer model settings");
 });
 
 await test("build runtime rejects hardware result build id mismatch before verification", async () => {

@@ -8,6 +8,7 @@ const api = {
   preferences: "/api/preferences",
   agent: "/api/agent",
   chat: "/api/chat",
+  jobs: "/api/jobs",
 };
 
 const el = id => document.getElementById(id);
@@ -24,6 +25,12 @@ const statusDrawer = el("statusDrawer");
 const codeToggle = el("codeToggle");
 const closeDrawer = el("closeDrawer");
 const closeStatusDrawer = el("closeStatusDrawer");
+const jobCenterBtn = el("jobCenterBtn");
+const jobDrawer = el("jobDrawer");
+const closeJobDrawer = el("closeJobDrawer");
+const refreshJobsBtn = el("refreshJobsBtn");
+const jobList = el("jobList");
+const jobSummary = el("jobSummary");
 const scrim = el("scrim");
 const fileTabs = el("fileTabs");
 const codePreview = el("codePreview");
@@ -55,8 +62,11 @@ const agentModeSelect = el("agentModeSelect");
 let generatedFiles = {};
 let activeFile = "";
 let busy = false;
+let foregroundTaskCount = 0;
 let conversationInitPromise = null;
 let conversationLoadToken = 0;
+let jobsPollTimer = null;
+let activeJobWaiters = new Set();
 
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
 const DEVICE_STORAGE_KEY = "vibeboard-active-device";
@@ -713,11 +723,204 @@ async function getJson(url, { timeout = 30000 } = {}) {
   }
 }
 
+function isFinalJob(job = {}) {
+  return ["succeeded", "failed", "canceled"].includes(String(job.status || ""));
+}
+
+async function fetchJob(jobId) {
+  const data = await getJson(`${api.jobs}/${encodeURIComponent(jobId)}`, { timeout: 15000 });
+  return data.job;
+}
+
+async function waitForJob(jobId, { onUpdate, interval = 1200, timeout = 900000 } = {}) {
+  const startedAt = Date.now();
+  activeJobWaiters.add(jobId);
+  try {
+    while (Date.now() - startedAt < timeout) {
+      const job = await fetchJob(jobId);
+      if (typeof onUpdate === "function") onUpdate(job);
+      loadJobs({ silent: true });
+      if (isFinalJob(job)) return job;
+      await new Promise(resolve => window.setTimeout(resolve, interval));
+    }
+    const error = new Error("Job timed out");
+    error.data = { errorType: "timeout", errorStage: "job" };
+    throw error;
+  } finally {
+    activeJobWaiters.delete(jobId);
+  }
+}
+
+async function loadJobs({ silent = false } = {}) {
+  if (!jobList && !jobSummary) return [];
+  try {
+    const data = await getJson(`${api.jobs}?limit=30`, { timeout: 15000 });
+    const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+    renderJobs(jobs);
+    scheduleJobsPolling(jobs);
+    return jobs;
+  } catch (error) {
+    if (!silent && jobList) {
+      jobList.innerHTML = `<div class="job-error">${escapeHtml(formatFriendlyError(error.data, error.message))}</div>`;
+    }
+    return [];
+  }
+}
+
+function scheduleJobsPolling(jobs = []) {
+  if (jobsPollTimer) window.clearTimeout(jobsPollTimer);
+  const hasActive = jobs.some(job => !isFinalJob(job)) || activeJobWaiters.size > 0;
+  if (hasActive) jobsPollTimer = window.setTimeout(() => loadJobs({ silent: true }), 1500);
+}
+
+function renderJobs(jobs = []) {
+  if (jobSummary) {
+    const active = jobs.filter(job => !isFinalJob(job)).length;
+    jobSummary.textContent = active ? `${active} active / ${jobs.length}` : `${jobs.length} jobs`;
+  }
+  if (!jobList) return;
+  if (!jobs.length) {
+    jobList.innerHTML = `<div class="job-card"><div class="job-meta">No background jobs yet.</div></div>`;
+    return;
+  }
+  jobList.innerHTML = "";
+  for (const job of jobs) {
+    const card = document.createElement("article");
+    card.className = "job-card";
+    const latestLogs = Array.isArray(job.logs) ? job.logs.slice(-5) : [];
+    const error = job.error || {};
+    card.innerHTML = `
+      <div class="job-card-head">
+        <div>
+          <h3>${escapeHtml(job.title || job.type || job.id)}</h3>
+          <div class="job-meta">${escapeHtml(job.type || "task")} | ${escapeHtml(job.phase || "")} | ${formatTime(job.updated_at || job.created_at)}</div>
+        </div>
+        <span class="job-status ${escapeHtml(job.status || "")}">${escapeHtml(job.status || "")}</span>
+      </div>
+      ${error && (error.userMessage || error.error || error.errorLabel)
+        ? `<div class="job-error">${escapeHtml(error.userMessage || error.errorLabel || error.error || "Job failed")}</div>`
+        : ""}
+      <div class="job-log">
+        ${latestLogs.map(log => `<div>${escapeHtml((log.phase ? `${log.phase}: ` : "") + (log.message || ""))}</div>`).join("") || "<div>waiting for logs</div>"}
+      </div>
+      <div class="job-actions"></div>
+    `;
+    const actions = card.querySelector(".job-actions");
+    for (const choice of normalizedJobChoices(job)) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = choice.primary ? "primary" : "";
+      button.textContent = truncateButtonText(choice.label, 24);
+      button.addEventListener("click", () => runJobChoice(job, choice));
+      actions.appendChild(button);
+    }
+    jobList.appendChild(card);
+  }
+}
+
+function normalizedJobChoices(job = {}) {
+  const choices = Array.isArray(job.choices) ? job.choices : [];
+  const output = job.output || {};
+  const result = choices.map((choice, index) => ({
+    label: choice.label || choice.action || "Action",
+    action: choice.action || "",
+    value: choice.value || {},
+    primary: index === 0,
+  }));
+  if (!isFinalJob(job)) {
+    result.push({ label: "Cancel", action: "cancel_job", value: { job_id: job.id }, primary: false });
+  }
+  if (job.status === "succeeded" && output.files && !result.some(item => item.action === "open_result")) {
+    result.unshift({ label: "Open result", action: "open_result", value: { job_id: job.id }, primary: true });
+  }
+  if (!result.length) result.push({ label: "View logs", action: "view_logs", value: { job_id: job.id }, primary: true });
+  return result.slice(0, 5);
+}
+
+function applyGenerateResult(gen = {}, prompt = "", conversationId = currentConversationId) {
+  if (!gen || typeof gen !== "object") return;
+  removeThinkingAnimation();
+  if (gen.agentActions?.length) addAgentActionsCard(gen.agentActions, gen.agentSummary);
+  else if (gen.thinking) addThinkingBubble(gen.thinking);
+  renderModeBoundary(gen.mode_boundary);
+  renderCodexBridge(gen.codex_bridge);
+  addEvidenceCard(gen);
+  renderFiles(gen.files || {});
+  if (conversationId) {
+    renderConversationPreview(conversationId, gen.id, gen.agentSummary || "generated app");
+  } else {
+    renderDevicePreview(prompt, gen.agentSummary || "generated app");
+  }
+  if (gen.id) el("lastBuildState").textContent = gen.id;
+  const fileCount = Object.keys(gen.files || {}).length;
+  const message = `**Background job completed**\n\nGenerated **${fileCount}** files and restored the verified preview. Hardware deployment still waits for your explicit confirmation.`;
+  addMarkdownMessage("agent", message);
+  persistMessage("agent", message, gen.id || null, conversationId);
+  addInlineButtons([
+    { label: "Deploy", primary: true, action: () => doDeploy(prompt) },
+    { label: "Keep editing", primary: false, action: () => promptInput?.focus() },
+  ]);
+}
+
+async function runJobChoice(job = {}, choice = {}) {
+  const action = String(choice.action || "");
+  if (action === "open_result") {
+    applyGenerateResult(job.output, job.input?.prompt || job.input?.build_prompt || "", job.conversation_id || currentConversationId);
+    setJobDrawer(false);
+    return;
+  }
+  if (action === "deploy_job_output") {
+    setJobDrawer(false);
+    await doDeploy(job.input?.prompt || job.input?.build_prompt || "");
+    return;
+  }
+  if (action === "open_model_settings") {
+    setJobDrawer(false);
+    setModelModal(true);
+    return;
+  }
+  if (action === "open_board_status") {
+    setJobDrawer(false);
+    setStatusDrawer(true);
+    return;
+  }
+  if (action === "cancel_job") {
+    await postJson(`${api.jobs}/${encodeURIComponent(job.id)}/cancel`, {}, { timeout: 15000 });
+    await loadJobs();
+    return;
+  }
+  if (action === "retry_local_template") {
+    setJobDrawer(false);
+    await retryJob(job, { modelSettings: { enabled: false } });
+    return;
+  }
+  if (action === "retry_job") {
+    setJobDrawer(false);
+    await retryJob(job);
+    return;
+  }
+  setJobDrawer(true);
+}
+
+async function retryJob(job = {}, overrides = {}) {
+  const payload = { ...(job.input || {}), ...overrides };
+  if (job.type === "deploy") {
+    await doDeploy(payload.prompt || "");
+    return;
+  }
+  if (job.type === "generate") {
+    await runFlow(payload.prompt || payload.build_prompt || "", payload.history || [], payload.conversation_id || currentConversationId, payload);
+    return;
+  }
+  await runFlow(payload.prompt || payload.build_prompt || "", payload.history || [], payload.conversation_id || currentConversationId, payload);
+}
+
 function setBusy(value) {
-  busy = value;
-  if (runDemoBtn) runDemoBtn.disabled = value;
-  if (modelConfigBtn) modelConfigBtn.disabled = value;
-  if (agentState) agentState.textContent = value ? "running" : "idle";
+  foregroundTaskCount = Math.max(0, foregroundTaskCount + (value ? 1 : -1));
+  busy = foregroundTaskCount > 0;
+  if (runDemoBtn) runDemoBtn.disabled = busy;
+  if (modelConfigBtn) modelConfigBtn.disabled = busy;
+  if (agentState) agentState.textContent = busy ? `${foregroundTaskCount} running` : "idle";
 }
 
 function hasModelConfig(settings = modelSettings) {
@@ -812,6 +1015,7 @@ function syncScrim() {
   scrim.hidden = !(
     isOpen(codeDrawer) ||
     isOpen(statusDrawer) ||
+    isOpen(jobDrawer) ||
     isOpen(modelModal) ||
     isOpen(el("deployMarketModal"))
   );
@@ -832,6 +1036,14 @@ function setStatusDrawer(open) {
   if (open) refreshBoard();
 }
 
+function setJobDrawer(open) {
+  if (!jobDrawer) return;
+  jobDrawer.classList.toggle("open", open);
+  jobDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+  syncScrim();
+  if (open) loadJobs();
+}
+
 function setModelModal(open) {
   if (!modelModal) return;
   modelModal.classList.toggle("open", open);
@@ -846,6 +1058,7 @@ function setModelModal(open) {
 function closeDrawers() {
   setCodeDrawer(false);
   setStatusDrawer(false);
+  setJobDrawer(false);
   setModelModal(false);
   const deployModal = el("deployMarketModal");
   if (deployModal) {
@@ -1716,10 +1929,6 @@ function buildChatMessages() {
 }
 
 async function handleChat(prompt) {
-  if (busy) {
-    notifyBusyAttempt(prompt);
-    return;
-  }
   prompt = String(prompt || "").trim();
   if (!prompt) return;
 
@@ -1801,16 +2010,13 @@ async function startBuild(originalPrompt) {
 
   // 收集完整的对话上下文
   const history = buildChatMessages();
+  await runFlow(originalPrompt, history, currentConversationId);
 
   // 调用原有的代码生成流程
   await runFlow(originalPrompt, history, currentConversationId);
 }
 
-async function runFlow(prompt, history = [], conversationId = currentConversationId) {
-  if (busy) {
-    notifyBusyAttempt(prompt);
-    return;
-  }
+async function runFlow(prompt, history = [], conversationId = currentConversationId, overrides = {}) {
   setBusy(true);
   deployState.textContent = labels.preparing;
   const progress = addStageCard();
@@ -1834,7 +2040,7 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
     deployState.textContent = labels.generating;
     generatePoller = createGenerateLogPoller(progress);
     generatePoller.start();
-    const gen = await postJson(api.agent, {
+    const started = await postJson(api.agent, {
       action: "confirm_build",
       prompt,
       build_prompt: prompt,
@@ -1842,9 +2048,29 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
       agent_mode: getAgentMode(),
       conversation_id: conversationId,
       clarify_answers: [],
-      history: chatHistory
-    }, { timeout: 600000 });
-    generatePoller.stop("response received");
+      history: chatHistory,
+      background: true,
+      ...overrides,
+    }, { timeout: 30000 });
+    const jobId = started.job?.id;
+    if (!jobId) throw new Error("Background generation job was not created.");
+    progress.log(`Background job queued: ${jobId}`);
+    setJobDrawer(true);
+    const finishedJob = await waitForJob(jobId, {
+      onUpdate(job) {
+        if (!job) return;
+        const phase = job.phase || job.status || "running";
+        progress.set("generate", job.status === "queued" ? "active" : "active", phase, { silent: true });
+      },
+      timeout: 900000,
+    });
+    if (finishedJob.status !== "succeeded") {
+      const error = new Error(finishedJob.error?.error || finishedJob.error?.errorLabel || "Generation job failed.");
+      error.data = finishedJob.error || { errorType: "unknown" };
+      throw error;
+    }
+    const gen = finishedJob.output;
+    generatePoller.stop("job completed");
     generatePoller = null;
 
     // Remove thinking animation, show agent actions
@@ -1960,19 +2186,29 @@ function addDeployButton(prompt) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+async function runDeployJob() {
+  const started = await postJson(api.deploy, { background: true }, { timeout: 30000 });
+  const jobId = started.job?.id;
+  if (!jobId) throw new Error("Background deploy job was not created.");
+  setJobDrawer(true);
+  const finishedJob = await waitForJob(jobId, { timeout: 600000 });
+  if (finishedJob.status !== "succeeded") {
+    const error = new Error(finishedJob.error?.error || finishedJob.error?.errorLabel || "Deploy job failed.");
+    error.data = finishedJob.error || { errorType: "deploy_failed" };
+    throw error;
+  }
+  return finishedJob.output;
+}
+
 async function doDeploy(prompt) {
   const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
-  if (busy) {
-    notifyBusyAttempt(prompt);
-    return;
-  }
   setBusy(true);
   deployState.textContent = labels.deploying;
 
   addMarkdownMessage("agent", `🚀 **正在部署到 ${profile.label}...**`);
 
   try {
-    const deployed = await postJson(api.deploy, {});
+    const deployed = await runDeployJob();
     renderHardwareRun(deployed);
     if (deployed.skipped) {
       deployState.textContent = "hardware skipped";
@@ -1993,17 +2229,13 @@ async function doDeploy(prompt) {
 
 async function runDeploy(btn) {
   const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
-  if (busy) {
-    notifyBusyAttempt();
-    return;
-  }
   setBusy(true);
   btn.disabled = true;
   btn.textContent = `部署到${profile.label}中...`;
   deployState.textContent = labels.deploying;
 
   try {
-    const deployed = await postJson(api.deploy, {});
+    const deployed = await runDeployJob();
     renderHardwareRun(deployed);
     if (deployed.skipped) {
       deployState.textContent = "hardware skipped";
@@ -2055,9 +2287,12 @@ generateBtn?.addEventListener("click", event => {
 });
 
 refreshBoardBtn?.addEventListener("click", () => setStatusDrawer(true));
+jobCenterBtn?.addEventListener("click", () => setJobDrawer(true));
+refreshJobsBtn?.addEventListener("click", () => loadJobs());
 codeToggle?.addEventListener("click", () => setCodeDrawer(true));
 closeDrawer?.addEventListener("click", () => setCodeDrawer(false));
 closeStatusDrawer?.addEventListener("click", () => setStatusDrawer(false));
+closeJobDrawer?.addEventListener("click", () => setJobDrawer(false));
 modelConfigBtn?.addEventListener("click", () => setModelModal(true));
 closeModelModal?.addEventListener("click", () => setModelModal(false));
 modelProvider?.addEventListener("change", () => applyProviderPreset(modelProvider.value));
@@ -2103,6 +2338,7 @@ scheduleFitDeviceFrame();
 applyDeviceProfile({ refresh: false });
 syncModelUi();
 syncAgentModeUi();
+loadJobs({ silent: true });
 window.addEventListener("resize", scheduleFitDeviceFrame);
 if (deviceFrame) {
   deviceFrame.addEventListener("load", scheduleFitDeviceFrame);
@@ -2301,7 +2537,7 @@ async function loadConversations() {
 }
 
 function restoreCurrentConversation(conversations = []) {
-  if (busy || currentConversationId || !conversations.length) return;
+  if (currentConversationId || !conversations.length) return;
   const savedId = rememberedConversationId();
   const remembered = conversations.find(conv => conv.id === savedId);
   const target = remembered || conversations[0];

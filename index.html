@@ -40,6 +40,7 @@
           </div>
         </div>
         <div class="top-actions">
+          <button class="ghost-btn" id="jobCenterBtn" type="button">Tasks</button>
           <button class="icon-btn" id="codeToggle" type="button" aria-label="Open generated code">&lt;/&gt;</button>
           <button class="ghost-btn" id="refreshBoardBtn" type="button">Status</button>
           <button class="ghost-btn model-btn" id="modelConfigBtn" type="button"><span id="modelDot"></span><span id="modelButtonLabel">Model</span></button>
@@ -174,6 +175,21 @@
     </div>
     <div class="verify-list" id="verifyList" aria-label="Golden loop verification"></div>
     <pre class="deploy-log" id="hardwareResult">waiting for hardware run</pre>
+  </aside>
+
+  <aside class="drawer job-drawer" id="jobDrawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <p class="kicker">Background Jobs</p>
+        <h2>任务中心</h2>
+      </div>
+      <button class="icon-btn" id="closeJobDrawer" type="button" aria-label="Close task center">x</button>
+    </div>
+    <div class="job-toolbar">
+      <button class="ghost-btn" id="refreshJobsBtn" type="button">Refresh</button>
+      <span class="pill" id="jobSummary">0 jobs</span>
+    </div>
+    <div class="job-list" id="jobList"></div>
   </aside>
 
   <section class="modal" id="modelModal" aria-hidden="true" role="dialog" aria-labelledby="modelModalTitle">

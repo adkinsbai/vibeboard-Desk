@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-27 - Task Center, Background Jobs, and Recoverable Agent Runs
+
+- Added a persisted background job system backed by the existing sql.js database, including job lifecycle state, phase, logs, output, classified error details, cancellation flags, and choice-style next actions.
+- Added `/api/jobs`, `/api/jobs/:id`, `/api/jobs/:id/cancel`, and background mode for `/api/agent`, `/api/generate`, and `/api/deploy` via `background: true`.
+- Added a main-dashboard Task Center drawer so running, completed, failed, and canceled jobs remain visible after page refresh; job cards expose button actions such as open result, retry, open model settings, open board status, cancel, and view logs.
+- Moved long Agent generation and deploy flows onto background jobs from the UI, so users can switch conversations, create new conversations, and start another task while an earlier task is still running or queued.
+- Added runtime tests for job persistence and failure-choice classification, HTTP smoke coverage for background Agent generation and deploy jobs, and UI smoke coverage for the Task Center drawer.
+
 ## 2026-06-26 - Non-blocking Chat, Hardware SDK Guard, and Audio Diagnostics
 
 - Kept the main dashboard navigable while an Agent generation is running: conversation selection and "新建" no longer depend on the global running state, and completed builds only update the chat UI if the user is still viewing the originating conversation.
