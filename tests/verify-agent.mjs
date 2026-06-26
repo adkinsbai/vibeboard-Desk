@@ -632,11 +632,17 @@ await test("hardware app contract centralizes embedded rules", () => {
   assert(prompt.includes("Runtime data"), "prompt contract should include runtime data rules");
 });
 
-await test("gray board profile uses the deployable linaro account", async () => {
+await test("Taishan board profiles use the deployable linaro account", async () => {
   const { createBoardConfig } = await import(pathToFileURL(path.join(ROOT, "src", "devices.mjs")).href);
+  const transparent = createBoardConfig("taishan-transparent", {});
   const gray = createBoardConfig("taishan-gray", {});
+  const black = createBoardConfig("taishan-black", {});
+  assert(transparent.user === "linaro", `transparent board should default to linaro, got ${transparent.user}`);
   assert(gray.user === "linaro", `gray board should default to linaro, got ${gray.user}`);
+  assert(black.user === "linaro", `black board should default to linaro, got ${black.user}`);
+  assert(transparent.port === "6223", `transparent board should keep FRP port 6223, got ${transparent.port}`);
   assert(gray.port === "6278", `gray board should keep FRP port 6278, got ${gray.port}`);
+  assert(black.port === "6279", `black board should keep FRP port 6279, got ${black.port}`);
 });
 
 await test("hardware result contract rejects missing runtime APIs", () => {

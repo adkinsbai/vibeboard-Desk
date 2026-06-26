@@ -33,7 +33,8 @@ export const DEVICE_PROFILES = {
     host: "150.158.146.192",
     port: "6279",
     frpHost: "150.158.146.192",
-    frpPort: "6279"
+    frpPort: "6279",
+    user: "linaro"
   }
 };
 
