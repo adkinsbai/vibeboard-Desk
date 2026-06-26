@@ -56,6 +56,7 @@ export function createGenerateRuntime(deps = {}) {
     buildId,
     createAppSpec,
     generatedHardwareApp,
+    injectAppHardwareSdkContracts = (source) => source,
     injectHardwareAppContracts,
     generatedManifest,
     writeGenerated,
@@ -270,6 +271,7 @@ export function createGenerateRuntime(deps = {}) {
       const spec = createAppSpec(prompt, id);
       agentFiles["hardware_app.py"] = generatedHardwareApp(prompt, id, spec);
     }
+    agentFiles["app.js"] = injectAppHardwareSdkContracts(agentFiles["app.js"] || "", id);
     agentFiles["hardware_app.py"] = injectHardwareAppContracts(agentFiles["hardware_app.py"], id);
 
     const board = getBoard();
@@ -407,6 +409,15 @@ export function createGenerateRuntime(deps = {}) {
           attempt,
           repairAttempts: maxAttempts,
         });
+        recordAgentLearning({
+          prompt,
+          agentResult: {
+            whatWorked: attempt > 0 ? ["Auto repair modified generated files before this validation run."] : [],
+            whatFailed: [buildErr.message],
+          },
+          verificationResult: verificationResultFromError(buildErr, "pre_deploy_build"),
+          success: false,
+        });
         if (attempt >= maxAttempts || !isAutoRepairableError(buildErr)) break;
         if (!settings.enabled) break;
 
@@ -467,6 +478,15 @@ export function createGenerateRuntime(deps = {}) {
       errorType: error.errorType,
       attempts: maxAttempts,
       lastError: lastError?.message || "",
+    });
+    recordAgentLearning({
+      prompt,
+      agentResult: {
+        whatWorked: [],
+        whatFailed: [error.message, lastError?.message || ""].filter(Boolean),
+      },
+      verificationResult: verificationResultFromError(error, "auto_repair"),
+      success: false,
     });
     throw error;
   }
@@ -571,6 +591,7 @@ export function createGenerateRuntime(deps = {}) {
       const spec = createAppSpec(prompt, id);
       nextFiles["hardware_app.py"] = generatedHardwareApp(prompt, id, spec);
     }
+    nextFiles["app.js"] = injectAppHardwareSdkContracts(nextFiles["app.js"] || "", id);
     nextFiles["hardware_app.py"] = injectHardwareAppContracts(nextFiles["hardware_app.py"], id);
     const spec = createAppSpec(prompt, id);
     let nextManifest = generatedManifest(prompt, id, spec, {
@@ -796,6 +817,21 @@ function shouldAskUserForRepair(errorType = "") {
     "generate_busy",
     "empty_prompt",
   ]).has(String(errorType || ""));
+}
+
+function verificationResultFromError(error, phase = "generate") {
+  const classified = classifyError(error, { stage: phase });
+  return {
+    ok: false,
+    phase,
+    summary: error?.message || "Generation verification failed",
+    issues: [{
+      code: classified.errorType || error?.code || "UNKNOWN",
+      message: error?.message || String(error || "Generation verification failed"),
+      phase,
+      suggestedFixes: [classified.suggestion].filter(Boolean),
+    }],
+  };
 }
 
 export function buildGenerateAgentSettings(

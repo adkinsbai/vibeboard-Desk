@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-26 - Non-blocking Chat, Hardware SDK Guard, and Audio Diagnostics
+
+- Kept the main dashboard navigable while an Agent generation is running: conversation selection and "新建" no longer depend on the global running state, and completed builds only update the chat UI if the user is still viewing the originating conversation.
+- Renamed the main composer action to "发送" and added Enter-to-send behavior while preserving Shift+Enter for new lines and IME composition safety.
+- Added `tests/main-ui-smoke.mjs` plus `npm run verify:ui` to cover main-dashboard navigation during running tasks and keyboard submission.
+- Hardened generated-app hardware access by injecting a locked frontend `window.VibeBoardHardware` SDK before build verification, so generated `app.js` can call hardware APIs without replacing the contract implementation.
+- Added persistent playbook-backed lessons to generation experience retrieval so prior repair/debug findings can inform future Agent work.
+- Improved board microphone diagnostics: `/api/audio/record` now verifies that `arecord` actually stays running, captures `/tmp/vibeboard-audio/arecord.log`, and classifies common failures such as missing recorder, permission denied, busy device, and missing sound input with actionable `errorType`, `userMessage`, and `suggestion` fields.
+
 ## 2026-06-23 - Hardware Agent, Market, Digital Life, and Gray Board Release
 
 ### Highlights

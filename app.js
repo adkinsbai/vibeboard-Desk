@@ -431,6 +431,10 @@ function notifyBusyAttempt(prompt = "") {
   }
 }
 
+function isActiveConversation(conversationId) {
+  return !conversationId || conversationId === currentConversationId;
+}
+
 function addMessage(role, text) {
   const article = document.createElement("article");
   article.className = `msg ${role}`;
@@ -711,7 +715,6 @@ async function getJson(url, { timeout = 30000 } = {}) {
 
 function setBusy(value) {
   busy = value;
-  if (generateBtn) generateBtn.disabled = value;
   if (runDemoBtn) runDemoBtn.disabled = value;
   if (modelConfigBtn) modelConfigBtn.disabled = value;
   if (agentState) agentState.textContent = value ? "running" : "idle";
@@ -1845,23 +1848,25 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
     generatePoller = null;
 
     // Remove thinking animation, show agent actions
-    removeThinkingAnimation();
-    if (gen.agentActions?.length) {
-      addAgentActionsCard(gen.agentActions, gen.agentSummary);
-    } else if (gen.thinking) {
-      addThinkingBubble(gen.thinking);
-    } else {
-      addThinkingBubble(`Execution trace
+    if (isActiveConversation(conversationId)) {
+      removeThinkingAnimation();
+      if (gen.agentActions?.length) {
+        addAgentActionsCard(gen.agentActions, gen.agentSummary);
+      } else if (gen.thinking) {
+        addThinkingBubble(gen.thinking);
+      } else {
+        addThinkingBubble(`Execution trace
 1. Task received: ${prompt}
 2. No model reasoning output is available, so I continued through the local template path
 3. Local verification is checking contracts, syntax, hardware simulation, and 480x360 render
 4. Hardware write waits for your later deploy confirmation`);
+      }
+      renderModeBoundary(gen.mode_boundary);
+      renderCodexBridge(gen.codex_bridge);
+      addEvidenceCard(gen);
     }
-    renderModeBoundary(gen.mode_boundary);
-    renderCodexBridge(gen.codex_bridge);
-    addEvidenceCard(gen);
 
-    if (!conversationId || conversationId === currentConversationId) {
+    if (isActiveConversation(conversationId)) {
       renderFiles(gen.files);
       if (conversationId) {
         renderConversationPreview(conversationId, gen.id, gen.agentSummary || "已生成应用");
@@ -1883,7 +1888,7 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
     };
     if (!build.buildEvidence) {
       build = await postJson(api.build, {});
-      addEvidenceCard(build);
+      if (isActiveConversation(conversationId)) addEvidenceCard(build);
     }
     progress.set("build", "done", build.summary || "ok");
 
@@ -1906,16 +1911,18 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
     const agentSummary = gen.agentSummary ? `\n\n> ${gen.agentSummary}` : "";
     const repairNote = gen.repairSummary ? `\n\n${gen.repairSummary}` : "";
     const successMessage = `**本地生成与验证完成**\n\n已生成 **${fileCount}** 个文件，并通过本地 L0-L3 验证。${verifyNote}${repairNote}${agentSummary}\n\n我还没有写入硬件。你可以先在右侧预览确认效果；确认后再点击下方部署按钮。`;
-    addMarkdownMessage("agent", successMessage);
+    if (isActiveConversation(conversationId)) addMarkdownMessage("agent", successMessage);
     persistMessage("agent", successMessage, gen.id || null, conversationId);
 
     // 部署按钮放在聊天框内
-    addInlineButtons([
-      { label: "🚀 部署到真机", primary: true, action: () => doDeploy(prompt) },
-      { label: "✏️ 继续修改", primary: false, action: () => {
-        addMarkdownMessage("agent", "好的，请告诉我你想修改什么。");
-      }},
-    ]);
+    if (isActiveConversation(conversationId)) {
+      addInlineButtons([
+        { label: "🚀 部署到真机", primary: true, action: () => doDeploy(prompt) },
+        { label: "✏️ 继续修改", primary: false, action: () => {
+          addMarkdownMessage("agent", "好的，请告诉我你想修改什么。");
+        }},
+      ]);
+    }
     progress.set("ready", "done", "awaiting deploy");
     progress.log("Local verification finished. Waiting for your explicit deploy confirmation.");
   } catch (error) {
@@ -1927,7 +1934,7 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
     if (current) progress.set(current.id, "fail", "fail");
     deployState.textContent = labels.failed;
     const errorMessage = `❌ ${friendlyErrorMarkdown(error.data, error.message)}`;
-    addMarkdownMessage("agent", errorMessage);
+    if (isActiveConversation(conversationId)) addMarkdownMessage("agent", errorMessage);
     persistMessage("agent", errorMessage, null, conversationId);
   } finally {
     setBusy(false);
@@ -2028,6 +2035,13 @@ function drawClock() {
 }
 
 composer?.addEventListener("submit", event => {
+  event.preventDefault();
+  const prompt = promptInput.value.trim();
+  if (prompt) handleChat(prompt);
+});
+
+promptInput?.addEventListener("keydown", event => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
   event.preventDefault();
   const prompt = promptInput.value.trim();
   if (prompt) handleChat(prompt);
@@ -2348,7 +2362,6 @@ function renderConversationList(conversations) {
 
 // Select conversation
 async function selectConversation(id) {
-  if (busy) return; // Don't switch while a flow is running
   currentConversationId = id;
   rememberConversation(id);
   pendingGeneratePrompt = null;

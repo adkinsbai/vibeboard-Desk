@@ -5,6 +5,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
+import initSqlJs from "sql.js";
 import {
   AGENT_WRITABLE_FILE_NAMES,
   CONVERSATION_SNAPSHOT_FILE_NAMES,
@@ -24,6 +25,7 @@ import { createPlaybookStore, signatureFromIssues } from "../src/playbookStore.m
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NODE_BIN = process.env.VIBEBOARD_NODE || "node";
 const PYTHON_BIN = process.env.VIBEBOARD_PYTHON || (process.platform === "win32" ? "python" : "python3");
+const SQL = await initSqlJs();
 
 const results = [];
 
@@ -353,6 +355,46 @@ async function importVerifiers() {
   return import(pathToFileURL(candidate).href);
 }
 
+async function startStaticServer(rootDir, jsonRoutes = {}) {
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    const routeKey = url.pathname;
+    if (Object.prototype.hasOwnProperty.call(jsonRoutes, routeKey)) {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(jsonRoutes[routeKey]));
+      return;
+    }
+    const relative = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname).replace(/^\/+/, "");
+    const target = path.resolve(rootDir, relative);
+    const root = path.resolve(rootDir);
+    if (target !== root && !target.startsWith(root + path.sep)) {
+      res.writeHead(403);
+      res.end("Forbidden");
+      return;
+    }
+    try {
+      const body = await fs.readFile(target);
+      const contentType = target.endsWith(".js") ? "text/javascript; charset=utf-8" : target.endsWith(".html") ? "text/html; charset=utf-8" : "application/octet-stream";
+      res.writeHead(200, { "Content-Type": contentType, "Cache-Control": "no-store" });
+      res.end(body);
+    } catch {
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("not found");
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  return {
+    port: server.address().port,
+    close: () => new Promise(resolve => server.close(resolve)),
+  };
+}
+
 function createMemoryDb() {
   const rowsBySignature = new Map();
 
@@ -456,6 +498,10 @@ function createMemoryDb() {
       }
     },
   };
+}
+
+function createSqlMemoryDb() {
+  return new SQL.Database();
 }
 
 function selectRows(rows) {
@@ -1229,6 +1275,123 @@ sys.exit(0)
     assert(output.runtime === "executed_on_board", "wrapper should normalize runtime");
     assert(output.available_apis.includes("./hardware-result.json"), "wrapper should preserve hardware result API contract");
   });
+});
+
+await test("frontend hardware SDK injection prevents agent overrides", async () => {
+  const { injectAppHardwareSdkContracts } = await import(pathToFileURL(path.join(ROOT, "src", "generatedAppTemplate.mjs")).href);
+  const source = injectAppHardwareSdkContracts(`
+window.VibeBoardHardware = {
+  async getStatus() {
+    return { broken: true };
+  },
+};
+(async () => {
+  window.__agentStatus = await window.VibeBoardHardware.getStatus();
+})();
+`, "vb-sdk-lock");
+  assert(source.includes("VibeBoard frontend hardware SDK"), "injected source should include SDK marker");
+  assert(source.includes("/api/status"), "injected SDK should call /api/status");
+  await withTempDir("vibeboard-sdk-lock-", async dir => {
+    const html = `<!doctype html><script src="./app.js"></script>`;
+    await fs.writeFile(path.join(dir, "index.html"), html, "utf8");
+    await fs.writeFile(path.join(dir, "app.js"), source, "utf8");
+    const server = await startStaticServer(dir, {
+      "/api/status": { ok: true, mode: "test" },
+      "/hardware-result.json": { build_id: "vb-sdk-lock", runtime: "test", available_apis: ["/api/status", "./hardware-result.json"] },
+    });
+    let browser = null;
+    try {
+      const { chromium } = await import("playwright");
+      browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage({ viewport: { width: 480, height: 360 } });
+      await page.goto(`http://127.0.0.1:${server.port}/index.html`, { waitUntil: "networkidle" });
+      const state = await page.evaluate(async () => ({
+        status: await window.VibeBoardHardware.getStatus(),
+        agentStatus: window.__agentStatus,
+        system: window.VibeBoardHardware.__vibeboard_system_sdk,
+        ignoredOverride: Boolean(window.__vibeboardIgnoredHardwareOverride),
+      }));
+      assert(state.system === true, "window.VibeBoardHardware should remain the system SDK");
+      assert(state.status.mode === "test", `expected SDK status call, got ${JSON.stringify(state)}`);
+      assert(state.agentStatus.mode === "test", "agent override should not replace SDK behavior");
+      assert(state.ignoredOverride === true, "attempted override should be recorded and ignored");
+    } finally {
+      if (browser) await browser.close().catch(() => {});
+      await server.close();
+    }
+  });
+});
+
+await test("build runtime injects locked frontend hardware SDK before verification", async () => {
+  const { createBuildRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "buildRuntime.mjs")).href);
+  const { injectAppHardwareSdkContracts, injectHardwareAppContracts } = await import(pathToFileURL(path.join(ROOT, "src", "generatedAppTemplate.mjs")).href);
+  await withTempDir("vibeboard-build-sdk-inject-", async dir => {
+    const files = validGeneratedFiles();
+    files["app.js"] = `
+const BUILD_ID = "vb-build-sdk";
+const PROMPT = "sdk injection test";
+window.VibeBoardHardware = { getStatus: async () => ({ broken: true }) };
+document.addEventListener("DOMContentLoaded", async () => {
+  const root = document.getElementById("screen");
+  const status = await window.VibeBoardHardware.getStatus();
+  root.textContent = JSON.stringify(status);
+});
+`;
+    await writeFiles(dir, files);
+    const currentBuild = {
+      id: "vb-build-sdk",
+      prompt: "valid generated app smoke test",
+      files: { ...files },
+      dir,
+      built: false,
+      deployed: false,
+      manifest: JSON.parse(files["manifest.json"]),
+      agentRun: { phase: "code", evidence: [], failures: [] },
+    };
+    const runtime = createBuildRuntime({
+      execFileP,
+      verifyAllLocal: async verificationFiles => {
+        const issues = validateFileContracts(verificationFiles, "Generated app");
+        return { ok: issues.length === 0, issues, evidence: {}, summary: "contract verification" };
+      },
+      createAppSpec: (prompt, id) => ({ prompt, id, target: "480x360 RK3566 Linux kiosk" }),
+      generatedManifest: (prompt, id) => ({ id, prompt, files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+      injectAppHardwareSdkContracts,
+      injectHardwareAppContracts,
+      getCurrentBuild: () => currentBuild,
+      getBoard: () => ({ targetStatic: "/tmp/vibeboard-static" }),
+      pythonBin: PYTHON_BIN,
+      nodeBin: NODE_BIN,
+    });
+
+    await runtime.buildCurrent();
+    const appSource = await fs.readFile(path.join(dir, "app.js"), "utf8");
+    assert(appSource.includes("VibeBoard frontend hardware SDK"), "build runtime should inject frontend SDK");
+    assert(appSource.includes("__vibeboardIgnoredHardwareOverride"), "SDK should guard agent override attempts");
+    assert(currentBuild.built === true, "build should pass after SDK injection");
+  });
+});
+
+await test("audio record failures include actionable hardware diagnostics", async () => {
+  const source = await fs.readFile(path.join(ROOT, "server.mjs"), "utf8");
+  assert(source.includes("classifyAudioError"), "server should classify board audio failures");
+  assert(source.includes("audio_board_unreachable"), "board connection failures should have a stable audio error type");
+  assert(source.includes("runAudioRoute"), "audio routes should catch SSH failures before the global classifier");
+  assert(source.includes("audio_permission_denied"), "permission failures should have a stable error type");
+  assert(source.includes("audio_device_busy"), "busy microphone failures should have a stable error type");
+  assert(source.includes("audio_device_missing"), "missing microphone failures should have a stable error type");
+  assert(source.includes("/tmp/vibeboard-audio/arecord.log"), "record command should surface board arecord logs");
+  assert(source.includes("arecord exited immediately; microphone did not start."), "record command should fail when arecord exits immediately");
+});
+
+await test("main UI keeps navigation usable during running tasks", async () => {
+  const html = await fs.readFile(path.join(ROOT, "index.html"), "utf8");
+  const js = await fs.readFile(path.join(ROOT, "app.js"), "utf8");
+  assert(html.includes('id="generateBtn" type="submit">发送</button>'), "main composer button should be labeled send");
+  assert(js.includes('promptInput?.addEventListener("keydown"'), "main composer should handle keyboard submission");
+  assert(js.includes('event.key !== "Enter" || event.shiftKey || event.isComposing'), "Enter handling should preserve shift-enter and IME composition");
+  assert(!js.includes("generateBtn.disabled = value"), "running state should not disable the send button");
+  assert(!js.includes("if (busy) return; // Don't switch while a flow is running"), "running state should not block conversation selection");
 });
 
 await test("build runtime rejects hardware result build id mismatch before verification", async () => {
@@ -3001,6 +3164,33 @@ await test("playbook store deduplicates issue signatures and records reuse", () 
   assert(used.usage_count === 1 && used.success_count === 1, "recordUse should increment usage and success counters");
   assert(matches.length === 1 && matches[0].signature === signature, "findPlaybooks should retrieve the matching signature");
   assert(saves >= 3, "store should persist schema, record, update, and use operations");
+});
+
+await test("experience lessons include persistent playbook fixes", async () => {
+  const { createExperienceStore } = await import(pathToFileURL(path.join(ROOT, "src", "experienceStore.mjs")).href);
+  const db = createSqlMemoryDb();
+  let saves = 0;
+  const playbooks = createPlaybookStore(db, () => { saves += 1; });
+  playbooks.initSchema();
+  const experience = createExperienceStore(db, () => { saves += 1; });
+  experience.initSchema();
+  experience.setPlaybookStore(playbooks);
+
+  playbooks.recordPlaybook({
+    taskType: "general",
+    issues: [{ phase: "contract", code: "APP_HARDWARE_API", message: "window.VibeBoardHardware was overwritten" }],
+    title: "Protect frontend hardware SDK",
+    rootCause: "Agent rewrote window.VibeBoardHardware instead of calling the system SDK.",
+    diagnosisSteps: ["Check app.js for window.VibeBoardHardware assignment."],
+    fix: "Let the system inject the locked SDK and only call getStatus/getProgramResult/getSnapshot.",
+    verificationEvidence: ["verify:agent reproduced the locked SDK path."],
+    score: 5,
+  });
+
+  const lessons = experience.getLessons("general", 5);
+  assert(lessons.pitfalls.some(item => item.includes("rewrote window.VibeBoardHardware")), `expected playbook pitfall, got ${JSON.stringify(lessons)}`);
+  assert(lessons.fixes.some(item => item.includes("locked SDK")), `expected playbook fix, got ${JSON.stringify(lessons)}`);
+  assert(saves >= 2, "stores should persist schemas and playbook");
 });
 
 const verifier = await importVerifyAllLocal();

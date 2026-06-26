@@ -1632,6 +1632,9 @@ function buildAgentSystemPrompt(isEditing, fileStore, userPreferences = {}, less
 - **自我修复**：验证失败时自动修复，不要放弃
 - **实时记录**：发现陷阱或好模式时立即用 record_lesson 记录，不要等 done
 - **经验积累**：记录什么有效、什么失败
+- **硬件 SDK 只调用不重写**：window.VibeBoardHardware 由系统在 app.js 开头自动注入并锁定。你可以调用 getStatus()、getProgramResult()、getSnapshot() 和 audio.*，但不要重新定义、覆盖或删除 window.VibeBoardHardware。
+- **hardware_app.py 合同由系统兜底**：你可以让 hardware_app.py 输出业务 JSON，但系统会自动包装 build_id、runtime、hostname、available_apis。不要手写复杂硬件合同 wrapper，也不要删改合同字段。
+- **修复时最小改动**：如果验证提示硬件合同失败，优先修 UI 业务代码或业务 JSON 输出；不要大段重写硬件 SDK/function。
 
 ${isEditing ? `## 当前项目\n项目已有 ${fileList.length} 个文件：${fileList.join(", ")}\n用户要求修改这个已有的项目。先读取相关文件，再做修改。` : `## 新项目\n用户要求创建一个新项目。用 create_file 创建所有需要的文件。\n必须创建：index.html, style.css, app.js, hardware_app.py`}
 

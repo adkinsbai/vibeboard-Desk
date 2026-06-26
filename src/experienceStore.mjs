@@ -115,6 +115,12 @@ export function makePlaybookCandidate(experience = {}) {
 }
 
 export function createExperienceStore(db, saveDb) {
+  let playbookStore = null;
+
+  function setPlaybookStore(store) {
+    playbookStore = store || null;
+  }
+
   function initSchema() {
     db.exec(SCHEMA);
     saveDb();
@@ -238,6 +244,21 @@ export function createExperienceStore(db, saveDb) {
     lessons.patterns = lessons.patterns.slice(0, limit);
     lessons.fixes = lessons.fixes.slice(0, limit);
 
+    if (playbookStore?.findPlaybooks) {
+      try {
+        const playbooks = playbookStore.findPlaybooks({ taskType, limit, minScore: 0 });
+        for (const playbook of playbooks) {
+          if (playbook.root_cause) addUniqueLessons(lessons.pitfalls, [playbook.root_cause]);
+          if (playbook.fix) addUniqueLessons(lessons.fixes, [playbook.fix]);
+          addUniqueLessons(lessons.pitfalls, playbook.diagnosis_steps);
+          addUniqueLessons(lessons.patterns, playbook.verification_evidence);
+        }
+        lessons.pitfalls = lessons.pitfalls.slice(0, limit);
+        lessons.patterns = lessons.patterns.slice(0, limit);
+        lessons.fixes = lessons.fixes.slice(0, limit);
+      } catch {}
+    }
+
     return lessons;
   }
 
@@ -266,6 +287,7 @@ export function createExperienceStore(db, saveDb) {
 
   return {
     initSchema,
+    setPlaybookStore,
     recordExperience,
     queryExperience,
     getLessons,

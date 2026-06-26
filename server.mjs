@@ -88,6 +88,7 @@ import { createBuildRegistry } from "./src/buildRegistry.mjs";
 import {
   createAppSpec,
   generatedManifestV2,
+  injectAppHardwareSdkContracts,
   injectHardwareAppContractsV2,
   validateGeneratedFileContracts,
 } from "./src/generatedAppTemplate.mjs";
@@ -200,6 +201,7 @@ experienceStore.initSchema();
 
 const playbookStore = createPlaybookStore(db, saveDb);
 playbookStore.initSchema();
+experienceStore.setPlaybookStore?.(playbookStore);
 
 const assetLibraryStore = createAssetLibraryStore(db, saveDb);
 assetLibraryStore.initSchema();
@@ -906,10 +908,38 @@ if ! command -v arecord >/dev/null 2>&1; then
   exit 0
 fi
 pkill -f 'arecord.*vibeboard-audio' 2>/dev/null || true
+rm -f /tmp/vibeboard-audio/arecord.log
 timeout ${safeDuration}s arecord -q -f S16_LE -r 16000 -c 1 "$file" >/tmp/vibeboard-audio/arecord.log 2>&1 &
+sleep 0.35
 python3 - <<'PY'
-import json
-print(json.dumps({"ok": True, "mode": "real", "action": "record", "recording": True, "duration": ${safeDuration}, "file": ${JSON.stringify(file)}, "available_apis": ["/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"]}, ensure_ascii=False))
+import json, os, subprocess
+file = ${JSON.stringify(file)}
+recording = subprocess.run("pgrep -f 'arecord.*vibeboard-audio' >/dev/null 2>&1", shell=True).returncode == 0
+log = ""
+try:
+    with open("/tmp/vibeboard-audio/arecord.log", "r", encoding="utf-8", errors="replace") as fh:
+        log = fh.read().strip()
+except FileNotFoundError:
+    pass
+payload = {
+    "mode": "real",
+    "action": "record",
+    "recording": recording,
+    "duration": ${safeDuration},
+    "file": file,
+    "available_apis": ["/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"],
+    "diagnostics": {
+        "log": log[-1200:],
+        "fileExists": os.path.exists(file),
+        "fileSize": os.path.getsize(file) if os.path.exists(file) else 0
+    }
+}
+if recording:
+    payload["ok"] = True
+else:
+    payload["ok"] = False
+    payload["error"] = log or "arecord exited immediately; microphone did not start."
+print(json.dumps(payload, ensure_ascii=False))
 PY`;
 }
 
@@ -930,22 +960,97 @@ function normalizeRemoteAudioResult(raw, fallbackAction = "status") {
   } catch (error) {
     parsed = { ok: false, error: error.message, raw: String(raw || "") };
   }
+  const audioError = parsed.ok === false ? classifyAudioError(parsed.error || parsed.diagnostics?.log || parsed.raw || "") : {};
   const state = updateAudioState({
     mode: parsed.state?.mode || (parsed.recording ? "recording" : parsed.playing ? "playing" : "idle"),
     recording: Boolean(parsed.state?.recording ?? parsed.recording),
     playing: Boolean(parsed.state?.playing ?? parsed.playing),
     lastAction: parsed.action || fallbackAction,
     lastRecording: parsed.state?.lastRecording || parsed.file || audioState.lastRecording || "",
-    lastError: parsed.error || ""
+    lastError: parsed.error || audioError.userMessage || ""
   });
   return {
     ...audioCapabilityPayload({
       mode: parsed.mode || "real",
       skipped: false,
+      ...audioError,
       ...parsed
     }),
     state
   };
+}
+
+function classifyAudioError(message = "") {
+  const text = String(message || "");
+  if (/Unable to reach|NoValidConnectionsError|Connection refused|Connection timed out|banner exchange|No VIBEBOARD_BOARD_PASSWORD|Permission denied|Authentication failed|SSH/i.test(text)) {
+    return {
+      errorType: "audio_board_unreachable",
+      userMessage: "无法连接到板端音频接口，所以还不能确认麦克风状态。",
+      suggestion: "检查灰色版板子的 FRP/SSH 通道、端口、VIBEBOARD_BOARD_PASSWORD 或私钥配置，然后重试录音。"
+    };
+  }
+  if (/arecord not installed|not found|command not found/i.test(text)) {
+    return {
+      errorType: "audio_recorder_missing",
+      userMessage: "板端没有安装 arecord，无法调用麦克风录音。",
+      suggestion: "在板端安装 alsa-utils，或把录音适配器改成可用的系统命令。"
+    };
+  }
+  if (/Permission denied|Operation not permitted|EACCES/i.test(text)) {
+    return {
+      errorType: "audio_permission_denied",
+      userMessage: "板端录音命令被权限拦截，当前用户没有访问麦克风设备的权限。",
+      suggestion: "把运行用户加入 audio 组，检查 /dev/snd 权限，然后重启板端服务。"
+    };
+  }
+  if (/Device or resource busy|busy|EBUSY/i.test(text)) {
+    return {
+      errorType: "audio_device_busy",
+      userMessage: "麦克风设备正在被其它进程占用。",
+      suggestion: "停止占用声卡的录音/播放进程，再重新开始录音。"
+    };
+  }
+  if (/No such file or directory|cannot find card|no soundcards|Unknown PCM|No such device|ENODEV/i.test(text)) {
+    return {
+      errorType: "audio_device_missing",
+      userMessage: "板端没有识别到可用的麦克风输入设备。",
+      suggestion: "检查麦克风连接、声卡驱动和 arecord -l 输出。"
+    };
+  }
+  return {
+    errorType: "audio_record_failed",
+    userMessage: "麦克风录音没有成功启动。",
+    suggestion: "查看技术详情里的板端 arecord 日志，并检查设备、权限和占用情况。"
+  };
+}
+
+function audioFailureResponse(error, action = "status") {
+  const detail = `${error?.message || ""}\n${error?.stderr || ""}\n${error?.stdout || ""}`.trim();
+  const classified = classifyAudioError(detail);
+  const state = updateAudioState({
+    mode: "idle",
+    recording: false,
+    playing: false,
+    lastAction: action,
+    lastError: error?.message || classified.userMessage || "Audio command failed."
+  });
+  return audioCapabilityPayload({
+    ok: false,
+    mode: "real",
+    skipped: false,
+    ...classified,
+    error: error?.message || classified.userMessage || "Audio command failed.",
+    technicalDetail: detail.slice(0, 1200),
+    state
+  });
+}
+
+async function runAudioRoute(action, task) {
+  try {
+    return await task();
+  } catch (error) {
+    return audioFailureResponse(error, action);
+  }
 }
 
 async function audioStatus() {
@@ -1279,6 +1384,8 @@ function normalizeGeneratedFiles(raw, prompt, id, meta = {}) {
     files["hardware_app.py"] = generatedHardwareAppV2(prompt, id, spec);
   }
 
+  files["app.js"] = injectAppHardwareSdkContracts(files["app.js"], id);
+
   // 鍏滃簳娉ㄥ叆锛氱‘淇?hardware_app.py 杈撳嚭鍖呭惈 golden-loop 蹇呴渶瀛楁
   files["hardware_app.py"] = injectHardwareAppContractsV2(files["hardware_app.py"], id);
 
@@ -1310,7 +1417,7 @@ function templateGeneratedFiles(prompt, id, reason = "") {
     files: {
       "index.html": advanced?.["index.html"] || generatedIndexV2(prompt, id, spec),
       "style.css": advanced?.["style.css"] || generatedStyleV2(prompt, id, spec),
-      "app.js": advanced?.["app.js"] || generatedAppV2(prompt, id, spec),
+      "app.js": injectAppHardwareSdkContracts(advanced?.["app.js"] || generatedAppV2(prompt, id, spec), id),
       "hardware_app.py": generatedHardwareAppV2(prompt, id, spec),
       "manifest.json": JSON.stringify(manifest, null, 2)
     },
@@ -1802,7 +1909,7 @@ async function ensureInitialGenerated() {
       return {
         "index.html": generatedIndexV2(prompt, id, spec),
         "style.css": generatedStyleV2(prompt, id, spec),
-        "app.js": generatedAppV2(prompt, id, spec),
+        "app.js": injectAppHardwareSdkContracts(generatedAppV2(prompt, id, spec), id),
         "hardware_app.py": generatedHardwareAppV2(prompt, id, spec),
         "manifest.json": JSON.stringify(generatedManifestV2(prompt, id, spec), null, 2)
       };
@@ -1816,6 +1923,8 @@ const buildRuntime = createBuildRuntime({
   verifyAllLocal,
   createAppSpec,
   generatedManifest: generatedManifestV2,
+  injectAppHardwareSdkContracts,
+  injectHardwareAppContracts: injectHardwareAppContractsV2,
   getCurrentBuild: () => currentBuild,
   getBoard: () => BOARD,
   pythonBin: PYTHON_BIN,
@@ -2142,6 +2251,7 @@ const generateRuntime = createGenerateRuntime({
   buildId,
   createAppSpec,
   generatedHardwareApp: generatedHardwareAppV2,
+  injectAppHardwareSdkContracts,
   injectHardwareAppContracts: injectHardwareAppContractsV2,
   generatedManifest: generatedManifestV2,
   writeGenerated,
@@ -2250,25 +2360,25 @@ async function route(req, res) {
     }
     if (req.method === "GET" && url.pathname === "/api/audio/status") {
       const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
-      json(res, 200, await withDevice(deviceId, () => audioStatus()));
+      json(res, 200, await withDevice(deviceId, () => runAudioRoute("status", () => audioStatus())));
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/audio/play") {
       const body = await readBody(req);
       const deviceId = deviceIdFrom(body || {}, BOARD.id);
-      json(res, 200, await withDevice(deviceId, () => audioPlay(body || {})));
+      json(res, 200, await withDevice(deviceId, () => runAudioRoute("play", () => audioPlay(body || {}))));
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/audio/record") {
       const body = await readBody(req);
       const deviceId = deviceIdFrom(body || {}, BOARD.id);
-      json(res, 200, await withDevice(deviceId, () => audioRecord(body || {})));
+      json(res, 200, await withDevice(deviceId, () => runAudioRoute("record", () => audioRecord(body || {}))));
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/audio/stop") {
       const body = await readBody(req).catch(() => ({}));
       const deviceId = deviceIdFrom(body || {}, BOARD.id);
-      json(res, 200, await withDevice(deviceId, () => audioStop()));
+      json(res, 200, await withDevice(deviceId, () => runAudioRoute("stop", () => audioStop())));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/logs") {

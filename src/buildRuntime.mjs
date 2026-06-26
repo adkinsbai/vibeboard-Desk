@@ -24,6 +24,8 @@ export function createBuildRuntime(deps = {}) {
     verifyAllLocal,
     createAppSpec,
     generatedManifest,
+    injectAppHardwareSdkContracts = (source) => source,
+    injectHardwareAppContracts = (source) => source,
     getCurrentBuild,
     getBoard = () => ({}),
     pythonBin,
@@ -51,6 +53,24 @@ export function createBuildRuntime(deps = {}) {
     const manifestFile = path.join(currentBuild.dir, "manifest.json");
 
     currentBuild.files ||= {};
+
+    try {
+      const appSource = await fs.readFile(appFile, "utf8");
+      const contractedApp = injectAppHardwareSdkContracts(appSource, currentBuild.id);
+      if (contractedApp !== appSource) {
+        await fs.writeFile(appFile, contractedApp, "utf8");
+        currentBuild.files["app.js"] = contractedApp;
+      }
+    } catch {}
+
+    try {
+      const hardwareSource = await fs.readFile(hardwareFile, "utf8");
+      const contractedHardware = injectHardwareAppContracts(hardwareSource, currentBuild.id);
+      if (contractedHardware !== hardwareSource) {
+        await fs.writeFile(hardwareFile, contractedHardware, "utf8");
+        currentBuild.files["hardware_app.py"] = contractedHardware;
+      }
+    } catch {}
 
     try {
       const indexSource = await fs.readFile(indexFile, "utf8");
