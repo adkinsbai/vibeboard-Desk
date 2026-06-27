@@ -67,10 +67,11 @@ await withServer(async ({ baseUrl, json }) => {
 
     await page.locator("#assetUploadBtn").click();
     await page.locator("#assetImportModal.open").waitFor({ timeout: 3000 });
-    await page.locator("#assetImportKnownBtn").click();
     await page.locator("#chooseAssetFilesBtn").waitFor({ timeout: 3000 });
     const pickerReady = await page.locator("#chooseAssetFilesBtn").textContent();
     assert(pickerReady.includes("从文件夹中选取"), "asset import should expose explicit folder picker action");
+    assert(await page.locator("#assetImportKnownBtn").count() === 0, "asset import should not require an acknowledgement step");
+    assert(await page.locator(".asset-icon-row").count() === 0, "asset import intro icons should be removed");
     await page.locator("#closeAssetImportModal").click();
     await page.waitForFunction(() => !document.querySelector("#assetImportModal")?.classList.contains("open"));
 

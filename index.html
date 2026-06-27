@@ -256,25 +256,14 @@
 
   <section class="modal asset-import-modal" id="assetImportModal" aria-hidden="true" role="dialog" aria-labelledby="assetImportTitle">
     <div class="modal-panel asset-import-panel">
-      <div class="asset-import-screen" id="assetImportIntro">
-        <div class="asset-icon-row" aria-hidden="true">
-          <span>▣</span><span>▶</span><span>♪</span>
+      <button class="icon-btn asset-import-close" id="closeAssetImportModal" type="button" aria-label="Close asset import">x</button>
+      <div class="asset-import-screen asset-import-upload" id="assetImportUpload">
+        <div class="asset-import-heading">
+          <p class="kicker">Upload Assets</p>
+          <h2 id="assetImportTitle">导入资产</h2>
+          <p>您可以上传图片、视频、文本、音乐等各种参考文件来完善您的项目。</p>
         </div>
-        <h2 id="assetImportTitle">导入资产</h2>
-        <p>您可以上传图片、视频、文本、音乐等各种参考文件来完善您的项目。</p>
-        <div class="modal-actions">
-          <button class="primary-btn" id="assetImportKnownBtn" type="button">我已知晓</button>
-        </div>
-      </div>
-      <div class="asset-import-screen asset-import-upload" id="assetImportUpload" hidden>
-        <div class="drawer-head">
-          <div>
-            <p class="kicker">Upload Assets</p>
-            <h2>选择导入方式</h2>
-          </div>
-          <button class="icon-btn" id="closeAssetImportModal" type="button" aria-label="Close asset import">x</button>
-        </div>
-        <button class="primary-btn wide" id="chooseAssetFilesBtn" type="button">从文件夹中选取</button>
+        <button class="primary-btn wide asset-folder-picker-btn" id="chooseAssetFilesBtn" type="button">从文件夹中选取</button>
         <div class="asset-drop-zone" id="assetDropZone">
           <strong>拖拽文件到此位置</strong>
           <span>支持图片、视频、文本、音乐、设计文件和压缩包</span>

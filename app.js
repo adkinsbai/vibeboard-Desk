@@ -59,9 +59,7 @@ const assetUploadInput = el("assetUploadInput");
 const assetState = el("assetState");
 const agentModeSelect = el("agentModeSelect");
 const assetImportModal = el("assetImportModal");
-const assetImportIntro = el("assetImportIntro");
 const assetImportUpload = el("assetImportUpload");
-const assetImportKnownBtn = el("assetImportKnownBtn");
 const closeAssetImportModal = el("closeAssetImportModal");
 const chooseAssetFilesBtn = el("chooseAssetFilesBtn");
 const assetDropZone = el("assetDropZone");
@@ -1101,8 +1099,7 @@ function setAssetImportModal(open) {
   assetImportModal.classList.toggle("open", open);
   assetImportModal.setAttribute("aria-hidden", open ? "false" : "true");
   if (open) {
-    if (assetImportIntro) assetImportIntro.hidden = false;
-    if (assetImportUpload) assetImportUpload.hidden = true;
+    if (assetImportUpload) assetImportUpload.hidden = false;
   }
   syncScrim();
 }
@@ -2371,10 +2368,6 @@ agentModeSelect?.addEventListener("change", () => {
   addMarkdownMessage("agent", `已切换到 ${label}。我会继续只处理硬件嵌入式小屏应用相关的设计、生成、验证和部署确认。`);
 });
 assetUploadBtn?.addEventListener("click", () => setAssetImportModal(true));
-assetImportKnownBtn?.addEventListener("click", () => {
-  if (assetImportIntro) assetImportIntro.hidden = true;
-  if (assetImportUpload) assetImportUpload.hidden = false;
-});
 closeAssetImportModal?.addEventListener("click", () => setAssetImportModal(false));
 chooseAssetFilesBtn?.addEventListener("click", () => assetUploadInput?.click());
 assetUploadInput?.addEventListener("change", () => uploadAssetFiles(assetUploadInput.files));
