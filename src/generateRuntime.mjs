@@ -801,6 +801,7 @@ function buildRepairPrompt({
   embeddedAssets = emptyEmbeddedAssets(),
 } = {}) {
   const assetContext = formatEmbeddedAssetContext(embeddedAssets);
+  const hardwareFixHints = formatHardwareRepairHints(buildErr);
   return [
     "部署前 L0-L3 本地验证失败，请自动修复当前 VibeBoard 生成文件。",
     "",
@@ -809,6 +810,7 @@ function buildRepairPrompt({
     "",
     "失败证据：",
     String(buildErr?.message || buildErr || "local verification failed").slice(0, 4000),
+    hardwareFixHints,
     "",
     "修复规则：",
     "- 只修改 index.html、style.css、app.js、hardware_app.py、manifest.json。",
@@ -819,6 +821,45 @@ function buildRepairPrompt({
     "- 修复后调用 done；不要请求部署硬件。",
     assetContext,
   ].filter(Boolean).join("\n");
+}
+
+function formatHardwareRepairHints(error) {
+  const verification = error?.verification || error?.buildEvidence || error?.verificationResult || null;
+  const issues = Array.isArray(verification?.issues) ? verification.issues : [];
+  if (!issues.length) return "";
+  const lines = ["", "Hardware verification repair hints:"];
+  for (const issue of issues.slice(0, 6)) {
+    const code = String(issue.code || "UNKNOWN");
+    lines.push(`- ${code}: ${issue.message || "verification issue"}`);
+    for (const fix of (issue.suggestedFixes || []).slice(0, 3)) {
+      lines.push(`  fix: ${fix}`);
+    }
+    for (const sample of sampleIssueEvidence(issue).slice(0, 3)) {
+      lines.push(`  sample: ${sample}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function sampleIssueEvidence(issue = {}) {
+  const samples = Array.isArray(issue.evidence?.samples)
+    ? issue.evidence.samples
+    : Array.isArray(issue.evidence?.readabilityState?.lowContrastSamples)
+      ? issue.evidence.readabilityState.lowContrastSamples
+      : Array.isArray(issue.evidence?.readabilityState?.tinyTextSamples)
+        ? issue.evidence.readabilityState.tinyTextSamples
+        : [];
+  return samples.map(sample => {
+    const parts = [
+      sample.tag || "",
+      sample.id ? `#${sample.id}` : "",
+      sample.className ? `.${String(sample.className).split(/\s+/).filter(Boolean).join(".")}` : "",
+      sample.text ? `"${String(sample.text).slice(0, 50)}"` : "",
+      sample.fontSize ? `${sample.fontSize}px` : "",
+      sample.contrastRatio ? `contrast ${sample.contrastRatio}:1` : "",
+    ];
+    return parts.filter(Boolean).join(" ");
+  }).filter(Boolean);
 }
 
 function isAutoRepairableError(error) {
@@ -853,6 +894,15 @@ function shouldAskUserForRepair(errorType = "") {
 }
 
 function verificationResultFromError(error, phase = "generate") {
+  const verification = error?.verification || error?.buildEvidence || error?.verificationResult || null;
+  if (verification && typeof verification === "object") {
+    return {
+      ...verification,
+      ok: false,
+      phase: verification.phase || phase,
+      summary: verification.summary || error?.message || "Generation verification failed",
+    };
+  }
   const classified = classifyError(error, { stage: phase });
   return {
     ok: false,

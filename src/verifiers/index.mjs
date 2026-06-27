@@ -23,6 +23,10 @@ import {
 const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 10000;
 const RENDER_SETTLE_MS = 250;
+const MIN_READABLE_FONT_PX = 10;
+const MIN_INTERACTIVE_TARGET_PX = 28;
+const MIN_TEXT_CONTRAST_RATIO = 3;
+const MAX_READABILITY_SAMPLES = 12;
 const TEXT_EXTENSIONS = new Set([".html", ".css", ".js", ".json", ".py", ".txt", ".md", ".svg"]);
 
 export function verifyContracts(input = {}) {
@@ -284,6 +288,208 @@ export async function verifyRender(input = {}, options = {}) {
       };
     });
 
+    const readabilityState = await page.evaluate((config) => {
+      const tinyTextSamples = [];
+      const lowContrastSamples = [];
+      const smallInteractiveSamples = [];
+      let tinyTextCount = 0;
+      let lowContrastTextCount = 0;
+      let smallInteractiveCount = 0;
+      let visibleTextBlockCount = 0;
+      let interactiveCount = 0;
+
+      function isVisible(el) {
+        if (!el || !(el instanceof Element)) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity || 1) === 0) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0.5 && rect.height > 0.5;
+      }
+
+      function compactText(value) {
+        return String(value || "").replace(/\s+/g, " ").trim();
+      }
+
+      function directText(el) {
+        return compactText(Array.from(el.childNodes)
+          .filter(node => node.nodeType === Node.TEXT_NODE)
+          .map(node => node.textContent || "")
+          .join(" "));
+      }
+
+      function hasVisibleTextChild(el) {
+        return Array.from(el.children || []).some(child => isVisible(child) && compactText(child.innerText).length > 0);
+      }
+
+      function sampleFor(el, text, fontSize, rect) {
+        return {
+          tag: el.tagName.toLowerCase(),
+          id: el.id || "",
+          className: typeof el.className === "string" ? el.className.slice(0, 120) : "",
+          text: compactText(text).slice(0, 80),
+          fontSize,
+          color: window.getComputedStyle(el).color,
+          backgroundColor: effectiveBackgroundColor(el),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        };
+      }
+
+      function parseRgb(value) {
+        const text = String(value || "").trim();
+        if (text.toLowerCase() === "transparent") return { r: 0, g: 0, b: 0, a: 0 };
+        const match = text.match(/^rgba?\(([^)]+)\)$/i);
+        if (!match) return null;
+        const body = match[1].replace(/\s*\/\s*/g, " ").trim();
+        const parts = (body.includes(",") ? body.split(",") : body.split(/\s+/))
+          .map(part => Number.parseFloat(part.trim()));
+        if (parts.length < 3 || parts.slice(0, 3).some(part => Number.isNaN(part))) return null;
+        return {
+          r: Math.max(0, Math.min(255, parts[0])),
+          g: Math.max(0, Math.min(255, parts[1])),
+          b: Math.max(0, Math.min(255, parts[2])),
+          a: parts.length >= 4 && !Number.isNaN(parts[3]) ? Math.max(0, Math.min(1, parts[3])) : 1,
+        };
+      }
+
+      function representativeBackgroundImageColor(value) {
+        const matches = String(value || "").match(/rgba?\([^)]+\)|transparent/gi) || [];
+        const colors = matches
+          .map(item => parseRgb(item))
+          .filter(color => color && color.a > 0.01);
+        if (!colors.length) return null;
+        let total = 0;
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let alpha = 0;
+        for (const color of colors) {
+          const weight = Math.max(color.a ?? 1, 0.05);
+          r += color.r * weight;
+          g += color.g * weight;
+          b += color.b * weight;
+          total += weight;
+          alpha = Math.max(alpha, color.a ?? 1);
+        }
+        if (total <= 0) return null;
+        return { r: r / total, g: g / total, b: b / total, a: alpha };
+      }
+
+      function blend(fg, bg) {
+        const alpha = fg.a == null ? 1 : fg.a;
+        return {
+          r: fg.r * alpha + bg.r * (1 - alpha),
+          g: fg.g * alpha + bg.g * (1 - alpha),
+          b: fg.b * alpha + bg.b * (1 - alpha),
+          a: 1,
+        };
+      }
+
+      function effectiveBackgroundColor(el) {
+        const white = { r: 255, g: 255, b: 255, a: 1 };
+        const backgroundStack = [];
+        let current = el;
+        while (current && current instanceof Element) {
+          const currentStyle = window.getComputedStyle(current);
+          const imageColor = representativeBackgroundImageColor(currentStyle.backgroundImage);
+          if (imageColor && imageColor.a > 0) backgroundStack.push(imageColor);
+          const parsed = parseRgb(currentStyle.backgroundColor);
+          if (parsed && parsed.a > 0) backgroundStack.push(parsed);
+          current = current.parentElement;
+        }
+        let background = white;
+        for (const layer of backgroundStack.reverse()) {
+          background = blend(layer, background);
+        }
+        return background;
+      }
+
+      function channelLuminance(channel) {
+        const value = channel / 255;
+        return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      }
+
+      function relativeLuminance(color) {
+        return 0.2126 * channelLuminance(color.r)
+          + 0.7152 * channelLuminance(color.g)
+          + 0.0722 * channelLuminance(color.b);
+      }
+
+      function contrastRatio(fg, bg) {
+        const foreground = fg.a != null && fg.a < 1 ? blend(fg, bg) : fg;
+        const l1 = relativeLuminance(foreground);
+        const l2 = relativeLuminance(bg);
+        return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+      }
+
+      for (const el of Array.from(document.body.querySelectorAll("*"))) {
+        if (!isVisible(el)) continue;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const text = directText(el) || (!hasVisibleTextChild(el) ? compactText(el.innerText) : "");
+
+        if (text.length >= 2) {
+          const fontSize = Number.parseFloat(style.fontSize) || 0;
+          visibleTextBlockCount += 1;
+          if (fontSize > 0 && fontSize < config.minReadableFontPx) {
+            tinyTextCount += 1;
+            if (tinyTextSamples.length < config.maxSamples) {
+              tinyTextSamples.push(sampleFor(el, text, fontSize, rect));
+            }
+          }
+          const color = parseRgb(style.color);
+          const backgroundColor = effectiveBackgroundColor(el);
+          if (color && backgroundColor) {
+            const ratio = contrastRatio(color, backgroundColor);
+            if (ratio < config.minTextContrastRatio) {
+              lowContrastTextCount += 1;
+              if (lowContrastSamples.length < config.maxSamples) {
+                lowContrastSamples.push({
+                  ...sampleFor(el, text, fontSize, rect),
+                  contrastRatio: Number(ratio.toFixed(2)),
+                });
+              }
+            }
+          }
+        }
+
+        const tag = el.tagName.toLowerCase();
+        const role = String(el.getAttribute("role") || "").toLowerCase();
+        const interactive = ["button", "a", "input", "select", "textarea"].includes(tag)
+          || ["button", "link", "switch", "checkbox", "radio", "tab"].includes(role)
+          || el.hasAttribute("onclick");
+        if (interactive) {
+          interactiveCount += 1;
+          if (rect.width < config.minInteractiveTargetPx || rect.height < config.minInteractiveTargetPx) {
+            smallInteractiveCount += 1;
+            if (smallInteractiveSamples.length < config.maxSamples) {
+              smallInteractiveSamples.push(sampleFor(el, compactText(el.innerText || el.getAttribute("aria-label") || tag), Number.parseFloat(style.fontSize) || 0, rect));
+            }
+          }
+        }
+      }
+
+      return {
+        minReadableFontPx: config.minReadableFontPx,
+        minInteractiveTargetPx: config.minInteractiveTargetPx,
+        minTextContrastRatio: config.minTextContrastRatio,
+        textLength: compactText(document.body.innerText).length,
+        visibleTextBlockCount,
+        tinyTextCount,
+        tinyTextSamples,
+        lowContrastTextCount,
+        lowContrastSamples,
+        interactiveCount,
+        smallInteractiveCount,
+        smallInteractiveSamples,
+      };
+    }, {
+      minReadableFontPx: MIN_READABLE_FONT_PX,
+      minInteractiveTargetPx: MIN_INTERACTIVE_TARGET_PX,
+      minTextContrastRatio: MIN_TEXT_CONTRAST_RATIO,
+      maxSamples: MAX_READABILITY_SAMPLES,
+    });
+
     const screenshotDir = path.join(os.tmpdir(), "vibeboard-render-screenshots");
     await fs.mkdir(screenshotDir, { recursive: true });
     const screenshotPath = path.join(screenshotDir, `render-${Date.now()}-${Math.random().toString(16).slice(2)}.png`);
@@ -335,6 +541,54 @@ export async function verifyRender(input = {}, options = {}) {
       });
     }
 
+    if (readabilityState.tinyTextCount > 0) {
+      issues.push({
+        code: "TEXT_TOO_SMALL",
+        message: `Rendered page has ${readabilityState.tinyTextCount} visible text block(s) below ${MIN_READABLE_FONT_PX}px.`,
+        phase,
+        evidence: {
+          minReadableFontPx: MIN_READABLE_FONT_PX,
+          samples: readabilityState.tinyTextSamples,
+        },
+        suggestedFixes: [
+          `Use at least ${MIN_READABLE_FONT_PX}px for visible text on the 480x360 hardware screen.`,
+          "Reduce secondary metadata, spacing, or item count instead of shrinking labels below the readability floor.",
+        ],
+      });
+    }
+
+    if (readabilityState.lowContrastTextCount > 0) {
+      issues.push({
+        code: "TEXT_CONTRAST_LOW",
+        message: `Rendered page has ${readabilityState.lowContrastTextCount} visible text block(s) below ${MIN_TEXT_CONTRAST_RATIO}:1 contrast.`,
+        phase,
+        evidence: {
+          minTextContrastRatio: MIN_TEXT_CONTRAST_RATIO,
+          samples: readabilityState.lowContrastSamples,
+        },
+        suggestedFixes: [
+          `Raise text/background contrast to at least ${MIN_TEXT_CONTRAST_RATIO}:1 on the 480x360 hardware screen.`,
+          "Use stronger foreground colors, darker/lighter backing surfaces, or remove decorative low-contrast labels.",
+        ],
+      });
+    }
+
+    if (readabilityState.smallInteractiveCount > 0) {
+      issues.push({
+        code: "INTERACTIVE_TARGET_SMALL",
+        message: `Rendered page has ${readabilityState.smallInteractiveCount} visible interactive target(s) below ${MIN_INTERACTIVE_TARGET_PX}px.`,
+        phase,
+        severity: SEVERITY.WARNING,
+        evidence: {
+          minInteractiveTargetPx: MIN_INTERACTIVE_TARGET_PX,
+          samples: readabilityState.smallInteractiveSamples,
+        },
+        suggestedFixes: [
+          `Keep interactive controls at least ${MIN_INTERACTIVE_TARGET_PX}px wide and tall, or replace them with passive status indicators for no-touch hardware.`,
+        ],
+      });
+    }
+
     const badNetwork = [...failedRequests, ...responses].filter(item => {
       const url = String(item.url || "");
       return !url.startsWith("data:") && !url.startsWith("blob:");
@@ -349,17 +603,26 @@ export async function verifyRender(input = {}, options = {}) {
       });
     }
 
+    const blockingIssueCount = issues.filter(issue => issue.severity !== SEVERITY.WARNING && issue.severity !== SEVERITY.INFO).length;
+    const summary = blockingIssueCount > 0
+      ? "480x360 HTTP render failed."
+      : issues.length > 0
+        ? "480x360 HTTP render passed with hardware-fit warnings."
+        : "480x360 HTTP render passed.";
+
     return toolResult({
-      ok: issues.length === 0,
+      ok: blockingIssueCount === 0,
       phase,
-      summary: issues.length === 0 ? "480x360 HTTP render passed." : "480x360 HTTP render failed.",
+      summary,
       issues,
+      degraded: blockingIssueCount === 0 && issues.length > 0,
       evidence: {
         baseUrl,
         targetUrl,
         tmpDir,
         screenshotPath,
         pageState,
+        readabilityState,
         consoleErrors,
         pageErrors,
         failedRequests,

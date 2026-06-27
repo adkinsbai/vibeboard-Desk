@@ -2416,6 +2416,14 @@ jobRuntime.resumeQueuedJobs();
 async function route(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (req.method === "GET" && url.pathname === "/favicon.ico") {
+      res.writeHead(200, {
+        "Content-Type": "image/svg+xml; charset=utf-8",
+        "Cache-Control": "public, max-age=86400",
+      });
+      res.end('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="#08111d"/><path d="M14 18h36v28H14z" fill="#f8fbff"/><path d="M18 22h28v20H18z" fill="#0b63ce"/><circle cx="23" cy="49" r="3" fill="#43ff91"/><circle cx="32" cy="49" r="3" fill="#ffd166"/><circle cx="41" cy="49" r="3" fill="#ff2bd6"/></svg>');
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/chat/completions") {
       const body = await readBody(req);
       if (body?.model === "stub-model") {

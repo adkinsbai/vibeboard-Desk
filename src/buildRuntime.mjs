@@ -149,7 +149,9 @@ export function createBuildRuntime(deps = {}) {
         .slice(0, 5)
         .map(issue => `${issue.code}: ${issue.message}`)
         .join("; ");
-      throw new Error(`local verification failed: ${detail || verification.summary}`);
+      const error = new Error(`local verification failed: ${detail || verification.summary}`);
+      error.verification = verification;
+      throw error;
     }
 
     currentBuild.built = true;

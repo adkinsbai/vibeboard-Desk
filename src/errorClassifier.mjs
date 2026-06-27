@@ -305,7 +305,7 @@ function detectType(text, lower, context = {}) {
   if (/syntax.?error|SyntaxError|unexpected token|node --check|JavaScript parse/i.test(text)) return "syntax_error";
   if (/IndentationError|TabError|NameError|py_compile|hardware_app\.py failed|Python.*(?:error|failed)/i.test(text)) return "python_syntax";
   if (/hardware-result\.json|HARDWARE_|hardware contract|build_id mismatch|required runtime API|available_apis/i.test(text)) return "hardware_contract";
-  if (/render|480x360|LAYOUT_OVERFLOW|page error|console error|blank|white screen|requestfailed|failed resource/i.test(text)) return "render_failed";
+  if (/render|480x360|LAYOUT_OVERFLOW|TEXT_TOO_SMALL|TEXT_CONTRAST_LOW|INTERACTIVE_TARGET_SMALL|page error|console error|blank|white screen|requestfailed|failed resource/i.test(text)) return "render_failed";
   if (/no code|has no code|No generated app/i.test(text)) return "no_code";
   if (/timed?out|timeout/i.test(text)) return context.stage === "model_call" ? "llm_timeout" : "timeout";
   if (/Connection reset|Connection closed|EOFError|socket hang up/i.test(text)) return "connection_dropped";

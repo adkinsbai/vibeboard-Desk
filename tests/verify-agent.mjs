@@ -24,6 +24,14 @@ import { createPlaybookStore, signatureFromIssues } from "../src/playbookStore.m
 import { createJobStore } from "../src/jobStore.mjs";
 import { createJobRuntime } from "../src/jobRuntime.mjs";
 import { classifyError } from "../src/errorClassifier.mjs";
+import { createAppSpec, generatedManifestV2 } from "../src/generatedAppTemplate.mjs";
+import {
+  advancedTemplateFilesV2,
+  generatedAppV2,
+  generatedHardwareAppV2,
+  generatedIndexV2,
+  generatedStyleV2,
+} from "../src/generatedAppTemplatesV2.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NODE_BIN = process.env.VIBEBOARD_NODE || "node";
@@ -146,6 +154,18 @@ print(json.dumps(payload))
       name: "VibeBoard Test",
       files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"],
     }, null, 2),
+  };
+}
+
+function templateFilesForPrompt(prompt, id = "vb-template-test") {
+  const spec = createAppSpec(prompt, id);
+  const specialized = advancedTemplateFilesV2(prompt, id, spec);
+  return specialized || {
+    "index.html": generatedIndexV2(prompt, id, spec),
+    "style.css": generatedStyleV2(prompt, id, spec),
+    "app.js": generatedAppV2(prompt, id, spec),
+    "hardware_app.py": generatedHardwareAppV2(prompt, id, spec),
+    "manifest.json": JSON.stringify(generatedManifestV2(prompt, id, spec), null, 2),
   };
 }
 
@@ -680,6 +700,8 @@ await test("error classifier returns actionable generation failure details", asy
   const render = classifyError(new Error("480x360 HTTP render failed. LAYOUT_OVERFLOW"));
   assert(render.errorType === "render_failed", `expected render_failed, got ${JSON.stringify(render)}`);
   assert(render.errorStage === "local_verify", "render error should point to local verification");
+  const contrast = classifyError(new Error("local verification failed: TEXT_CONTRAST_LOW: Rendered page has low contrast text."));
+  assert(contrast.errorType === "render_failed", `expected contrast error to be render_failed, got ${JSON.stringify(contrast)}`);
 
   const busy = classifyError(createStructuredError("Another generation is already running.", "generate_busy"));
   assert(busy.statusCode === 409, "busy generation should be an HTTP 409 conflict");
@@ -2789,6 +2811,9 @@ await test("generate runtime auto-repairs local verification failures before ret
         }
         assert(prompt.includes("部署前 L0-L3 本地验证失败"), "repair prompt should include local verification failure framing");
         assert(prompt.includes("local verification failed"), "repair prompt should include build failure evidence");
+        assert(prompt.includes("TEXT_CONTRAST_LOW"), "repair prompt should include hardware verification issue codes");
+        assert(prompt.includes("Raise text/background contrast"), "repair prompt should include verifier suggested fixes");
+        assert(prompt.includes("contrast 1.8:1"), "repair prompt should include sampled failing text evidence");
         return {
           success: true,
           summary: "repair applied",
@@ -2803,7 +2828,30 @@ await test("generate runtime auto-repairs local verification failures before ret
       generatedManifest: (_prompt, id) => ({ id, files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
       buildCurrent: async () => {
         buildCalls += 1;
-        if (buildCalls === 1) throw new Error("local verification failed: LAYOUT_OVERFLOW: screen overflows 480x360");
+        if (buildCalls === 1) {
+          const error = new Error("local verification failed: TEXT_CONTRAST_LOW: Rendered page has 1 visible text block below 3:1 contrast.");
+          error.verification = {
+            ok: false,
+            phase: "local_verification",
+            summary: "Local render verification failed",
+            issues: [{
+              code: "TEXT_CONTRAST_LOW",
+              message: "Rendered page has 1 visible text block below 3:1 contrast.",
+              phase: "render",
+              suggestedFixes: ["Raise text/background contrast to at least 3:1 on the 480x360 hardware screen."],
+              evidence: {
+                samples: [{
+                  tag: "span",
+                  id: "service",
+                  text: "mock",
+                  fontSize: 11,
+                  contrastRatio: 1.8,
+                }],
+              },
+            }],
+          };
+          throw error;
+        }
         currentBuild.built = true;
         currentBuild.buildEvidence = { ok: true, issues: [], phase: "local_verify", summary: "L0-L3 local verification passed" };
         currentBuild.intelligenceSummary = { confidence: "local_verified", nextBestAction: "deploy_to_board" };
@@ -3430,6 +3478,94 @@ if (!verifier) {
     const result = await mod.verifyRender(files, { timeoutMs: 15000 });
     assert(result.ok === false, "overflowing render should fail verification");
     assert(result.issues.some(issue => issue.code === "LAYOUT_OVERFLOW"), `expected LAYOUT_OVERFLOW, got ${JSON.stringify(result.issues)}`);
+  });
+
+  await test("verifyRender rejects unreadably small hardware text", async () => {
+    const mod = await importVerifiers();
+    const files = validGeneratedFiles();
+    files["style.css"] = "html, body { width: 480px; height: 360px; overflow: hidden; margin: 0; } #screen { width: 480px; height: 360px; overflow: hidden; background: #101820; color: #f7f7f2; } .micro { font-size: 7px; }";
+    files["app.js"] = files["app.js"].replace(
+      "screen.textContent = JSON.stringify({ status, program });",
+      "screen.innerHTML = '<p class=\"micro\">tiny diagnostics that would be unreadable on hardware</p>';",
+    );
+    const result = await mod.verifyRender(files, { timeoutMs: 15000 });
+    assert(result.ok === false, "tiny text should fail render verification");
+    assert(result.issues.some(issue => issue.code === "TEXT_TOO_SMALL"), `expected TEXT_TOO_SMALL, got ${JSON.stringify(result.issues)}`);
+  });
+
+  await test("verifyRender rejects low-contrast hardware text", async () => {
+    const mod = await importVerifiers();
+    const files = validGeneratedFiles();
+    files["style.css"] = "html, body { width: 480px; height: 360px; overflow: hidden; margin: 0; } #screen { width: 480px; height: 360px; overflow: hidden; background: #202020; color: #2a2a2a; font-size: 14px; }";
+    files["app.js"] = files["app.js"].replace(
+      "screen.textContent = JSON.stringify({ status, program });",
+      "screen.innerHTML = '<p>low contrast status text</p>';",
+    );
+    const result = await mod.verifyRender(files, { timeoutMs: 15000 });
+    assert(result.ok === false, "low contrast text should fail render verification");
+    assert(result.issues.some(issue => issue.code === "TEXT_CONTRAST_LOW"), `expected TEXT_CONTRAST_LOW, got ${JSON.stringify(result.issues)}`);
+  });
+
+  await test("verifyRender blends translucent panels against dark hardware backgrounds", async () => {
+    const mod = await importVerifiers();
+    const files = validGeneratedFiles();
+    files["style.css"] = "html, body { width: 480px; height: 360px; overflow: hidden; margin: 0; background: #08111d; } #screen { width: 480px; height: 360px; overflow: hidden; background: #08111d; color: #f8fbff; font-size: 14px; } .chip { display: inline-block; padding: 8px 10px; background: rgba(255,255,255,.08); color: #f8fbff; }";
+    files["app.js"] = files["app.js"].replace(
+      "screen.textContent = JSON.stringify({ status, program });",
+      "screen.innerHTML = '<span class=\"chip\">SYSTEM BUS</span>';",
+    );
+    const result = await mod.verifyRender(files, { timeoutMs: 15000 });
+    assert(result.ok === true, `translucent panel text should pass against its effective dark background: ${JSON.stringify(result.issues)}`);
+    assert(!result.issues.some(issue => issue.code === "TEXT_CONTRAST_LOW"), `expected no low contrast issue, got ${JSON.stringify(result.issues)}`);
+  });
+
+  await test("verifyRender accepts generated dashboard template contrast", async () => {
+    const mod = await importVerifiers();
+    const files = templateFilesForPrompt("offline acceptance dashboard");
+    const result = await mod.verifyRender(files, { timeoutMs: 15000 });
+    assert(result.ok === true, `generated dashboard template should pass render verification: ${JSON.stringify(result.issues)}`);
+    assert(!result.issues.some(issue => issue.code === "TEXT_CONTRAST_LOW"), `expected no low contrast issue, got ${JSON.stringify(result.issues)}`);
+  });
+
+  await test("verifyRender accepts generated weather template contrast", async () => {
+    const mod = await importVerifiers();
+    const files = templateFilesForPrompt("preview restore weather panel");
+    const result = await mod.verifyRender(files, { timeoutMs: 15000 });
+    assert(result.ok === true, `generated weather template should pass render verification: ${JSON.stringify(result.issues)}`);
+    assert(!result.issues.some(issue => issue.code === "TEXT_CONTRAST_LOW"), `expected no low contrast issue, got ${JSON.stringify(result.issues)}`);
+  });
+
+  await test("verifyRender accepts generated template mode contrast matrix", async () => {
+    const mod = await importVerifiers();
+    const prompts = [
+      "assistant status panel",
+      "server dashboard status panel",
+      "voice audio console",
+      "focus timer countdown",
+      "gpio relay control panel",
+      "weather panel",
+      "fullscreen clock",
+      "image carousel slideshow",
+    ];
+    for (const prompt of prompts) {
+      const result = await mod.verifyRender(templateFilesForPrompt(prompt), { timeoutMs: 15000 });
+      assert(result.ok === true, `${prompt} should pass render verification: ${JSON.stringify(result.issues)}`);
+      assert(!result.issues.some(issue => issue.code === "TEXT_TOO_SMALL" || issue.code === "TEXT_CONTRAST_LOW"), `${prompt} should not have hardware readability issues: ${JSON.stringify(result.issues)}`);
+    }
+  });
+
+  await test("verifyRender warns but does not fail for tiny interactive targets", async () => {
+    const mod = await importVerifiers();
+    const files = validGeneratedFiles();
+    files["style.css"] = "html, body { width: 480px; height: 360px; overflow: hidden; margin: 0; } #screen { width: 480px; height: 360px; overflow: hidden; background: #101820; color: #f7f7f2; font-size: 14px; } button { width: 20px; height: 20px; font-size: 12px; }";
+    files["app.js"] = files["app.js"].replace(
+      "screen.textContent = JSON.stringify({ status, program });",
+      "screen.innerHTML = '<button aria-label=\"refresh\">R</button><p>Readable status panel</p>';",
+    );
+    const result = await mod.verifyRender(files, { timeoutMs: 15000 });
+    assert(result.ok === true, `tiny touch target should be warning-only for no-touch hardware: ${JSON.stringify(result.issues)}`);
+    assert(result.degraded === true, "tiny interactive target should mark render result degraded");
+    assert(result.issues.some(issue => issue.code === "INTERACTIVE_TARGET_SMALL" && issue.severity === "warning"), `expected INTERACTIVE_TARGET_SMALL warning, got ${JSON.stringify(result.issues)}`);
   });
 }
 

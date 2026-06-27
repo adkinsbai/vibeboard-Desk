@@ -220,6 +220,22 @@ footer,
   text-shadow: none;
 }
 
+.mode-weather .hud span,
+.mode-weather .weather-hero span,
+.mode-weather .weather-hero small,
+.mode-weather .metrics span,
+.mode-weather footer,
+.mode-weather footer span {
+  color: #0b3a75;
+}
+
+.mode-weather .hud b,
+.mode-weather .action {
+  color: #063f84;
+  background: rgba(255,255,255,.68);
+  border-color: rgba(7,87,184,.38);
+}
+
 .hud b {
   max-width: 178px;
   min-height: 28px;
