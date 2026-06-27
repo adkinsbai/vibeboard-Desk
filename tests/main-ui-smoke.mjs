@@ -64,6 +64,18 @@ await withServer(async ({ baseUrl, json }) => {
     await page.waitForFunction(count => document.querySelectorAll(".conv-item").length > count, beforeCreate);
     const afterCreate = await page.locator(".conv-item").count();
     assert(afterCreate > beforeCreate, "busy state should not block new conversation creation");
+    const createdProjectId = await page.locator(".conv-item.active").getAttribute("data-id");
+    await json(`/api/conversations/${createdProjectId}/assets`, {
+      method: "POST",
+      body: JSON.stringify({
+        assets: [{
+          name: "ui-smoke.png",
+          mime: "image/png",
+          encoding: "base64",
+          content: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64"),
+        }],
+      }),
+    });
 
     await page.locator("#assetUploadBtn").click();
     await page.locator("#assetImportModal.open").waitFor({ timeout: 3000 });
@@ -88,7 +100,19 @@ await withServer(async ({ baseUrl, json }) => {
     const folderCount = await page.locator(".asset-folder-tile").count();
     assert(folderCount >= 4, "asset manager should show default category folders");
     await page.locator(".asset-folder-tile").first().dblclick();
-    await page.waitForFunction(() => document.querySelector("#assetBreadcrumb")?.textContent?.includes(">"));
+    await page.locator(".asset-breadcrumb-current").waitFor({ timeout: 3000 });
+    await page.locator("[data-asset-breadcrumb-root]").click();
+    await page.waitForFunction(() => !document.querySelector(".asset-breadcrumb-current"));
+    await page.locator(".asset-folder-tile").first().dblclick();
+    await page.locator(".asset-file-row").first().waitFor({ timeout: 3000 });
+    await page.locator(".asset-file-row").first().click({ button: "right" });
+    await page.locator("#assetContextMenu:not([hidden])").waitFor({ timeout: 3000 });
+    await page.locator('[data-asset-menu-action="properties"]').click();
+    await page.locator("#assetPropertiesModal.open").waitFor({ timeout: 3000 });
+    const propertiesText = await page.locator("#assetPropertiesBody").textContent();
+    assert(propertiesText.includes("ui-smoke.png") && propertiesText.includes("image/png"), "asset properties should show file name and MIME type");
+    await page.locator("#closeAssetPropertiesModal").click();
+    await page.waitForFunction(() => !document.querySelector("#assetPropertiesModal")?.classList.contains("open"));
 
     await page.evaluate(() => window.setBusy(false));
     await page.locator("#promptInput").fill("Enter should submit from the main composer");

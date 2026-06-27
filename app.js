@@ -76,6 +76,10 @@ const newAssetFolderBtn = el("newAssetFolderBtn");
 const renameAssetItemBtn = el("renameAssetItemBtn");
 const deleteAssetItemBtn = el("deleteAssetItemBtn");
 const assetTableHead = el("assetTableHead");
+const assetContextMenu = el("assetContextMenu");
+const assetPropertiesModal = el("assetPropertiesModal");
+const closeAssetPropertiesModal = el("closeAssetPropertiesModal");
+const assetPropertiesBody = el("assetPropertiesBody");
 const projectCreateModal = el("projectCreateModal");
 const closeProjectCreateModal = el("closeProjectCreateModal");
 const cancelProjectCreate = el("cancelProjectCreate");
@@ -95,6 +99,7 @@ let assetManagerSelectedConversationId = "";
 let assetManagerCurrentFolderId = "";
 let assetManagerSelection = null;
 let assetManagerCache = { folders: [], assets: [], projectFiles: [] };
+let assetContextTarget = null;
 
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
 const DEVICE_STORAGE_KEY = "vibeboard-active-device";
@@ -1045,6 +1050,7 @@ function syncScrim() {
     isOpen(statusDrawer) ||
     isOpen(jobDrawer) ||
     isOpen(assetManagerDrawer) ||
+    isOpen(assetPropertiesModal) ||
     isOpen(projectCreateModal) ||
     isOpen(assetImportModal) ||
     isOpen(modelModal) ||
@@ -1104,6 +1110,13 @@ function setAssetImportModal(open) {
   syncScrim();
 }
 
+function setAssetPropertiesModal(open) {
+  if (!assetPropertiesModal) return;
+  assetPropertiesModal.classList.toggle("open", open);
+  assetPropertiesModal.setAttribute("aria-hidden", open ? "false" : "true");
+  syncScrim();
+}
+
 function setModelModal(open) {
   if (!modelModal) return;
   modelModal.classList.toggle("open", open);
@@ -1120,6 +1133,7 @@ function closeDrawers() {
   setStatusDrawer(false);
   setJobDrawer(false);
   setAssetManagerDrawer(false);
+  setAssetPropertiesModal(false);
   setProjectCreateModal(false);
   setAssetImportModal(false);
   setModelModal(false);
@@ -2394,6 +2408,12 @@ assetBackBtn?.addEventListener("click", () => {
 newAssetFolderBtn?.addEventListener("click", () => createManagedFolder());
 renameAssetItemBtn?.addEventListener("click", () => renameSelectedAssetItem());
 deleteAssetItemBtn?.addEventListener("click", () => deleteSelectedAssetItem());
+assetContextMenu?.addEventListener("click", event => {
+  const button = event.target.closest("[data-asset-menu-action]");
+  if (!button) return;
+  handleAssetContextAction(button.dataset.assetMenuAction || "");
+});
+closeAssetPropertiesModal?.addEventListener("click", () => setAssetPropertiesModal(false));
 closeProjectCreateModal?.addEventListener("click", () => setProjectCreateModal(false));
 cancelProjectCreate?.addEventListener("click", () => setProjectCreateModal(false));
 projectCreateForm?.addEventListener("submit", event => {
@@ -2426,6 +2446,16 @@ clearModelSettings?.addEventListener("click", () => {
   syncModelUi();
 });
 scrim?.addEventListener("click", closeDrawers);
+document.addEventListener("click", event => {
+  if (!assetContextMenu || assetContextMenu.hidden) return;
+  if (event.target.closest("#assetContextMenu")) return;
+  hideAssetContextMenu();
+});
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  hideAssetContextMenu();
+  if (isOpen(assetPropertiesModal)) setAssetPropertiesModal(false);
+});
 
 document.querySelectorAll("[data-prompt]").forEach(button => {
   button.addEventListener("click", () => {
@@ -2660,7 +2690,9 @@ async function loadAssetManagerConversation(conversationId) {
   const assetData = await assetRes.json();
   const filesData = await filesRes.json();
   if (assetManagerPath) {
-    assetManagerPath.textContent = filesData.project_dir || "项目文件夹尚未创建";
+    const projectDir = filesData.project_dir || "项目文件夹尚未创建";
+    assetManagerPath.textContent = `项目文件夹：${projectDir}`;
+    assetManagerPath.title = projectDir;
   }
   assetManagerCache = {
     folders: assetData.ok ? assetData.folders || [] : [],
@@ -2673,9 +2705,11 @@ async function loadAssetManagerConversation(conversationId) {
 function renderAssetManagerExplorer() {
   if (!assetFileList) return;
   assetManagerSelection = null;
+  hideAssetContextMenu();
   const currentFolder = currentAssetFolder();
   if (assetBreadcrumb) {
-    assetBreadcrumb.textContent = currentFolder ? `资产 > ${currentFolder.name}` : "资产";
+    assetBreadcrumb.innerHTML = assetBreadcrumbMarkup(currentFolder);
+    assetBreadcrumb.querySelector("[data-asset-breadcrumb-root]")?.addEventListener("click", () => openAssetFolder(""));
   }
   if (assetBackBtn) assetBackBtn.disabled = !currentFolder;
   if (newAssetFolderBtn) newAssetFolderBtn.disabled = Boolean(currentFolder);
@@ -2690,6 +2724,11 @@ function renderAssetManagerExplorer() {
     assetFileList.querySelectorAll("[data-folder-open]").forEach(item => {
       item.addEventListener("dblclick", () => openAssetFolder(item.dataset.folderOpen));
       item.addEventListener("click", () => selectAssetManagerItem("folder", item.dataset.folderOpen));
+      item.addEventListener("contextmenu", event => {
+        event.preventDefault();
+        selectAssetManagerItem("folder", item.dataset.folderOpen);
+        showAssetContextMenu(event, "folder", item.dataset.folderOpen);
+      });
     });
     return;
   }
@@ -2701,11 +2740,22 @@ function renderAssetManagerExplorer() {
     : `<div class="asset-empty-state">此文件夹为空。导入资产后会自动归类到这里。</div>`;
   assetFileList.querySelectorAll("[data-asset-row]").forEach(row => {
     row.addEventListener("click", () => selectAssetManagerItem("asset", row.dataset.assetRow));
+    row.addEventListener("contextmenu", event => {
+      event.preventDefault();
+      selectAssetManagerItem("asset", row.dataset.assetRow);
+      showAssetContextMenu(event, "asset", row.dataset.assetRow);
+    });
   });
   assetFileList.querySelectorAll("[data-asset-usage]").forEach(select => {
     select.addEventListener("click", event => event.stopPropagation());
     select.addEventListener("change", () => updateManagedAsset(assetManagerSelectedConversationId, select.dataset.assetUsage, { usage: select.value }));
   });
+}
+
+function assetBreadcrumbMarkup(currentFolder = null) {
+  const rootButton = `<button class="asset-breadcrumb-link" type="button" data-asset-breadcrumb-root>资产</button>`;
+  if (!currentFolder) return rootButton;
+  return `${rootButton}<span class="asset-breadcrumb-separator">›</span><span class="asset-breadcrumb-current">${escapeHtml(currentFolder.name)}</span>`;
 }
 
 function currentAssetFolder() {
@@ -2762,6 +2812,79 @@ function selectedFolder() {
 function selectedAsset() {
   if (assetManagerSelection?.type !== "asset") return null;
   return (assetManagerCache.assets || []).find(asset => asset.id === assetManagerSelection.id) || null;
+}
+
+function selectedAssetManagerItem() {
+  return selectedFolder() || selectedAsset();
+}
+
+function showAssetContextMenu(event, type, id) {
+  if (!assetContextMenu) return;
+  assetContextTarget = { type, id };
+  assetContextMenu.hidden = false;
+  assetContextMenu.classList.add("open");
+  const menuRect = assetContextMenu.getBoundingClientRect();
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const left = Math.min(event.clientX + 8, Math.max(8, viewportWidth - menuRect.width - 8));
+  const top = Math.min(event.clientY + 8, Math.max(8, viewportHeight - menuRect.height - 8));
+  assetContextMenu.style.left = `${left}px`;
+  assetContextMenu.style.top = `${top}px`;
+}
+
+function hideAssetContextMenu() {
+  if (!assetContextMenu) return;
+  assetContextMenu.hidden = true;
+  assetContextMenu.classList.remove("open");
+  assetContextTarget = null;
+}
+
+function handleAssetContextAction(action = "") {
+  if (assetContextTarget) {
+    selectAssetManagerItem(assetContextTarget.type, assetContextTarget.id);
+  }
+  hideAssetContextMenu();
+  if (action === "rename") {
+    renameSelectedAssetItem();
+  } else if (action === "delete") {
+    deleteSelectedAssetItem();
+  } else if (action === "properties") {
+    showSelectedAssetProperties();
+  }
+}
+
+function showSelectedAssetProperties() {
+  const item = selectedAssetManagerItem();
+  if (!item || !assetPropertiesBody) return;
+  const rows = assetPropertiesRows(item);
+  assetPropertiesBody.innerHTML = rows.map(([label, value]) => `
+    <div class="asset-property-row">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value || "-")}</strong>
+    </div>
+  `).join("");
+  setAssetPropertiesModal(true);
+}
+
+function assetPropertiesRows(item = {}) {
+  if (assetManagerSelection?.type === "folder") {
+    return [
+      ["名称", item.name || "文件夹"],
+      ["类型", item.system ? "系统文件夹" : "自定义文件夹"],
+      ["文件数量", `${item.asset_count || 0} 个文件`],
+      ["总大小", formatBytes(item.total_bytes || 0)],
+      ["路径", item.name ? `资产 > ${item.name}` : "资产"],
+    ];
+  }
+  return [
+    ["名称", item.name || "asset"],
+    ["类型", assetKindLabel(item.kind)],
+    ["MIME", item.mime || ""],
+    ["大小", formatBytes(item.size || 0)],
+    ["使用方式", assetUsageLabel(item.usage || "auto")],
+    ["项目路径", item.project_path || ""],
+    ["SHA-256", item.sha256 || ""],
+  ];
 }
 
 function assetUsageLabel(value) {

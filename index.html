@@ -210,17 +210,19 @@
       </section>
       <section class="asset-files-pane">
         <div class="asset-manager-toolbar">
-          <div>
+          <div class="asset-manager-titlebar">
             <div class="asset-section-title">文件管理</div>
-            <p id="assetManagerPath">选择一个项目查看资产文件夹</p>
-            <div class="asset-breadcrumb" id="assetBreadcrumb">资产</div>
+            <p class="asset-manager-path" id="assetManagerPath">选择一个项目查看资产文件夹</p>
           </div>
-          <div class="asset-command-bar">
-            <button class="ghost-btn" id="assetBackBtn" type="button">返回</button>
-            <button class="ghost-btn" id="newAssetFolderBtn" type="button">新建文件夹</button>
-            <button class="ghost-btn" id="renameAssetItemBtn" type="button">重命名</button>
-            <button class="ghost-btn danger" id="deleteAssetItemBtn" type="button">删除</button>
-            <button class="ghost-btn" id="refreshAssetManagerBtn" type="button">刷新</button>
+          <div class="asset-nav-row">
+            <div class="asset-breadcrumb" id="assetBreadcrumb" aria-label="资产路径">资产</div>
+            <div class="asset-command-bar">
+              <button class="ghost-btn" id="assetBackBtn" type="button">返回</button>
+              <button class="ghost-btn" id="newAssetFolderBtn" type="button">新建文件夹</button>
+              <button class="ghost-btn" id="renameAssetItemBtn" type="button">重命名</button>
+              <button class="ghost-btn danger" id="deleteAssetItemBtn" type="button">删除</button>
+              <button class="ghost-btn" id="refreshAssetManagerBtn" type="button">刷新</button>
+            </div>
           </div>
         </div>
         <div class="asset-table-head" id="assetTableHead">
@@ -230,6 +232,25 @@
       </section>
     </div>
   </aside>
+
+  <div class="asset-context-menu" id="assetContextMenu" role="menu" hidden>
+    <button type="button" role="menuitem" data-asset-menu-action="rename">重命名</button>
+    <button type="button" role="menuitem" data-asset-menu-action="delete">删除</button>
+    <button type="button" role="menuitem" data-asset-menu-action="properties">查看属性</button>
+  </div>
+
+  <section class="modal asset-properties-modal" id="assetPropertiesModal" aria-hidden="true" role="dialog" aria-labelledby="assetPropertiesTitle">
+    <div class="modal-panel asset-properties-panel">
+      <div class="drawer-head">
+        <div>
+          <p class="kicker">Properties</p>
+          <h2 id="assetPropertiesTitle">属性</h2>
+        </div>
+        <button class="icon-btn" id="closeAssetPropertiesModal" type="button" aria-label="Close asset properties">x</button>
+      </div>
+      <div class="asset-properties-body" id="assetPropertiesBody"></div>
+    </div>
+  </section>
 
   <section class="modal project-create-modal" id="projectCreateModal" aria-hidden="true" role="dialog" aria-labelledby="projectCreateTitle">
     <div class="modal-panel">
