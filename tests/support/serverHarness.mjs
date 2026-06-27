@@ -55,8 +55,10 @@ export async function withServer(fn, options = {}) {
   const dbPrefix = options.dbPrefix || "vibeboard-test";
   const dbPath = new URL(`${dbPrefix}-${randomUUID()}.db`, RUNTIME_URL);
   const generatedDir = new URL(`${dbPrefix}-${randomUUID()}-generated/`, RUNTIME_URL);
+  const projectsDir = new URL(`${dbPrefix}-${randomUUID()}-projects/`, RUNTIME_URL);
   await fs.mkdir(RUNTIME_URL, { recursive: true });
   await fs.mkdir(generatedDir, { recursive: true });
+  await fs.mkdir(projectsDir, { recursive: true });
 
   const child = spawn(process.execPath, ["server.mjs"], {
     cwd: ROOT_URL,
@@ -67,6 +69,7 @@ export async function withServer(fn, options = {}) {
       VIBEBOARD_PORT: String(port),
       VIBEBOARD_DB_PATH: fileURLToPath(dbPath),
       VIBEBOARD_GENERATED_DIR: fileURLToPath(generatedDir),
+      VIBEBOARD_PROJECTS_DIR: fileURLToPath(projectsDir),
     },
     stdio: options.stdio || "ignore",
     windowsHide: true,
@@ -79,6 +82,7 @@ export async function withServer(fn, options = {}) {
     await stopChild(child);
     await fs.rm(dbPath, { force: true }).catch(() => {});
     await fs.rm(generatedDir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(projectsDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 

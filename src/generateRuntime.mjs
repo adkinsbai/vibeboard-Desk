@@ -66,6 +66,7 @@ export function createGenerateRuntime(deps = {}) {
     generatedDir,
     getCurrentBuild = () => null,
     setCurrentBuild,
+    projectWorkspace = null,
     formatMemoryForPrompt = formatProjectMemoryForPrompt,
     log = console,
   } = deps;
@@ -102,6 +103,7 @@ export function createGenerateRuntime(deps = {}) {
       const assetContext = conversationId && assetLibraryStore?.promptContext
         ? assetLibraryStore.promptContext(conversationId)
         : "";
+      const projectFilesContext = await formatProjectFilesContext(projectWorkspace, conversationId);
       const embeddedAssets = conversationId && assetLibraryStore?.generatedAssets
         ? assetLibraryStore.generatedAssets(conversationId)
         : emptyEmbeddedAssets();
@@ -113,7 +115,7 @@ export function createGenerateRuntime(deps = {}) {
       const history = await compressHistory(normalizedHistory, settings);
       const userPreferences = memoryStore.getAll();
       const prompt = buildRefinedPrompt(
-        `${rawPrompt}${formatMemoryForPrompt(projectMemory)}${formatAgentModeForPrompt(agentMode)}${assetContext}${formatEmbeddedAssetContext(embeddedAssets)}`,
+        `${rawPrompt}${formatMemoryForPrompt(projectMemory)}${formatAgentModeForPrompt(agentMode)}${assetContext}${projectFilesContext}${formatEmbeddedAssetContext(embeddedAssets)}`,
         clarifyAnswers,
         userPreferences,
       );
@@ -171,7 +173,7 @@ export function createGenerateRuntime(deps = {}) {
           agentStartedAt,
         }),
         templateGenerate: async () => runTemplateGenerate({ prompt, modelSettings, embeddedAssets }),
-        saveSnapshot: async state => saveSnapshot({ state, conversationId }),
+        saveSnapshot: async state => saveSnapshot({ state, conversationId, embeddedAssets, rawPrompt }),
       });
     } catch (error) {
       const classified = classifyError(error, { stage: "generate" });
@@ -631,14 +633,27 @@ export function createGenerateRuntime(deps = {}) {
     };
   }
 
-  async function saveSnapshot({ state, conversationId }) {
+  async function saveSnapshot({ state, conversationId, embeddedAssets, rawPrompt }) {
     if (!conversationId) return;
     try {
+      const files = await filesWithHardwareResult(state.result.files);
       conversationStore.saveConversationFiles(
         conversationId,
         state.result.id,
-        await filesWithHardwareResult(state.result.files),
+        files,
       );
+      assetLibraryStore?.recordBuildSnapshot?.(conversationId, state.result.id, embeddedAssets);
+      await projectWorkspace?.writeBuildSnapshot?.(
+        conversationId,
+        state.result.id,
+        files,
+        Array.isArray(embeddedAssets?.items) ? embeddedAssets.items : [],
+      );
+      await projectWorkspace?.writeMemory?.(conversationId, {
+        trigger: "generate-snapshot",
+        buildId: state.result.id,
+        prompt: rawPrompt || state.result.prompt || "",
+      });
     } catch (saveErr) {
       await appendServerLog(`generate.${state.result.source}.conversation_save_failed`, {
         id: state.result.id,
@@ -758,6 +773,24 @@ function formatAgentModeForPrompt(agentMode = "vibeboard") {
   return `\n\n## Agent execution mode\n${mode === "codex"
     ? "Codex hardware embedded design mode. Stay strictly inside VibeBoard 480x360 hardware UI generation, local verification, and deploy-confirmation boundaries."
     : "VibeBoard self-developed Agent mode. Use the local VibeBoard generator and hardware contracts."}`;
+}
+
+async function formatProjectFilesContext(projectWorkspace, conversationId = "") {
+  if (!conversationId || !projectWorkspace?.listProjectFiles) return "";
+  try {
+    const files = await projectWorkspace.listProjectFiles(conversationId);
+    if (!files.length) return "";
+    const lines = [
+      "## Project folder files",
+      "This project has a persistent local folder. You may use MEMORY.md, assets, and build snapshots as project context. For binary files, rely on the asset library summary unless the user explicitly asks to inspect the file.",
+    ];
+    for (const file of files.slice(0, 80)) {
+      lines.push(`- ${file.path} (${file.size || 0} bytes)`);
+    }
+    return `\n\n${lines.join("\n")}`;
+  } catch {
+    return "";
+  }
 }
 
 function buildRepairPrompt({

@@ -58,6 +58,26 @@ const assetUploadBtn = el("assetUploadBtn");
 const assetUploadInput = el("assetUploadInput");
 const assetState = el("assetState");
 const agentModeSelect = el("agentModeSelect");
+const assetImportModal = el("assetImportModal");
+const assetImportIntro = el("assetImportIntro");
+const assetImportUpload = el("assetImportUpload");
+const assetImportKnownBtn = el("assetImportKnownBtn");
+const closeAssetImportModal = el("closeAssetImportModal");
+const chooseAssetFilesBtn = el("chooseAssetFilesBtn");
+const assetDropZone = el("assetDropZone");
+const assetManagerBtn = el("assetManagerBtn");
+const assetManagerDrawer = el("assetManagerDrawer");
+const closeAssetManagerDrawer = el("closeAssetManagerDrawer");
+const refreshAssetManagerBtn = el("refreshAssetManagerBtn");
+const assetProjectList = el("assetProjectList");
+const assetFileList = el("assetFileList");
+const assetManagerPath = el("assetManagerPath");
+const projectCreateModal = el("projectCreateModal");
+const closeProjectCreateModal = el("closeProjectCreateModal");
+const cancelProjectCreate = el("cancelProjectCreate");
+const projectCreateForm = el("projectCreateForm");
+const projectNameInput = el("projectNameInput");
+const projectRootHint = el("projectRootHint");
 
 let generatedFiles = {};
 let activeFile = "";
@@ -67,6 +87,7 @@ let conversationInitPromise = null;
 let conversationLoadToken = 0;
 let jobsPollTimer = null;
 let activeJobWaiters = new Set();
+let assetManagerSelectedConversationId = "";
 
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
 const DEVICE_STORAGE_KEY = "vibeboard-active-device";
@@ -659,12 +680,12 @@ function withDevicePayload(payload = {}) {
   return { ...payload, deviceId: activeDeviceId };
 }
 
-async function postJson(url, payload = {}, { timeout = 120000 } = {}) {
+async function postJson(url, payload = {}, { timeout = 120000, method = "POST" } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
     const res = await fetch(url, {
-      method: "POST",
+      method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(withDevicePayload(payload)),
       signal: controller.signal
@@ -1016,6 +1037,9 @@ function syncScrim() {
     isOpen(codeDrawer) ||
     isOpen(statusDrawer) ||
     isOpen(jobDrawer) ||
+    isOpen(assetManagerDrawer) ||
+    isOpen(projectCreateModal) ||
+    isOpen(assetImportModal) ||
     isOpen(modelModal) ||
     isOpen(el("deployMarketModal"))
   );
@@ -1044,6 +1068,36 @@ function setJobDrawer(open) {
   if (open) loadJobs();
 }
 
+function setAssetManagerDrawer(open) {
+  if (!assetManagerDrawer) return;
+  assetManagerDrawer.classList.toggle("open", open);
+  assetManagerDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+  syncScrim();
+  if (open) loadAssetManager();
+}
+
+function setProjectCreateModal(open) {
+  if (!projectCreateModal) return;
+  projectCreateModal.classList.toggle("open", open);
+  projectCreateModal.setAttribute("aria-hidden", open ? "false" : "true");
+  syncScrim();
+  if (open) {
+    loadProjectRootHint();
+    setTimeout(() => projectNameInput?.focus(), 40);
+  }
+}
+
+function setAssetImportModal(open) {
+  if (!assetImportModal) return;
+  assetImportModal.classList.toggle("open", open);
+  assetImportModal.setAttribute("aria-hidden", open ? "false" : "true");
+  if (open) {
+    if (assetImportIntro) assetImportIntro.hidden = false;
+    if (assetImportUpload) assetImportUpload.hidden = true;
+  }
+  syncScrim();
+}
+
 function setModelModal(open) {
   if (!modelModal) return;
   modelModal.classList.toggle("open", open);
@@ -1059,6 +1113,9 @@ function closeDrawers() {
   setCodeDrawer(false);
   setStatusDrawer(false);
   setJobDrawer(false);
+  setAssetManagerDrawer(false);
+  setProjectCreateModal(false);
+  setAssetImportModal(false);
   setModelModal(false);
   const deployModal = el("deployMarketModal");
   if (deployModal) {
@@ -2187,7 +2244,10 @@ function addDeployButton(prompt) {
 }
 
 async function runDeployJob() {
-  const started = await postJson(api.deploy, { background: true }, { timeout: 30000 });
+  const started = await postJson(api.deploy, {
+    background: true,
+    conversation_id: currentConversationId || "",
+  }, { timeout: 30000 });
   const jobId = started.job?.id;
   if (!jobId) throw new Error("Background deploy job was not created.");
   setJobDrawer(true);
@@ -2301,8 +2361,38 @@ agentModeSelect?.addEventListener("change", () => {
   const label = getAgentMode() === "codex" ? "Codex 硬件模式" : "自研 Agent";
   addMarkdownMessage("agent", `已切换到 ${label}。我会继续只处理硬件嵌入式小屏应用相关的设计、生成、验证和部署确认。`);
 });
-assetUploadBtn?.addEventListener("click", () => assetUploadInput?.click());
+assetUploadBtn?.addEventListener("click", () => setAssetImportModal(true));
+assetImportKnownBtn?.addEventListener("click", () => {
+  if (assetImportIntro) assetImportIntro.hidden = true;
+  if (assetImportUpload) assetImportUpload.hidden = false;
+});
+closeAssetImportModal?.addEventListener("click", () => setAssetImportModal(false));
+chooseAssetFilesBtn?.addEventListener("click", () => assetUploadInput?.click());
 assetUploadInput?.addEventListener("change", () => uploadAssetFiles(assetUploadInput.files));
+if (assetDropZone) {
+  assetDropZone.addEventListener("dragover", event => {
+    event.preventDefault();
+    assetDropZone.classList.add("drag-over");
+  });
+  assetDropZone.addEventListener("dragleave", () => assetDropZone.classList.remove("drag-over"));
+  assetDropZone.addEventListener("drop", event => {
+    event.preventDefault();
+    assetDropZone.classList.remove("drag-over");
+    uploadAssetFiles(event.dataTransfer?.files);
+  });
+}
+assetManagerBtn?.addEventListener("click", () => setAssetManagerDrawer(true));
+closeAssetManagerDrawer?.addEventListener("click", () => setAssetManagerDrawer(false));
+refreshAssetManagerBtn?.addEventListener("click", () => loadAssetManager());
+closeProjectCreateModal?.addEventListener("click", () => setProjectCreateModal(false));
+cancelProjectCreate?.addEventListener("click", () => setProjectCreateModal(false));
+projectCreateForm?.addEventListener("submit", event => {
+  event.preventDefault();
+  const title = projectNameInput?.value?.trim() || "";
+  if (!title) return;
+  setProjectCreateModal(false);
+  createConversation({ resetChat: true, title });
+});
 deviceSelect?.addEventListener("change", () => {
   activeDeviceId = deviceProfiles[deviceSelect.value] ? deviceSelect.value : "taishan-gray";
   localStorage.setItem(DEVICE_STORAGE_KEY, activeDeviceId);
@@ -2444,6 +2534,8 @@ async function uploadAssetFiles(fileList) {
     const assets = await Promise.all(files.map(fileToAssetPayload));
     const result = await postJson(`${API_BASE}/api/conversations/${conversationId}/assets`, { assets }, { timeout: 120000 });
     renderAssetSummary(result.summary);
+    setAssetImportModal(false);
+    if (isOpen(assetManagerDrawer)) loadAssetManager(conversationId);
     const uploaded = result.assets?.length || 0;
     const rejected = result.rejected?.length || 0;
     const kinds = Object.entries(result.summary?.byKind || {}).map(([kind, count]) => `${kind} ${count}`).join(", ");
@@ -2494,6 +2586,158 @@ function fileToAssetPayload(file) {
     };
     reader.readAsDataURL(file);
   });
+}
+
+async function loadProjectRootHint() {
+  if (!projectRootHint) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/projects/root`);
+    const data = await res.json();
+    if (data.ok && data.root) {
+      projectRootHint.textContent = `创建后会在此目录下生成项目文件夹：${data.root}`;
+    }
+  } catch {
+    projectRootHint.textContent = "创建后会在项目文件夹中生成对应目录。";
+  }
+}
+
+async function loadAssetManager(preferredConversationId = assetManagerSelectedConversationId || currentConversationId || "") {
+  if (!assetProjectList || !assetFileList) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/conversations`);
+    const data = await res.json();
+    const conversations = data.ok ? data.conversations || [] : [];
+    if (!assetManagerSelectedConversationId) {
+      assetManagerSelectedConversationId = preferredConversationId || conversations[0]?.id || "";
+    }
+    if (!conversations.some(conv => conv.id === assetManagerSelectedConversationId)) {
+      assetManagerSelectedConversationId = conversations[0]?.id || "";
+    }
+    renderAssetProjectList(conversations);
+    if (assetManagerSelectedConversationId) {
+      await loadAssetManagerConversation(assetManagerSelectedConversationId);
+    } else {
+      assetManagerPath.textContent = "暂无项目，请先新建 Project。";
+      assetFileList.innerHTML = "";
+    }
+  } catch (error) {
+    assetFileList.innerHTML = `<div class="asset-file-card"><strong>加载失败</strong><span>${escapeHtml(error.message)}</span></div>`;
+  }
+}
+
+function renderAssetProjectList(conversations = []) {
+  if (!assetProjectList) return;
+  assetProjectList.innerHTML = conversations.map(conv => `
+    <button class="asset-project-item ${conv.id === assetManagerSelectedConversationId ? "active" : ""}" type="button" data-id="${escapeHtml(conv.id)}">
+      <strong>${escapeHtml(conv.title || "New Project")}</strong>
+      <span>${escapeHtml(conv.project_dir || "folder pending")}</span>
+    </button>
+  `).join("");
+  assetProjectList.querySelectorAll(".asset-project-item").forEach(button => {
+    button.addEventListener("click", () => {
+      assetManagerSelectedConversationId = button.dataset.id || "";
+      loadAssetManager(assetManagerSelectedConversationId);
+    });
+  });
+}
+
+async function loadAssetManagerConversation(conversationId) {
+  const [assetRes, filesRes] = await Promise.all([
+    fetch(`${API_BASE}/api/conversations/${conversationId}/assets`),
+    fetch(`${API_BASE}/api/conversations/${conversationId}/project-files`),
+  ]);
+  const assetData = await assetRes.json();
+  const filesData = await filesRes.json();
+  if (assetManagerPath) {
+    assetManagerPath.textContent = filesData.project_dir || "项目文件夹尚未创建";
+  }
+  renderAssetManagerFiles(conversationId, assetData.ok ? assetData.assets || [] : [], filesData.ok ? filesData.files || [] : []);
+}
+
+function renderAssetManagerFiles(conversationId, assets = [], projectFiles = []) {
+  if (!assetFileList) return;
+  const fileOnly = projectFiles.filter(file => !String(file.path || "").startsWith("assets/"));
+  const cards = [
+    ...assets.map(asset => assetManagerAssetCard(asset)),
+    ...fileOnly.map(file => assetManagerProjectFileCard(file)),
+  ];
+  assetFileList.innerHTML = cards.length
+    ? cards.join("")
+    : `<div class="asset-file-card"><strong>暂无资产</strong><span>点击聊天框里的“导入资产”开始添加。</span></div>`;
+  assetFileList.querySelectorAll("[data-asset-rename]").forEach(button => {
+    button.addEventListener("click", () => renameManagedAsset(conversationId, button.dataset.assetRename));
+  });
+  assetFileList.querySelectorAll("[data-asset-usage]").forEach(select => {
+    select.addEventListener("change", () => updateManagedAsset(conversationId, select.dataset.assetUsage, { usage: select.value }));
+  });
+}
+
+function assetManagerAssetCard(asset = {}) {
+  const usage = asset.usage || "auto";
+  return `
+    <div class="asset-file-card">
+      <strong>▣ ${escapeHtml(asset.name || "asset")}</strong>
+      <div class="asset-file-meta">
+        <span>${escapeHtml(asset.kind || "file")}</span>
+        <span>${formatBytes(asset.size || 0)}</span>
+        <span>${escapeHtml(asset.project_path || "project path pending")}</span>
+      </div>
+      <div class="asset-file-actions">
+        <select data-asset-usage="${escapeHtml(asset.id)}" aria-label="Asset usage">
+          ${["auto", "embeddable", "reference_only", "ignored", "used_in_build"].map(value => `<option value="${value}" ${usage === value ? "selected" : ""}>${assetUsageLabel(value)}</option>`).join("")}
+        </select>
+        <button class="ghost-btn" type="button" data-asset-rename="${escapeHtml(asset.id)}">重命名</button>
+      </div>
+    </div>
+  `;
+}
+
+function assetManagerProjectFileCard(file = {}) {
+  return `
+    <div class="asset-file-card">
+      <strong>${escapeHtml(file.path || "file")}</strong>
+      <div class="asset-file-meta">
+        <span>${formatBytes(file.size || 0)}</span>
+        <span>${escapeHtml(file.updated_at || "")}</span>
+      </div>
+    </div>
+  `;
+}
+
+function assetUsageLabel(value) {
+  return {
+    auto: "自动判断",
+    embeddable: "可嵌入生成",
+    reference_only: "仅作参考",
+    ignored: "忽略",
+    used_in_build: "已用于构建",
+  }[value] || value;
+}
+
+function formatBytes(bytes = 0) {
+  const value = Number(bytes || 0);
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${value} B`;
+}
+
+async function renameManagedAsset(conversationId, assetId) {
+  const nextName = prompt("输入新的资产名称", "");
+  if (!nextName?.trim()) return;
+  await updateManagedAsset(conversationId, assetId, { name: nextName.trim() });
+}
+
+async function updateManagedAsset(conversationId, assetId, patch = {}) {
+  try {
+    const result = await postJson(`${API_BASE}/api/conversations/${conversationId}/assets/${encodeURIComponent(assetId)}`, patch, {
+      method: "PATCH",
+      timeout: 30000,
+    });
+    if (conversationId === currentConversationId) renderAssetSummary(result.summary);
+    await loadAssetManager(conversationId);
+  } catch (error) {
+    addMarkdownMessage("agent", `资产更新失败：${friendlyErrorMarkdown(error.data, error.message)}`);
+  }
 }
 
 // ==================== Conversation Management ====================
@@ -2742,9 +2986,14 @@ function renderMessages(messages) {
 }
 
 // Create new conversation
-async function createConversation({ resetChat = true } = {}) {
+async function createConversation({ resetChat = true, title = "" } = {}) {
   try {
-    const res = await fetch(`${API_BASE}/api/conversations`, { method: "POST" });
+    const projectTitle = String(title || "New Project").trim() || "New Project";
+    const res = await fetch(`${API_BASE}/api/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: projectTitle }),
+    });
     const data = await res.json();
     if (data.ok) {
       currentConversationId = data.id;
@@ -2781,7 +3030,10 @@ async function createConversation({ resetChat = true } = {}) {
           });
         }
         const titleEl = document.getElementById("currentConversationTitle");
-        if (titleEl) titleEl.textContent = "New App";
+        if (titleEl) titleEl.textContent = data.title || projectTitle;
+        if (data.project_dir) {
+          addMarkdownMessage("agent", `Project 创建成功。\n\n文件夹：${data.project_dir}`);
+        }
       }
     }
   } catch (err) {
@@ -2831,7 +3083,7 @@ function persistMessage(role, content, buildId = null, conversationId = currentC
 // New conversation button
 const newConvBtn = document.getElementById("newConversationBtn");
 if (newConvBtn) {
-  newConvBtn.addEventListener("click", createConversation);
+  newConvBtn.addEventListener("click", () => setProjectCreateModal(true));
 }
 
 // Deploy to market button

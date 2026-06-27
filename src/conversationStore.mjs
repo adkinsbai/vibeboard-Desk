@@ -62,10 +62,12 @@ export function createConversationStore(db, saveDb = () => {}) {
         CREATE TABLE IF NOT EXISTS conversations (
           id TEXT PRIMARY KEY,
           title TEXT DEFAULT 'New App',
+          project_dir TEXT,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
       `);
+      ensureColumn(db, "conversations", "project_dir", "TEXT");
       db.run(`
         CREATE TABLE IF NOT EXISTS messages (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,9 +104,27 @@ export function createConversationStore(db, saveDb = () => {}) {
       return query(db, "SELECT * FROM conversations ORDER BY updated_at DESC");
     },
 
-    createConversation(id = crypto.randomUUID(), title = "New App") {
-      run(db, saveDb, "INSERT INTO conversations (id, title) VALUES (?, ?)", [id, title]);
-      return { id, title };
+    createConversation(id = crypto.randomUUID(), title = "New App", options = {}) {
+      const projectDir = String(options.projectDir || options.project_dir || "").trim();
+      run(db, saveDb, "INSERT INTO conversations (id, title, project_dir) VALUES (?, ?, ?)", [id, title, projectDir]);
+      return { id, title, project_dir: projectDir };
+    },
+
+    updateConversation(id, patch = {}) {
+      const title = patch.title == null ? null : String(patch.title || "").trim();
+      const projectDir = patch.projectDir ?? patch.project_dir;
+      runTransaction(db, saveDb, () => {
+        if (title) runStep(db, "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [title, id]);
+        if (projectDir != null) {
+          runStep(db, "UPDATE conversations SET project_dir = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [String(projectDir || ""), id]);
+        }
+      });
+      return this.getConversation(id);
+    },
+
+    getConversation(id) {
+      const rows = query(db, "SELECT * FROM conversations WHERE id = ?", [id]);
+      return rows[0] || null;
     },
 
     deleteConversation(id) {
@@ -203,6 +223,12 @@ export function createConversationStore(db, saveDb = () => {}) {
       return normalized;
     }
   };
+}
+
+function ensureColumn(db, table, column, type) {
+  const rows = query(db, `PRAGMA table_info(${table})`);
+  if (rows.some(row => row.name === column)) return;
+  db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
 export function defaultProjectMemory() {

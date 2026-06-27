@@ -182,6 +182,12 @@ button {
   transition: all 0.12s ease;
 }
 
+.sidebar-action {
+  width: 100%;
+  margin-bottom: 8px;
+  text-align: left;
+}
+
 .market-link:hover {
   background: var(--accent-dim);
   border-color: rgba(56, 189, 248, .2);
@@ -1469,6 +1475,203 @@ pre {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
+}
+
+.asset-manager-drawer {
+  width: min(760px, calc(100vw - 24px));
+}
+
+.asset-manager-layout {
+  display: grid;
+  grid-template-columns: 210px 1fr;
+  min-height: 0;
+  height: calc(100vh - 66px);
+}
+
+.asset-projects {
+  border-right: 1px solid var(--border);
+  padding: 12px;
+  overflow: auto;
+}
+
+.asset-section-title {
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.asset-project-list,
+.asset-file-list {
+  display: grid;
+  gap: 8px;
+}
+
+.asset-project-item,
+.asset-file-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, .025);
+}
+
+.asset-project-item {
+  padding: 10px;
+  text-align: left;
+  color: var(--text);
+}
+
+.asset-project-item.active {
+  border-color: rgba(56, 189, 248, .38);
+  background: rgba(56, 189, 248, .08);
+}
+
+.asset-project-item strong,
+.asset-file-card strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-project-item span,
+.asset-file-card span,
+.asset-manager-toolbar p {
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.asset-files-pane {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  padding: 12px;
+}
+
+.asset-manager-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.asset-file-list {
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.asset-file-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.asset-file-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.asset-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.asset-file-actions select {
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.asset-import-modal {
+  background: rgba(0, 0, 0, .54);
+}
+
+.asset-import-panel {
+  border-color: rgba(255, 255, 255, .14);
+  background: rgba(16, 18, 24, .68);
+  backdrop-filter: blur(18px) saturate(1.25);
+  box-shadow: 0 26px 80px rgba(0, 0, 0, .65);
+}
+
+.asset-import-screen {
+  display: grid;
+  gap: 18px;
+  padding: 28px;
+  color: #fff;
+  font-family: SimSun, "Songti SC", "Noto Serif SC", serif;
+  text-align: center;
+}
+
+.asset-import-screen h2 {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 600;
+}
+
+.asset-import-screen p {
+  margin: 0;
+  color: rgba(255, 255, 255, .86);
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+.asset-icon-row {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}
+
+.asset-icon-row span {
+  width: 42px;
+  height: 42px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, .22);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .08);
+  font-family: var(--sans);
+  font-size: 20px;
+}
+
+.asset-import-upload {
+  text-align: left;
+}
+
+.asset-drop-zone {
+  min-height: 170px;
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  padding: 18px;
+  border: 1px dashed rgba(255, 255, 255, .32);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, .05);
+  color: #fff;
+  text-align: center;
+}
+
+.asset-drop-zone.drag-over {
+  border-color: var(--accent);
+  background: rgba(56, 189, 248, .12);
+}
+
+.asset-drop-zone strong {
+  font-size: 17px;
+}
+
+.asset-drop-zone span {
+  color: rgba(255, 255, 255, .68);
+  font-family: var(--sans);
+  font-size: 12px;
 }
 
 @media (max-width: 760px) {

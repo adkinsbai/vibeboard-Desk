@@ -58,13 +58,31 @@ await withServer(async ({ baseUrl, json }) => {
 
     const beforeCreate = await page.locator(".conv-item").count();
     await page.locator("#newConversationBtn").click();
+    await page.locator("#projectCreateModal.open").waitFor({ timeout: 3000 });
+    await page.locator("#projectNameInput").fill("UI smoke project");
+    await page.locator("#projectCreateForm button[type='submit']").click();
     await page.waitForFunction(count => document.querySelectorAll(".conv-item").length > count, beforeCreate);
     const afterCreate = await page.locator(".conv-item").count();
     assert(afterCreate > beforeCreate, "busy state should not block new conversation creation");
 
+    await page.locator("#assetUploadBtn").click();
+    await page.locator("#assetImportModal.open").waitFor({ timeout: 3000 });
+    await page.locator("#assetImportKnownBtn").click();
+    await page.locator("#chooseAssetFilesBtn").waitFor({ timeout: 3000 });
+    const pickerReady = await page.locator("#chooseAssetFilesBtn").textContent();
+    assert(pickerReady.includes("从文件夹中选取"), "asset import should expose explicit folder picker action");
+    await page.locator("#closeAssetImportModal").click();
+    await page.waitForFunction(() => !document.querySelector("#assetImportModal")?.classList.contains("open"));
+
     await page.locator("#jobCenterBtn").click();
     await page.locator("#jobDrawer.open").waitFor({ timeout: 3000 });
     await page.locator(".job-card").first().waitFor({ timeout: 3000 });
+    await page.locator("#closeJobDrawer").click();
+    await page.waitForFunction(() => !document.querySelector("#jobDrawer")?.classList.contains("open"));
+
+    await page.locator("#assetManagerBtn").click();
+    await page.locator("#assetManagerDrawer.open").waitFor({ timeout: 3000 });
+    await page.locator(".asset-project-item").first().waitFor({ timeout: 3000 });
 
     await page.evaluate(() => window.setBusy(false));
     await page.locator("#promptInput").fill("Enter should submit from the main composer");

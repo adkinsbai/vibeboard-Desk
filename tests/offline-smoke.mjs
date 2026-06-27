@@ -150,7 +150,33 @@ try {
   const conversationA = await json("/api/conversations", { method: "POST" });
   const conversationB = await json("/api/conversations", { method: "POST" });
   assert(conversationA.id && conversationB.id, "conversation creation should return ids");
+  assert(conversationA.project_dir, "conversation creation should return a project folder");
   createdConversationIds.push(conversationA.id, conversationB.id);
+
+  const uploadedAsset = await json(`/api/conversations/${conversationA.id}/assets`, {
+    method: "POST",
+    body: JSON.stringify({
+      assets: [{
+        name: "palette.txt",
+        mime: "text/plain",
+        encoding: "base64",
+        content: Buffer.from("primary #22c55e\naccent #38bdf8\n").toString("base64"),
+      }],
+    }),
+  });
+  assert(uploadedAsset.ok === true && uploadedAsset.assets?.length === 1, "asset upload should succeed");
+  await new Promise(resolve => setTimeout(resolve, 250));
+  const assetList = await json(`/api/conversations/${conversationA.id}/assets`);
+  const asset = assetList.assets?.[0];
+  assert(asset?.project_path?.includes("palette.txt"), `asset should persist into project folder: ${JSON.stringify(asset)}`);
+  const renamed = await json(`/api/conversations/${conversationA.id}/assets/${encodeURIComponent(asset.id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name: "palette-renamed.txt", usage: "reference_only" }),
+  });
+  assert(renamed.asset?.name === "palette-renamed.txt", "asset rename should update metadata");
+  assert(renamed.asset?.usage === "reference_only", "asset usage should update metadata");
+  const projectFilesBeforeGenerate = await json(`/api/conversations/${conversationA.id}/project-files`);
+  assert(projectFilesBeforeGenerate.files?.some(file => file.path.includes("palette-renamed.txt")), "project files should show renamed asset");
 
   const promptA = "preview restore clock panel";
   const promptB = "preview restore weather panel";
@@ -172,6 +198,9 @@ try {
   });
   assert(generatedA.id !== generatedB.id, "separate conversations should get separate build ids");
   assert(generatedA.buildGraph?.some(item => item.node === "save_snapshot"), "conversation generate should save a snapshot through BuildGraph");
+  const projectFilesA = await json(`/api/conversations/${conversationA.id}/project-files`);
+  assert(projectFilesA.files?.some(file => file.path === "MEMORY.md"), "project files should include MEMORY.md after generation");
+  assert(projectFilesA.files?.some(file => file.path.includes(`/asset-snapshot.json`) || file.path.endsWith("asset-snapshot.json")), "project files should include build asset snapshot");
 
   const conversationC = await json("/api/conversations", { method: "POST" });
   createdConversationIds.push(conversationC.id);

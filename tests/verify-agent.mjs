@@ -1916,6 +1916,87 @@ await test("asset library exposes embeddable passive assets for generated builds
   assert(generated.rejected.some(item => item.name === "brief.txt"), "unsupported text runtime asset should remain reference-only");
 });
 
+await test("project workspace persists assets, memory, and build snapshots", async () => {
+  const initSqlJs = (await import("sql.js")).default;
+  const { createConversationStore } = await import(pathToFileURL(path.join(ROOT, "src", "conversationStore.mjs")).href);
+  const { createAssetLibraryStore } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const { createProjectWorkspace } = await import(pathToFileURL(path.join(ROOT, "src", "projectWorkspace.mjs")).href);
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  const conversationStore = createConversationStore(db, () => {});
+  conversationStore.initSchema();
+  const assetLibraryStore = createAssetLibraryStore(db, () => {});
+  assetLibraryStore.initSchema();
+
+  await withTempDir("vibeboard-project-workspace-", async dir => {
+    const workspace = createProjectWorkspace({
+      root: ROOT,
+      env: { VIBEBOARD_PROJECTS_DIR: dir },
+      conversationStore,
+      assetLibraryStore,
+      now: () => new Date("2026-06-27T00:00:00.000Z"),
+    });
+    const conversation = conversationStore.createConversation("conv-project-assets", "Asset Tracking Demo");
+    const project = await workspace.ensureProject(conversation.id, conversation.title);
+    assert(project.project_dir.startsWith(dir), "project folder should live under configured projects dir");
+
+    const result = assetLibraryStore.addAssets(conversation.id, [{
+      name: "brief.txt",
+      mime: "text/plain",
+      encoding: "base64",
+      content: Buffer.from("Use a neon green counter UI", "utf8").toString("base64"),
+    }], {
+      persistAssetFile: asset => workspace.persistAssetFile(conversation.id, asset),
+    });
+    assert(result.assets.length === 1, "asset should be stored");
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const storedAsset = assetLibraryStore.listAssets(conversation.id)[0];
+    assert(storedAsset.project_path.endsWith("brief.txt"), `asset project path should be recorded, got ${JSON.stringify(storedAsset)}`);
+
+    const renamedPath = await workspace.renameAssetFile(conversation.id, storedAsset.project_path, "brief-renamed.txt");
+    assetLibraryStore.updateAsset(conversation.id, storedAsset.id, { name: "brief-renamed.txt", usage: "reference_only", projectPath: renamedPath });
+    const renamed = assetLibraryStore.getAsset(conversation.id, storedAsset.id);
+    assert(renamed.name === "brief-renamed.txt", "asset metadata rename should persist");
+    assert(renamed.usage === "reference_only", "asset usage should persist");
+
+    const memory = await workspace.writeMemory(conversation.id, { trigger: "unit-test", prompt: "Build it" });
+    assert(memory.path.endsWith("MEMORY.md"), "workspace should write MEMORY.md");
+    const memoryText = await fs.readFile(memory.path, "utf8");
+    assert(memoryText.includes("Asset Tracking Demo"), "memory should include project title");
+    assert(memoryText.includes("brief-renamed.txt"), "memory should include renamed asset");
+
+    await workspace.writeBuildSnapshot(conversation.id, "vb-unit-build", {
+      "index.html": "<main>ok</main>",
+      "app.js": "console.log('ok')",
+    }, [{ id: renamed.id, name: renamed.name, project_path: renamed.project_path, usage: renamed.usage, sha256: renamed.sha256 }]);
+    const files = await workspace.listProjectFiles(conversation.id);
+    assert(files.some(file => file.path === "MEMORY.md"), "project files should list memory");
+    assert(files.some(file => file.path === "assets/text/brief-renamed.txt"), "project files should list renamed asset");
+    assert(files.some(file => file.path === "builds/vb-unit-build/asset-snapshot.json"), "project files should list build snapshot");
+  });
+});
+
+await test("asset library usage controls generated assets and records build usage", async () => {
+  const initSqlJs = (await import("sql.js")).default;
+  const { createAssetLibraryStore } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  const store = createAssetLibraryStore(db, () => {});
+  store.initSchema();
+  const image = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+  store.addAssets("asset-usage-test", [
+    { name: "embed.png", mime: "image/png", encoding: "base64", content: image, usage: "embeddable" },
+    { name: "reference.png", mime: "image/png", encoding: "base64", content: image, usage: "reference_only" },
+  ]);
+  const generated = store.generatedAssets("asset-usage-test");
+  assert(generated.items.some(item => item.name === "embed.png"), "embeddable image should be selected");
+  assert(!generated.items.some(item => item.name === "reference.png"), "reference_only image should not be embedded");
+  const snapshots = store.recordBuildSnapshot("asset-usage-test", "vb-asset-build", generated);
+  assert(snapshots.length === generated.items.length, "snapshot rows should match embedded assets");
+  const used = store.listAssets("asset-usage-test").find(asset => asset.name === "embed.png");
+  assert(used.usage === "used_in_build", "used asset should be marked used_in_build");
+});
+
 await test("asset library expands ZIP bundles into analyzed assets", async () => {
   const { normalizeIncomingAssets, formatAssetContext } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
   const zip = makeZip([

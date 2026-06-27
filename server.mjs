@@ -26,6 +26,7 @@ import { chatCompletionsUrl, normalizeModelSettings } from "./src/modelSettings.
 import { createMemoryStore } from "./src/memoryStore.mjs";
 import { declaredAssetPathsFromFiles } from "./src/assetContract.mjs";
 import { createAssetLibraryStore } from "./src/assetLibrary.mjs";
+import { createProjectWorkspace } from "./src/projectWorkspace.mjs";
 import { createDigitalLifeStore } from "./src/digitalLife.mjs";
 import { createDigitalLifeRoutes } from "./src/digitalLifeRoutes.mjs";
 import { createExperienceStore, makePlaybookCandidate } from "./src/experienceStore.mjs";
@@ -211,6 +212,13 @@ jobStore.markInterruptedRunningJobs();
 
 const assetLibraryStore = createAssetLibraryStore(db, saveDb);
 assetLibraryStore.initSchema();
+
+const projectWorkspace = createProjectWorkspace({
+  root: ROOT,
+  env: process.env,
+  conversationStore,
+  assetLibraryStore,
+});
 
 let BOARD = createBoardConfig();
 let knownHosts = process.env.VIBEBOARD_KNOWN_HOSTS || path.join(os.tmpdir(), `${BOARD.id}_known_hosts`);
@@ -2267,10 +2275,26 @@ const generateRuntime = createGenerateRuntime({
   generatedDir: GENERATED_DIR,
   getCurrentBuild: () => currentBuild,
   setCurrentBuild,
+  projectWorkspace,
 });
 
 async function runGenerateRequest(body = {}) {
   return generateRuntime.runGenerateRequest(body);
+}
+
+async function writeProjectMemorySafe(conversationId, options = {}) {
+  const id = String(conversationId || "").trim();
+  if (!id) return null;
+  try {
+    return await projectWorkspace.writeMemory(id, options);
+  } catch (error) {
+    await appendServerLog("project.memory.write_failed", {
+      conversationId: id,
+      trigger: options.trigger || "",
+      error: error.message,
+    }).catch(() => {});
+    return null;
+  }
 }
 
 const marketRuntime = createMarketRuntime({
@@ -2353,6 +2377,11 @@ const jobRuntime = createJobRuntime({
 jobRuntime.register("agent", async (body = {}, ctx) => {
   ctx.phase("agent", "Agent request is running.");
   const result = await runAgentRequest(body || {});
+  await writeProjectMemorySafe(body.conversation_id, {
+    trigger: body.action === "confirm_build" ? "agent-confirm-build" : "agent-message",
+    buildId: result?.id || result?.build_id || "",
+    prompt: body.prompt || body.build_prompt || body.message || "",
+  });
   ctx.phase("done", "Agent request finished.");
   return result;
 });
@@ -2360,6 +2389,11 @@ jobRuntime.register("agent", async (body = {}, ctx) => {
 jobRuntime.register("generate", async (body = {}, ctx) => {
   ctx.phase("generate", "Code generation is running.");
   const result = await runGenerateRequest(body || {});
+  await writeProjectMemorySafe(body.conversation_id, {
+    trigger: "generate-job",
+    buildId: result?.id || "",
+    prompt: body.prompt || body.build_prompt || "",
+  });
   ctx.phase("done", "Generation finished.");
   return result;
 });
@@ -2367,6 +2401,12 @@ jobRuntime.register("generate", async (body = {}, ctx) => {
 jobRuntime.register("deploy", async (body = {}, ctx) => {
   ctx.phase("deploy", "Deploy is running.");
   const result = await runDeployRequest(body || {});
+  await writeProjectMemorySafe(body.conversation_id, {
+    trigger: "deploy-confirmed",
+    buildId: result?.id || currentBuild?.id || "",
+    prompt: currentBuild?.prompt || "",
+    deploy: result,
+  });
   ctx.phase("done", "Deploy finished.");
   return result;
 });
@@ -2478,7 +2518,12 @@ async function route(req, res) {
     if (req.method === "POST" && url.pathname === "/api/chat") {
       const body = await readBody(req);
       try {
-        json(res, 200, await runAgentRequest({ ...(body || {}), action: "message" }));
+        const result = await runAgentRequest({ ...(body || {}), action: "message" });
+        await writeProjectMemorySafe(body?.conversation_id, {
+          trigger: "chat",
+          prompt: body?.prompt || body?.message || "",
+        });
+        json(res, 200, result);
       } catch (err) {
         const classified = classifyError(err);
         json(res, classified.statusCode || err.statusCode || 500, { ok: false, error: err.message, ...classified });
@@ -2596,7 +2641,13 @@ async function route(req, res) {
         return;
       }
       try {
-        json(res, 200, await runAgentRequest(body || {}));
+        const result = await runAgentRequest(body || {});
+        await writeProjectMemorySafe(body?.conversation_id, {
+          trigger: body?.action === "confirm_build" ? "agent-confirm-build" : "agent",
+          buildId: result?.id || result?.build_id || "",
+          prompt: body?.prompt || body?.build_prompt || body?.message || "",
+        });
+        json(res, 200, result);
       } catch (err) {
         const classified = classifyError(err);
         json(res, classified.statusCode || err.statusCode || 500, { ok: false, error: err.message, ...classified });
@@ -2613,7 +2664,13 @@ async function route(req, res) {
           json(res, 202, { ok: true, job });
           return;
         }
-        json(res, 200, await runGenerateRequest(body || {}));
+        const result = await runGenerateRequest(body || {});
+        await writeProjectMemorySafe(body?.conversation_id, {
+          trigger: "generate",
+          buildId: result?.id || "",
+          prompt: body?.prompt || body?.build_prompt || "",
+        });
+        json(res, 200, result);
       } catch (error) {
         const classified = classifyError(error, { stage: "generate" });
         json(res, classified.statusCode || error.statusCode || 500, {
@@ -2648,7 +2705,14 @@ async function route(req, res) {
           json(res, 202, { ok: true, job });
           return;
         }
-        json(res, 200, await runDeployRequest(body || {}));
+        const result = await runDeployRequest(body || {});
+        await writeProjectMemorySafe(body?.conversation_id, {
+          trigger: "deploy-confirmed",
+          buildId: result?.id || currentBuild?.id || "",
+          prompt: currentBuild?.prompt || "",
+          deploy: result,
+        });
+        json(res, 200, result);
       } catch (error) {
         console.error("[deploy] Error:", error.message);
         console.error("[deploy] Stack:", error.stack);
@@ -2673,8 +2737,23 @@ async function route(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/conversations") {
-      const conversation = conversationStore.createConversation();
-      json(res, 200, { ok: true, id: conversation.id, title: conversation.title });
+      const body = await readBody(req).catch(() => ({}));
+      const title = String(body?.title || "New Project").trim() || "New Project";
+      const conversation = conversationStore.createConversation(undefined, title);
+      const project = await projectWorkspace.ensureProject(conversation.id, title);
+      await writeProjectMemorySafe(conversation.id, { trigger: "project-created" });
+      json(res, 200, {
+        ok: true,
+        id: conversation.id,
+        title: project.title || title,
+        project_dir: project.project_dir,
+        projects_root: projectWorkspace.baseDir,
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/projects/root") {
+      await projectWorkspace.ensureBaseDir();
+      json(res, 200, { ok: true, root: projectWorkspace.baseDir });
       return;
     }
     // Delete conversation and its messages
@@ -2734,6 +2813,24 @@ async function route(req, res) {
       json(res, 200, { ok: true, project_memory: conversationStore.getProjectMemory(convId) });
       return;
     }
+    if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/project-files")) {
+      const convId = url.pathname.split("/")[3];
+      const files = await projectWorkspace.listProjectFiles(convId);
+      const conversation = conversationStore.getConversation(convId);
+      json(res, 200, { ok: true, project_dir: conversation?.project_dir || "", files });
+      return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/project-file")) {
+      const convId = url.pathname.split("/")[3];
+      const relativePath = url.searchParams.get("path") || "";
+      const file = await projectWorkspace.readProjectFile(convId, relativePath);
+      if (!file) {
+        json(res, 404, { ok: false, error: "Project file not found" });
+        return;
+      }
+      json(res, 200, { ok: true, file });
+      return;
+    }
     if (url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/assets")) {
       const convId = url.pathname.split("/")[3];
       if (req.method === "GET") {
@@ -2747,20 +2844,50 @@ async function route(req, res) {
       if (req.method === "POST") {
         try {
           const body = await readBody(req, { limitBytes: 64 * 1024 * 1024 });
-          const result = assetLibraryStore.addAssets(convId, Array.isArray(body.assets) ? body.assets : []);
+          await projectWorkspace.ensureProject(convId, conversationStore.getConversation(convId)?.title || "New Project");
+          const result = assetLibraryStore.addAssets(convId, Array.isArray(body.assets) ? body.assets : [], {
+            persistAssetFile: asset => projectWorkspace.persistAssetFile(convId, asset),
+          });
+          await result.persistence;
+          const assets = assetLibraryStore.listAssets(convId);
+          const summary = assetLibraryStore.summarize(convId);
           await appendServerLog("assets.uploaded", {
             conversationId: convId,
-            count: result.assets.length,
+            count: assets.length,
             rejected: result.rejected.length,
-            kinds: result.summary.byKind,
+            kinds: summary.byKind,
           });
-          json(res, 200, { ok: true, ...result });
+          await writeProjectMemorySafe(convId, { trigger: "assets-uploaded" });
+          json(res, 200, { ok: true, assets, rejected: result.rejected, summary });
         } catch (assetErr) {
           const classified = classifyError(assetErr);
           json(res, classified.statusCode || assetErr.statusCode || 400, { ok: false, error: assetErr.message, ...classified });
         }
         return;
       }
+    }
+    if (req.method === "PATCH" && url.pathname.startsWith("/api/conversations/") && url.pathname.includes("/assets/")) {
+      const parts = url.pathname.split("/");
+      const convId = parts[3];
+      const assetId = decodeURIComponent(parts[5] || "");
+      const body = await readBody(req).catch(() => ({}));
+      let current = assetLibraryStore.getAsset(convId, assetId);
+      if (!current) {
+        json(res, 404, { ok: false, error: "Asset not found" });
+        return;
+      }
+      let projectPath = body.projectPath ?? body.project_path;
+      if (body.name != null && current.project_path) {
+        projectPath = await projectWorkspace.renameAssetFile(convId, current.project_path, body.name).catch(() => current.project_path);
+      }
+      const asset = assetLibraryStore.updateAsset(convId, assetId, {
+        name: body.name,
+        usage: body.usage,
+        projectPath,
+      });
+      await writeProjectMemorySafe(convId, { trigger: "asset-updated" });
+      json(res, 200, { ok: true, asset, summary: assetLibraryStore.summarize(convId) });
+      return;
     }
     if (req.method === "DELETE" && url.pathname.startsWith("/api/conversations/") && url.pathname.includes("/assets/")) {
       const parts = url.pathname.split("/");

@@ -21,6 +21,9 @@
         <!-- Conversations will be loaded here -->
       </div>
       <div class="sidebar-footer">
+        <button class="market-link sidebar-action" id="assetManagerBtn" type="button">
+          <span>▣</span> 资产管理
+        </button>
         <a href="/market.html" class="market-link">
           <span>🏪</span> 应用市场
         </a>
@@ -76,7 +79,7 @@
             <div class="composer-tools">
               <div class="asset-tools">
                 <input id="assetUploadInput" type="file" multiple hidden>
-                <button class="tool-btn" id="assetUploadBtn" type="button">Assets</button>
+                <button class="tool-btn" id="assetUploadBtn" type="button">导入资产</button>
                 <span class="asset-state" id="assetState">0 assets</span>
               </div>
               <label class="agent-mode-select" for="agentModeSelect">
@@ -191,6 +194,84 @@
     </div>
     <div class="job-list" id="jobList"></div>
   </aside>
+
+  <aside class="drawer asset-manager-drawer" id="assetManagerDrawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <p class="kicker">Asset Library</p>
+        <h2>资产管理</h2>
+      </div>
+      <button class="icon-btn" id="closeAssetManagerDrawer" type="button" aria-label="Close asset manager">x</button>
+    </div>
+    <div class="asset-manager-layout">
+      <section class="asset-projects">
+        <div class="asset-section-title">项目</div>
+        <div class="asset-project-list" id="assetProjectList"></div>
+      </section>
+      <section class="asset-files-pane">
+        <div class="asset-manager-toolbar">
+          <div>
+            <div class="asset-section-title">资产列表</div>
+            <p id="assetManagerPath">选择一个项目查看资产和文件</p>
+          </div>
+          <button class="ghost-btn" id="refreshAssetManagerBtn" type="button">刷新</button>
+        </div>
+        <div class="asset-file-list" id="assetFileList"></div>
+      </section>
+    </div>
+  </aside>
+
+  <section class="modal project-create-modal" id="projectCreateModal" aria-hidden="true" role="dialog" aria-labelledby="projectCreateTitle">
+    <div class="modal-panel">
+      <div class="drawer-head">
+        <div>
+          <p class="kicker">New Project</p>
+          <h2 id="projectCreateTitle">新建 Project</h2>
+        </div>
+        <button class="icon-btn" id="closeProjectCreateModal" type="button" aria-label="Close project creation">x</button>
+      </div>
+      <form class="model-form" id="projectCreateForm">
+        <label>
+          <span>Project 名称</span>
+          <input id="projectNameInput" type="text" required autocomplete="off" placeholder="例如：股票行情屏幕">
+        </label>
+        <div class="model-help" id="projectRootHint">创建后会在项目文件夹中生成对应目录。</div>
+        <div class="modal-actions">
+          <button class="ghost-btn" id="cancelProjectCreate" type="button">取消</button>
+          <button class="primary-btn" type="submit">创建</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <section class="modal asset-import-modal" id="assetImportModal" aria-hidden="true" role="dialog" aria-labelledby="assetImportTitle">
+    <div class="modal-panel asset-import-panel">
+      <div class="asset-import-screen" id="assetImportIntro">
+        <div class="asset-icon-row" aria-hidden="true">
+          <span>▣</span><span>▶</span><span>♪</span>
+        </div>
+        <h2 id="assetImportTitle">导入资产</h2>
+        <p>您可以上传图片、视频、文本、音乐等各种参考文件来完善您的项目。</p>
+        <div class="modal-actions">
+          <button class="primary-btn" id="assetImportKnownBtn" type="button">我已知晓</button>
+        </div>
+      </div>
+      <div class="asset-import-screen asset-import-upload" id="assetImportUpload" hidden>
+        <div class="drawer-head">
+          <div>
+            <p class="kicker">Upload Assets</p>
+            <h2>选择导入方式</h2>
+          </div>
+          <button class="icon-btn" id="closeAssetImportModal" type="button" aria-label="Close asset import">x</button>
+        </div>
+        <button class="primary-btn wide" id="chooseAssetFilesBtn" type="button">从文件夹中选取</button>
+        <div class="asset-drop-zone" id="assetDropZone">
+          <strong>拖拽文件到此位置</strong>
+          <span>支持图片、视频、文本、音乐、设计文件和压缩包</span>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <section class="modal" id="modelModal" aria-hidden="true" role="dialog" aria-labelledby="modelModalTitle">
     <div class="modal-panel">

@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-06-27 Update: Project Folders, Memory, and Asset Management
+
+- New projects are named before creation. Each project gets a persistent local folder under `VIBEBOARD_PROJECTS_DIR` when configured, or `VibeBoard Projects/` under the repo by default.
+- The project folder contains `README.md`, `MEMORY.md`, `assets/`, `builds/`, and `notes/`. Chat, asset upload, generation, and deploy confirmation paths write project Memory so later Agent runs can recover requirements and work history.
+- The chat composer now shows `导入资产`. Clicking it opens a frosted dark modal first; only after `我已知晓` does the upload screen show `从文件夹中选取` and a drag-and-drop zone.
+- A new left-sidebar `资产管理` entry opens an Asset Library drawer. The drawer lists projects on the left and folder-like assets/project files on the right.
+- Assets now have explicit usage states: `auto`, `embeddable`, `reference_only`, `ignored`, and `used_in_build`. Users can rename assets and change usage from the asset manager.
+- Generated builds record an asset usage graph in SQLite and write locked build snapshots into `builds/<build-id>/asset-snapshot.json`, making material selection, traceability, and reproduction possible.
+- New APIs include `GET /api/projects/root`, `GET /api/conversations/:id/project-files`, `GET /api/conversations/:id/project-file?path=...`, and `PATCH /api/conversations/:id/assets/:assetId`.
+
+---
+
 ## 2026-06-27 Update: Task Center and Background Jobs
 
 - Long Agent generation and deploy actions now run as persisted background jobs. Refreshing the page no longer loses the running task state.

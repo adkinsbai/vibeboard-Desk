@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-06-27 - Project Folders, Memory, and Asset Management
+
+- Added named project creation: new conversations can be created with a project title and get a persistent folder under `VIBEBOARD_PROJECTS_DIR` or the default `VibeBoard Projects/` directory.
+- Added `src/projectWorkspace.mjs` to manage project folders, `MEMORY.md`, uploaded asset files, build snapshots, project file listing, safe project-file reads, and asset-file renames.
+- Wrote project Memory automatically from project creation, chat/Agent activity, asset uploads, generation snapshots, and deploy confirmations.
+- Added project and asset APIs: `GET /api/projects/root`, `GET /api/conversations/:id/project-files`, `GET /api/conversations/:id/project-file?path=...`, and `PATCH /api/conversations/:id/assets/:assetId`.
+- Expanded Asset Library metadata with usage states and project paths, plus `build_asset_snapshots` records for generated-build usage graphs.
+- Added locked project build snapshots under `builds/<build-id>/` with `asset-snapshot.json` for reproducible material traceability.
+- Updated the main UI with a named Project creation modal, a Chinese `导入资产` two-step frosted upload modal, drag-and-drop upload, and a left-sidebar `资产管理` drawer for browsing projects/assets, renaming assets, and changing usage.
+- Added regression coverage in `verify:agent`, `verify:offline`, and `verify:ui` for project folders, Memory, asset persistence, usage selection, snapshot locking, and the new UI flows.
+
 ## 2026-06-27 - Task Center, Background Jobs, and Recoverable Agent Runs
 
 - Added a persisted background job system backed by the existing sql.js database, including job lifecycle state, phase, logs, output, classified error details, cancellation flags, and choice-style next actions.

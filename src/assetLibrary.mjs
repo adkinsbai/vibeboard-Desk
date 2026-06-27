@@ -60,9 +60,26 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
           kind TEXT NOT NULL,
           size INTEGER NOT NULL,
           sha256 TEXT NOT NULL,
+          usage TEXT DEFAULT 'auto',
+          project_path TEXT,
           encoding TEXT NOT NULL,
           content TEXT,
           summary_json TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      ensureColumn(db, "asset_library", "usage", "TEXT DEFAULT 'auto'");
+      ensureColumn(db, "asset_library", "project_path", "TEXT");
+      db.run(`
+        CREATE TABLE IF NOT EXISTS build_asset_snapshots (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL,
+          build_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL,
+          usage TEXT NOT NULL,
+          project_path TEXT,
+          generated_path TEXT,
+          sha256 TEXT,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
       `);
@@ -70,7 +87,7 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
 
     listAssets(conversationId = "") {
       const rows = query(db, `
-        SELECT id, conversation_id, name, mime, kind, size, sha256, summary_json, created_at
+        SELECT id, conversation_id, name, mime, kind, size, sha256, usage, project_path, summary_json, created_at
         FROM asset_library
         WHERE conversation_id = ? OR conversation_id = ''
         ORDER BY created_at DESC
@@ -78,15 +95,18 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
       return rows.map(row => publicAssetRow(row));
     },
 
-    addAssets(conversationId = "", assets = []) {
+    addAssets(conversationId = "", assets = [], options = {}) {
       const normalized = normalizeIncomingAssets(assets, { existing: this.listAssets(conversationId) });
+      const persistAssetFile = typeof options.persistAssetFile === "function" ? options.persistAssetFile : null;
       runTransaction(db, saveDb, () => {
         for (const asset of normalized.assets) {
           asset.conversation_id = conversationId;
+          asset.usage = normalizeUsage(asset.usage || options.usage || inferredUsage(asset));
+          asset.project_path = "";
           runStep(db, `
             INSERT INTO asset_library (
-              id, conversation_id, name, mime, kind, size, sha256, encoding, content, summary_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              id, conversation_id, name, mime, kind, size, sha256, usage, project_path, encoding, content, summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `, [
             asset.id,
             conversationId,
@@ -95,17 +115,64 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
             asset.kind,
             asset.size,
             asset.sha256,
+            asset.usage,
+            asset.project_path,
             asset.encoding,
             asset.content,
             JSON.stringify(asset.summary),
           ]);
         }
       });
-      return {
+      const persistence = [];
+      if (persistAssetFile) {
+        for (const asset of normalized.assets) {
+          persistence.push(Promise.resolve(persistAssetFile(asset))
+            .then(projectPath => {
+              if (projectPath) this.updateAsset(conversationId, asset.id, { projectPath });
+            })
+            .catch(() => {}));
+        }
+      }
+      const result = {
         assets: normalized.assets.map(publicAsset),
         rejected: normalized.rejected,
         summary: this.summarize(conversationId),
       };
+      Object.defineProperty(result, "persistence", {
+        value: Promise.all(persistence),
+        enumerable: false,
+      });
+      return result;
+    },
+
+    updateAsset(conversationId = "", assetId = "", patch = {}) {
+      const updates = [];
+      const params = [];
+      if (patch.name != null) {
+        updates.push("name = ?");
+        params.push(sanitizeAssetName(patch.name));
+      }
+      if (patch.usage != null) {
+        updates.push("usage = ?");
+        params.push(normalizeUsage(patch.usage));
+      }
+      if (patch.projectPath != null || patch.project_path != null) {
+        updates.push("project_path = ?");
+        params.push(String(patch.projectPath ?? patch.project_path ?? ""));
+      }
+      if (!updates.length) return this.getAsset(conversationId, assetId);
+      params.push(assetId, conversationId);
+      run(db, saveDb, `UPDATE asset_library SET ${updates.join(", ")} WHERE id = ? AND (conversation_id = ? OR conversation_id = '')`, params);
+      return this.getAsset(conversationId, assetId);
+    },
+
+    getAsset(conversationId = "", assetId = "") {
+      const rows = query(db, `
+        SELECT id, conversation_id, name, mime, kind, size, sha256, usage, project_path, summary_json, created_at
+        FROM asset_library
+        WHERE id = ? AND (conversation_id = ? OR conversation_id = '')
+      `, [assetId, conversationId]);
+      return rows[0] ? publicAssetRow(rows[0]) : null;
     },
 
     deleteAsset(conversationId = "", assetId = "") {
@@ -122,12 +189,53 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
 
     generatedAssets(conversationId = "") {
       const rows = query(db, `
-        SELECT id, conversation_id, name, mime, kind, size, sha256, encoding, content, summary_json, created_at
+        SELECT id, conversation_id, name, mime, kind, size, sha256, usage, project_path, encoding, content, summary_json, created_at
         FROM asset_library
         WHERE conversation_id = ? OR conversation_id = ''
         ORDER BY created_at ASC
       `, [conversationId]);
       return selectGeneratedAssets(rows.map(storedAssetRow));
+    },
+
+    recordBuildSnapshot(conversationId = "", buildId = "", embeddedAssets = {}) {
+      const items = Array.isArray(embeddedAssets.items) ? embeddedAssets.items : [];
+      runTransaction(db, saveDb, () => {
+        runStep(db, "DELETE FROM build_asset_snapshots WHERE conversation_id = ? AND build_id = ?", [conversationId, buildId]);
+        for (const item of items) {
+          runStep(db, `
+            INSERT INTO build_asset_snapshots (
+              id, conversation_id, build_id, asset_id, usage, project_path, generated_path, sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `, [
+            `snap-${buildId}-${item.id || item.path || crypto.randomUUID()}`.slice(0, 180),
+            conversationId,
+            buildId,
+            item.id || "",
+            "used_in_build",
+            item.project_path || "",
+            item.path || "",
+            item.sha256 || "",
+          ]);
+          if (item.id) {
+            runStep(db, "UPDATE asset_library SET usage = ? WHERE id = ? AND conversation_id = ?", ["used_in_build", item.id, conversationId]);
+          }
+        }
+      });
+      return this.listBuildSnapshots(conversationId, buildId);
+    },
+
+    listBuildSnapshots(conversationId = "", buildId = "") {
+      const params = [conversationId];
+      let where = "conversation_id = ?";
+      if (buildId) {
+        where += " AND build_id = ?";
+        params.push(buildId);
+      }
+      return query(db, `
+        SELECT * FROM build_asset_snapshots
+        WHERE ${where}
+        ORDER BY created_at DESC
+      `, params);
     },
 
     summarize(conversationId = "") {
@@ -225,6 +333,7 @@ export function normalizeIncomingAsset(item = {}) {
     kind,
     size,
     sha256,
+    usage: item.usage == null ? undefined : normalizeUsage(item.usage),
     encoding: BINARY_ENCODING,
     content: buffer.toString(BINARY_ENCODING),
     summary,
@@ -262,6 +371,8 @@ export function selectGeneratedAssets(assets = []) {
         size,
         sha256: asset.sha256 || crypto.createHash("sha256").update(content).digest("hex"),
         path: targetPath,
+        project_path: asset.project_path || "",
+        usage: normalizeUsage(asset.usage || inferredUsage(asset)),
         use: asset.summary?.use || suggestedUse(asset.kind, path.posix.extname(asset.name || "").toLowerCase()),
       });
     } catch (error) {
@@ -508,6 +619,8 @@ export function summarizeAssets(assets = []) {
       name: asset.name,
       kind: asset.kind,
       size: asset.size,
+      usage: normalizeUsage(asset.usage || inferredUsage(asset)),
+      project_path: asset.project_path || "",
       use: asset.summary?.use || suggestedUse(asset.kind, path.posix.extname(asset.name).toLowerCase()),
       signals: (asset.summary?.signals || []).slice(0, 4),
       textPreview: asset.summary?.textPreview || "",
@@ -569,6 +682,12 @@ function query(db, sql, params = []) {
   return results;
 }
 
+function ensureColumn(db, table, column, type) {
+  const rows = query(db, `PRAGMA table_info(${table})`);
+  if (rows.some(row => row.name === column)) return;
+  db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+}
+
 function run(db, saveDb, sql, params = []) {
   db.run(sql, params);
   saveDb();
@@ -618,9 +737,23 @@ function publicAsset(asset = {}) {
     kind: asset.kind,
     size: Number(asset.size || 0),
     sha256: asset.sha256,
+    usage: normalizeUsage(asset.usage || inferredUsage(asset)),
+    project_path: asset.project_path || asset.projectPath || "",
     summary: asset.summary || {},
     created_at: asset.created_at || "",
   };
+}
+
+function normalizeUsage(value) {
+  const usage = String(value || "auto").trim();
+  if (["auto", "embeddable", "reference_only", "ignored", "used_in_build"].includes(usage)) return usage;
+  return "auto";
+}
+
+function inferredUsage(asset = {}) {
+  if (asset.usage && asset.usage !== "auto") return normalizeUsage(asset.usage);
+  if (GENERATED_ASSET_KINDS.has(asset.kind)) return "embeddable";
+  return "reference_only";
 }
 
 function sanitizeAssetName(value) {
@@ -636,6 +769,12 @@ function sanitizeAssetPathName(value) {
 }
 
 function generatedAssetPath(asset = {}, usedPaths = new Set()) {
+  if (normalizeUsage(asset.usage) === "ignored") {
+    throw new Error(`${asset.name || "asset"} is marked ignored`);
+  }
+  if (normalizeUsage(asset.usage) === "reference_only") {
+    throw new Error(`${asset.name || "asset"} remains a design reference only`);
+  }
   if (!GENERATED_ASSET_KINDS.has(asset.kind)) {
     throw new Error(`${asset.name || "asset"} is ${asset.kind || "binary"} and remains a design reference only`);
   }
