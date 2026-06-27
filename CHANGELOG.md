@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-27 - File Explorer Asset Manager
+
+- Reworked the Asset Library drawer into a Windows File Explorer-style asset manager with a project sidebar, command bar, breadcrumb, system folder grid, and compact file rows.
+- Added automatic asset folders for `图片`, `视频`, `音频`, and `其他`; new uploads are classified immediately, and legacy unfiled assets are migrated into the correct folder when the library is opened.
+- Added asset-folder APIs for listing, creating, renaming, and deleting custom folders, with protected system folders to keep classification stable.
+- Added UI actions for new folder, rename, delete, back, refresh, asset-row usage selection, and folder open/select behavior.
+- Added regression coverage for folder classification, legacy migration, folder CRUD, protected system folders, and the Asset Manager UI smoke flow.
+
 ## 2026-06-27 - Project Folders, Memory, and Asset Management
 
 - Added named project creation: new conversations can be created with a project title and get a persistent folder under `VIBEBOARD_PROJECTS_DIR` or the default `VibeBoard Projects/` directory.

@@ -47,6 +47,12 @@ const TEXT_LIKE_EXTENSIONS = new Set([
 
 const GENERATED_ASSET_KINDS = new Set(["image", "video", "audio", "font", "text", "data"]);
 const BINARY_ENCODING = "base64";
+const DEFAULT_ASSET_FOLDERS = Object.freeze([
+  { id: "folder-images", name: "图片", category: "image", system: true },
+  { id: "folder-videos", name: "视频", category: "video", system: true },
+  { id: "folder-audio", name: "音频", category: "audio", system: true },
+  { id: "folder-other", name: "其他", category: "other", system: true },
+]);
 
 export function createAssetLibraryStore(db, saveDb = () => {}) {
   return {
@@ -61,6 +67,7 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
           size INTEGER NOT NULL,
           sha256 TEXT NOT NULL,
           usage TEXT DEFAULT 'auto',
+          folder_id TEXT,
           project_path TEXT,
           encoding TEXT NOT NULL,
           content TEXT,
@@ -69,7 +76,19 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
         )
       `);
       ensureColumn(db, "asset_library", "usage", "TEXT DEFAULT 'auto'");
+      ensureColumn(db, "asset_library", "folder_id", "TEXT");
       ensureColumn(db, "asset_library", "project_path", "TEXT");
+      db.run(`
+        CREATE TABLE IF NOT EXISTS asset_folders (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          category TEXT DEFAULT 'custom',
+          system INTEGER DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
       db.run(`
         CREATE TABLE IF NOT EXISTS build_asset_snapshots (
           id TEXT PRIMARY KEY,
@@ -86,27 +105,126 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
     },
 
     listAssets(conversationId = "") {
+      const id = String(conversationId || "").trim();
+      this.ensureDefaultFolders(conversationId);
       const rows = query(db, `
-        SELECT id, conversation_id, name, mime, kind, size, sha256, usage, project_path, summary_json, created_at
+        SELECT id, conversation_id, name, mime, kind, size, sha256, usage, folder_id, project_path, summary_json, created_at
         FROM asset_library
         WHERE conversation_id = ? OR conversation_id = ''
         ORDER BY created_at DESC
       `, [conversationId]);
-      return rows.map(row => publicAssetRow(row));
+      return rows.map(row => publicAssetRow(row, id));
+    },
+
+    ensureDefaultFolders(conversationId = "") {
+      const id = String(conversationId || "").trim();
+      if (!id) return [];
+      runTransaction(db, saveDb, () => {
+        for (const folder of DEFAULT_ASSET_FOLDERS) {
+          runStep(db, `
+            INSERT INTO asset_folders (id, conversation_id, name, category, system, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO NOTHING
+          `, [scopedFolderId(id, folder.id), id, folder.name, folder.category, folder.system ? 1 : 0]);
+        }
+        const unfiledAssets = query(db, `
+          SELECT id, kind
+          FROM asset_library
+          WHERE conversation_id = ? AND (folder_id IS NULL OR folder_id = '')
+        `, [id]);
+        for (const asset of unfiledAssets) {
+          runStep(db, "UPDATE asset_library SET folder_id = ? WHERE id = ? AND conversation_id = ?", [
+            defaultFolderIdForKind(id, asset.kind),
+            asset.id,
+            id,
+          ]);
+        }
+      });
+      return this.listFolders(id);
+    },
+
+    listFolders(conversationId = "") {
+      const id = String(conversationId || "").trim();
+      if (!id) return [];
+      const rows = query(db, `
+        SELECT f.id, f.conversation_id, f.name, f.category, f.system, f.created_at, f.updated_at,
+               COUNT(a.id) AS asset_count,
+               COALESCE(SUM(a.size), 0) AS total_bytes
+        FROM asset_folders f
+        LEFT JOIN asset_library a ON a.folder_id = f.id AND a.conversation_id = f.conversation_id
+        WHERE f.conversation_id = ?
+        GROUP BY f.id
+        ORDER BY f.system DESC,
+          CASE f.category WHEN 'image' THEN 1 WHEN 'video' THEN 2 WHEN 'audio' THEN 3 WHEN 'other' THEN 4 ELSE 5 END,
+          f.name COLLATE NOCASE ASC
+      `, [id]);
+      return rows.map(publicFolderRow);
+    },
+
+    createFolder(conversationId = "", name = "新建文件夹") {
+      this.ensureDefaultFolders(conversationId);
+      const folder = {
+        id: `folder-${crypto.randomUUID()}`,
+        conversation_id: conversationId,
+        name: sanitizeFolderName(name),
+        category: "custom",
+        system: 0,
+      };
+      run(db, saveDb, `
+        INSERT INTO asset_folders (id, conversation_id, name, category, system)
+        VALUES (?, ?, ?, ?, ?)
+      `, [folder.id, conversationId, folder.name, folder.category, folder.system]);
+      return this.getFolder(conversationId, folder.id);
+    },
+
+    getFolder(conversationId = "", folderId = "") {
+      const rows = query(db, `
+        SELECT id, conversation_id, name, category, system, created_at, updated_at
+        FROM asset_folders
+        WHERE id = ? AND conversation_id = ?
+      `, [folderId, conversationId]);
+      return rows[0] ? publicFolderRow(rows[0]) : null;
+    },
+
+    updateFolder(conversationId = "", folderId = "", patch = {}) {
+      const current = this.getFolder(conversationId, folderId);
+      if (!current) return null;
+      if (current.system) {
+        throw Object.assign(new Error("System folders cannot be renamed."), { statusCode: 400, errorType: "system_folder_locked" });
+      }
+      const name = sanitizeFolderName(patch.name || current.name);
+      run(db, saveDb, "UPDATE asset_folders SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND conversation_id = ?", [name, folderId, conversationId]);
+      return this.getFolder(conversationId, folderId);
+    },
+
+    deleteFolder(conversationId = "", folderId = "") {
+      const current = this.getFolder(conversationId, folderId);
+      if (!current) return null;
+      if (current.system) {
+        throw Object.assign(new Error("System folders cannot be deleted."), { statusCode: 400, errorType: "system_folder_locked" });
+      }
+      const fallback = defaultFolderIdForKind(conversationId, "other");
+      runTransaction(db, saveDb, () => {
+        runStep(db, "UPDATE asset_library SET folder_id = ? WHERE conversation_id = ? AND folder_id = ?", [fallback, conversationId, folderId]);
+        runStep(db, "DELETE FROM asset_folders WHERE id = ? AND conversation_id = ?", [folderId, conversationId]);
+      });
+      return { id: folderId, moved_to: fallback };
     },
 
     addAssets(conversationId = "", assets = [], options = {}) {
       const normalized = normalizeIncomingAssets(assets, { existing: this.listAssets(conversationId) });
       const persistAssetFile = typeof options.persistAssetFile === "function" ? options.persistAssetFile : null;
+      this.ensureDefaultFolders(conversationId);
       runTransaction(db, saveDb, () => {
         for (const asset of normalized.assets) {
           asset.conversation_id = conversationId;
           asset.usage = normalizeUsage(asset.usage || options.usage || inferredUsage(asset));
+          asset.folder_id = options.folderId || options.folder_id || defaultFolderIdForKind(conversationId, asset.kind);
           asset.project_path = "";
           runStep(db, `
             INSERT INTO asset_library (
-              id, conversation_id, name, mime, kind, size, sha256, usage, project_path, encoding, content, summary_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              id, conversation_id, name, mime, kind, size, sha256, usage, folder_id, project_path, encoding, content, summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `, [
             asset.id,
             conversationId,
@@ -116,6 +234,7 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
             asset.size,
             asset.sha256,
             asset.usage,
+            asset.folder_id,
             asset.project_path,
             asset.encoding,
             asset.content,
@@ -156,6 +275,10 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
         updates.push("usage = ?");
         params.push(normalizeUsage(patch.usage));
       }
+      if (patch.folderId != null || patch.folder_id != null) {
+        updates.push("folder_id = ?");
+        params.push(String(patch.folderId ?? patch.folder_id ?? ""));
+      }
       if (patch.projectPath != null || patch.project_path != null) {
         updates.push("project_path = ?");
         params.push(String(patch.projectPath ?? patch.project_path ?? ""));
@@ -168,11 +291,11 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
 
     getAsset(conversationId = "", assetId = "") {
       const rows = query(db, `
-        SELECT id, conversation_id, name, mime, kind, size, sha256, usage, project_path, summary_json, created_at
+        SELECT id, conversation_id, name, mime, kind, size, sha256, usage, folder_id, project_path, summary_json, created_at
         FROM asset_library
         WHERE id = ? AND (conversation_id = ? OR conversation_id = '')
       `, [assetId, conversationId]);
-      return rows[0] ? publicAssetRow(rows[0]) : null;
+      return rows[0] ? publicAssetRow(rows[0], conversationId) : null;
     },
 
     deleteAsset(conversationId = "", assetId = "") {
@@ -189,7 +312,7 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
 
     generatedAssets(conversationId = "") {
       const rows = query(db, `
-        SELECT id, conversation_id, name, mime, kind, size, sha256, usage, project_path, encoding, content, summary_json, created_at
+        SELECT id, conversation_id, name, mime, kind, size, sha256, usage, folder_id, project_path, encoding, content, summary_json, created_at
         FROM asset_library
         WHERE conversation_id = ? OR conversation_id = ''
         ORDER BY created_at ASC
@@ -620,6 +743,7 @@ export function summarizeAssets(assets = []) {
       kind: asset.kind,
       size: asset.size,
       usage: normalizeUsage(asset.usage || inferredUsage(asset)),
+      folder_id: asset.folder_id || defaultFolderIdForKind(asset.conversation_id || "", asset.kind),
       project_path: asset.project_path || "",
       use: asset.summary?.use || suggestedUse(asset.kind, path.posix.extname(asset.name).toLowerCase()),
       signals: (asset.summary?.signals || []).slice(0, 4),
@@ -712,12 +836,12 @@ function runTransaction(db, saveDb, task) {
   }
 }
 
-function publicAssetRow(row = {}) {
+function publicAssetRow(row = {}, folderScopeId = "") {
   let summary = {};
   try {
     summary = typeof row.summary_json === "string" ? JSON.parse(row.summary_json) : row.summary || {};
   } catch {}
-  return publicAsset({ ...row, summary });
+  return publicAsset({ ...row, summary }, folderScopeId);
 }
 
 function storedAssetRow(row = {}) {
@@ -728,7 +852,8 @@ function storedAssetRow(row = {}) {
   };
 }
 
-function publicAsset(asset = {}) {
+function publicAsset(asset = {}, folderScopeId = "") {
+  const folderConversationId = folderScopeId || asset.conversation_id || "";
   return {
     id: asset.id,
     conversation_id: asset.conversation_id || "",
@@ -738,9 +863,24 @@ function publicAsset(asset = {}) {
     size: Number(asset.size || 0),
     sha256: asset.sha256,
     usage: normalizeUsage(asset.usage || inferredUsage(asset)),
+    folder_id: asset.folder_id || asset.folderId || defaultFolderIdForKind(folderConversationId, asset.kind),
     project_path: asset.project_path || asset.projectPath || "",
     summary: asset.summary || {},
     created_at: asset.created_at || "",
+  };
+}
+
+function publicFolderRow(row = {}) {
+  return {
+    id: row.id || "",
+    conversation_id: row.conversation_id || "",
+    name: row.name || "文件夹",
+    category: row.category || "custom",
+    system: Boolean(Number(row.system || 0)),
+    asset_count: Number(row.asset_count || 0),
+    total_bytes: Number(row.total_bytes || 0),
+    created_at: row.created_at || "",
+    updated_at: row.updated_at || "",
   };
 }
 
@@ -760,6 +900,25 @@ function sanitizeAssetName(value) {
   const raw = String(value || "asset").replaceAll("\\", "/").split("/").pop().trim();
   const safe = sanitizeAssetSegment(raw).slice(0, 120);
   return safe || "asset";
+}
+
+function sanitizeFolderName(value) {
+  const raw = String(value || "新建文件夹").replaceAll("\\", "/").split("/").pop().trim();
+  const safe = sanitizeAssetSegment(raw).slice(0, 80);
+  return safe || "新建文件夹";
+}
+
+function scopedFolderId(conversationId = "", folderId = "") {
+  return `${conversationId}:${folderId}`;
+}
+
+function defaultFolderIdForKind(conversationId = "", kind = "") {
+  const category = kind === "image" ? "image"
+    : kind === "video" ? "video"
+    : kind === "audio" ? "audio"
+    : "other";
+  const folder = DEFAULT_ASSET_FOLDERS.find(item => item.category === category) || DEFAULT_ASSET_FOLDERS[3];
+  return scopedFolderId(conversationId, folder.id);
 }
 
 function sanitizeAssetPathName(value) {

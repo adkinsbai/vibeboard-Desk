@@ -1997,6 +1997,55 @@ await test("asset library usage controls generated assets and records build usag
   assert(used.usage === "used_in_build", "used asset should be marked used_in_build");
 });
 
+await test("asset library auto-classifies assets into file-manager folders", async () => {
+  const initSqlJs = (await import("sql.js")).default;
+  const { createAssetLibraryStore } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  const store = createAssetLibraryStore(db, () => {});
+  store.initSchema();
+  const image = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+  const audio = makeWavHeader().toString("base64");
+  const text = Buffer.from("notes", "utf8").toString("base64");
+  store.addAssets("folder-classify-test", [
+    { name: "hero.png", mime: "image/png", encoding: "base64", content: image },
+    { name: "sound.wav", mime: "audio/wav", encoding: "base64", content: audio },
+    { name: "notes.txt", mime: "text/plain", encoding: "base64", content: text },
+  ]);
+  const folders = store.listFolders("folder-classify-test");
+  const images = folders.find(folder => folder.name === "图片");
+  const audioFolder = folders.find(folder => folder.name === "音频");
+  const other = folders.find(folder => folder.name === "其他");
+  assert(images?.asset_count === 1, `image folder should have one asset: ${JSON.stringify(folders)}`);
+  assert(audioFolder?.asset_count === 1, "audio folder should have one asset");
+  assert(other?.asset_count === 1, "other folder should have one asset");
+  assert(store.listAssets("folder-classify-test").every(asset => asset.folder_id), "all assets should expose folder_id");
+
+  const legacyId = "legacy-unfiled-asset";
+  db.run(`
+    INSERT INTO asset_library (
+      id, conversation_id, name, mime, kind, size, sha256, usage, encoding, content, summary_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [legacyId, "folder-classify-test", "old-video.mp4", "video/mp4", "video", 4, "legacy-sha", "auto", "base64", "", "{}"]);
+  const migrated = store.listAssets("folder-classify-test").find(asset => asset.id === legacyId);
+  const videoFolder = store.listFolders("folder-classify-test").find(folder => folder.name === "视频");
+  assert(migrated?.folder_id === videoFolder?.id, "legacy unfiled assets should be migrated into their type folder");
+
+  const custom = store.createFolder("folder-classify-test", "参考图");
+  assert(custom.name === "参考图", "custom folder should be created");
+  const renamed = store.updateFolder("folder-classify-test", custom.id, { name: "视觉参考" });
+  assert(renamed.name === "视觉参考", "custom folder should be renamed");
+  const deleted = store.deleteFolder("folder-classify-test", custom.id);
+  assert(deleted.moved_to, "custom folder delete should move contents to fallback");
+  let locked = false;
+  try {
+    store.deleteFolder("folder-classify-test", images.id);
+  } catch (error) {
+    locked = error.errorType === "system_folder_locked";
+  }
+  assert(locked, "system folders should not be deleteable");
+});
+
 await test("asset library expands ZIP bundles into analyzed assets", async () => {
   const { normalizeIncomingAssets, formatAssetContext } = await import(pathToFileURL(path.join(ROOT, "src", "assetLibrary.mjs")).href);
   const zip = makeZip([

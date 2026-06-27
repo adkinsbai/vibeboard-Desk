@@ -2815,6 +2815,10 @@ async function route(req, res) {
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/project-files")) {
       const convId = url.pathname.split("/")[3];
+      const existingConversation = conversationStore.getConversation(convId);
+      if (existingConversation) {
+        await projectWorkspace.ensureProject(convId, existingConversation.title || "New Project");
+      }
       const files = await projectWorkspace.listProjectFiles(convId);
       const conversation = conversationStore.getConversation(convId);
       json(res, 200, { ok: true, project_dir: conversation?.project_dir || "", files });
@@ -2834,9 +2838,11 @@ async function route(req, res) {
     if (url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/assets")) {
       const convId = url.pathname.split("/")[3];
       if (req.method === "GET") {
+        assetLibraryStore.ensureDefaultFolders(convId);
         json(res, 200, {
           ok: true,
           assets: assetLibraryStore.listAssets(convId),
+          folders: assetLibraryStore.listFolders(convId),
           summary: assetLibraryStore.summarize(convId),
         });
         return;
@@ -2845,7 +2851,9 @@ async function route(req, res) {
         try {
           const body = await readBody(req, { limitBytes: 64 * 1024 * 1024 });
           await projectWorkspace.ensureProject(convId, conversationStore.getConversation(convId)?.title || "New Project");
+          assetLibraryStore.ensureDefaultFolders(convId);
           const result = assetLibraryStore.addAssets(convId, Array.isArray(body.assets) ? body.assets : [], {
+            folderId: body.folder_id || body.folderId || "",
             persistAssetFile: asset => projectWorkspace.persistAssetFile(convId, asset),
           });
           await result.persistence;
@@ -2858,11 +2866,57 @@ async function route(req, res) {
             kinds: summary.byKind,
           });
           await writeProjectMemorySafe(convId, { trigger: "assets-uploaded" });
-          json(res, 200, { ok: true, assets, rejected: result.rejected, summary });
+          json(res, 200, { ok: true, assets, folders: assetLibraryStore.listFolders(convId), rejected: result.rejected, summary });
         } catch (assetErr) {
           const classified = classifyError(assetErr);
           json(res, classified.statusCode || assetErr.statusCode || 400, { ok: false, error: assetErr.message, ...classified });
         }
+        return;
+      }
+    }
+    if (url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/asset-folders")) {
+      const convId = url.pathname.split("/")[3];
+      if (req.method === "GET") {
+        json(res, 200, { ok: true, folders: assetLibraryStore.ensureDefaultFolders(convId) });
+        return;
+      }
+      if (req.method === "POST") {
+        const body = await readBody(req).catch(() => ({}));
+        const folder = assetLibraryStore.createFolder(convId, body.name || "新建文件夹");
+        await writeProjectMemorySafe(convId, { trigger: "asset-folder-created" });
+        json(res, 200, { ok: true, folder, folders: assetLibraryStore.listFolders(convId) });
+        return;
+      }
+    }
+    if (url.pathname.startsWith("/api/conversations/") && url.pathname.includes("/asset-folders/")) {
+      const parts = url.pathname.split("/");
+      const convId = parts[3];
+      const folderId = decodeURIComponent(parts[5] || "");
+      try {
+        if (req.method === "PATCH") {
+          const body = await readBody(req).catch(() => ({}));
+          const folder = assetLibraryStore.updateFolder(convId, folderId, { name: body.name });
+          if (!folder) {
+            json(res, 404, { ok: false, error: "Folder not found" });
+            return;
+          }
+          await writeProjectMemorySafe(convId, { trigger: "asset-folder-renamed" });
+          json(res, 200, { ok: true, folder, folders: assetLibraryStore.listFolders(convId) });
+          return;
+        }
+        if (req.method === "DELETE") {
+          const result = assetLibraryStore.deleteFolder(convId, folderId);
+          if (!result) {
+            json(res, 404, { ok: false, error: "Folder not found" });
+            return;
+          }
+          await writeProjectMemorySafe(convId, { trigger: "asset-folder-deleted" });
+          json(res, 200, { ok: true, ...result, folders: assetLibraryStore.listFolders(convId), assets: assetLibraryStore.listAssets(convId) });
+          return;
+        }
+      } catch (folderErr) {
+        const classified = classifyError(folderErr);
+        json(res, classified.statusCode || folderErr.statusCode || 400, { ok: false, error: folderErr.message, ...classified });
         return;
       }
     }
@@ -2883,10 +2937,11 @@ async function route(req, res) {
       const asset = assetLibraryStore.updateAsset(convId, assetId, {
         name: body.name,
         usage: body.usage,
+        folderId: body.folderId ?? body.folder_id,
         projectPath,
       });
       await writeProjectMemorySafe(convId, { trigger: "asset-updated" });
-      json(res, 200, { ok: true, asset, summary: assetLibraryStore.summarize(convId) });
+      json(res, 200, { ok: true, asset, folders: assetLibraryStore.listFolders(convId), summary: assetLibraryStore.summarize(convId) });
       return;
     }
     if (req.method === "DELETE" && url.pathname.startsWith("/api/conversations/") && url.pathname.includes("/assets/")) {

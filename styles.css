@@ -1478,68 +1478,81 @@ pre {
 }
 
 .asset-manager-drawer {
-  width: min(760px, calc(100vw - 24px));
+  width: min(860px, calc(100vw - 24px));
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.asset-manager-drawer .drawer-head {
+  background: #ffffff;
+  border-bottom-color: #e4ecfc;
+}
+
+.asset-manager-drawer .kicker,
+.asset-manager-drawer .drawer-head h2 {
+  color: #0f172a;
 }
 
 .asset-manager-layout {
   display: grid;
-  grid-template-columns: 210px 1fr;
+  grid-template-columns: 220px 1fr;
   min-height: 0;
   height: calc(100vh - 66px);
+  background: #f8fafc;
 }
 
 .asset-projects {
-  border-right: 1px solid var(--border);
-  padding: 12px;
+  border-right: 1px solid #e4ecfc;
+  padding: 10px;
   overflow: auto;
+  background: #f1f5fd;
 }
 
 .asset-section-title {
-  color: var(--text-2);
+  color: #475569;
   font-size: 12px;
   font-weight: 600;
   margin-bottom: 8px;
 }
 
-.asset-project-list,
-.asset-file-list {
+.asset-project-list {
   display: grid;
-  gap: 8px;
-}
-
-.asset-project-item,
-.asset-file-card {
-  min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: rgba(255, 255, 255, .025);
+  gap: 4px;
 }
 
 .asset-project-item {
-  padding: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #0f172a;
   text-align: left;
-  color: var(--text);
+  transition: background .16s ease, border-color .16s ease;
+}
+
+.asset-project-item:hover {
+  background: #ffffff;
+  border-color: #e4ecfc;
 }
 
 .asset-project-item.active {
-  border-color: rgba(56, 189, 248, .38);
-  background: rgba(56, 189, 248, .08);
+  border-color: #bfdbfe;
+  background: #dbeafe;
 }
 
-.asset-project-item strong,
-.asset-file-card strong {
+.asset-project-item strong {
   display: block;
   overflow: hidden;
-  color: var(--text);
+  color: #0f172a;
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .asset-project-item span,
-.asset-file-card span,
 .asset-manager-toolbar p {
-  color: var(--text-3);
+  color: #64748b;
   font-family: var(--mono);
   font-size: 11px;
 }
@@ -1547,8 +1560,9 @@ pre {
 .asset-files-pane {
   min-width: 0;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr;
   padding: 12px;
+  background: #ffffff;
 }
 
 .asset-manager-toolbar {
@@ -1556,39 +1570,211 @@ pre {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e4ecfc;
+}
+
+.asset-breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  margin-top: 6px;
+  padding: 0 10px;
+  border: 1px solid #e4ecfc;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+}
+
+.asset-command-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.asset-command-bar .ghost-btn {
+  min-height: 30px;
+  padding: 0 10px;
+  border-color: #dbeafe;
+  background: #ffffff;
+  color: #2563eb;
+  font-size: 12px;
+}
+
+.asset-command-bar .ghost-btn:hover {
+  background: #eff6ff;
+}
+
+.asset-command-bar .ghost-btn:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
+.asset-command-bar .ghost-btn.danger {
+  color: #dc2626;
+  border-color: #fee2e2;
+}
+
+.asset-table-head {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 100px 90px 150px;
+  gap: 10px;
+  min-height: 34px;
+  align-items: center;
+  padding: 0 12px;
+  border-bottom: 1px solid #e4ecfc;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.asset-table-head.folder-mode {
+  display: none;
 }
 
 .asset-file-list {
   overflow: auto;
-  padding-right: 4px;
+  padding: 10px 2px 2px;
 }
 
-.asset-file-card {
+.asset-explorer.folder-grid {
   display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  align-content: start;
+  gap: 10px;
+}
+
+.asset-folder-tile {
+  min-width: 0;
+  height: 112px;
+  display: grid;
+  grid-template-rows: 46px auto auto;
+  justify-items: center;
+  gap: 4px;
+  padding: 10px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #0f172a;
+  text-align: center;
+  transition: background .16s ease, border-color .16s ease;
+}
+
+.asset-folder-tile:hover {
+  background: #f8fafc;
+  border-color: #e4ecfc;
+}
+
+.asset-folder-tile.selected {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+
+.asset-folder-icon {
+  width: 48px;
+  height: 42px;
+  color: #2563eb;
+}
+
+.asset-folder-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.asset-folder-name {
+  max-width: 100%;
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-folder-meta {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.asset-file-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 100px 90px 150px;
+  gap: 10px;
+  min-height: 38px;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #0f172a;
+}
+
+.asset-file-row:hover {
+  background: #f8fafc;
+}
+
+.asset-file-row.selected {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+
+.asset-file-name {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
-  padding: 10px;
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.asset-file-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.asset-file-icon {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  color: #d97706;
 }
 
-.asset-file-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.asset-file-icon svg,
+.asset-file-icon svg.image,
+.asset-file-icon svg.video,
+.asset-file-icon svg.audio,
+.asset-file-icon svg.other {
+  width: 20px;
+  height: 20px;
 }
 
-.asset-file-actions select {
-  min-height: 30px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg);
-  color: var(--text-2);
+.asset-file-icon svg.image { color: #2563eb; }
+.asset-file-icon svg.video { color: #7c3aed; }
+.asset-file-icon svg.audio { color: #059669; }
+.asset-file-icon svg.other { color: #d97706; }
+
+.asset-file-kind,
+.asset-file-size {
+  color: #64748b;
   font-size: 12px;
+}
+
+.asset-file-usage select {
+  width: 100%;
+  min-height: 28px;
+  border: 1px solid #e4ecfc;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+}
+
+.asset-empty-state {
+  padding: 24px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 6px;
+  color: #64748b;
+  text-align: center;
+  font-size: 13px;
 }
 
 .asset-import-modal {

@@ -72,6 +72,12 @@ const refreshAssetManagerBtn = el("refreshAssetManagerBtn");
 const assetProjectList = el("assetProjectList");
 const assetFileList = el("assetFileList");
 const assetManagerPath = el("assetManagerPath");
+const assetBreadcrumb = el("assetBreadcrumb");
+const assetBackBtn = el("assetBackBtn");
+const newAssetFolderBtn = el("newAssetFolderBtn");
+const renameAssetItemBtn = el("renameAssetItemBtn");
+const deleteAssetItemBtn = el("deleteAssetItemBtn");
+const assetTableHead = el("assetTableHead");
 const projectCreateModal = el("projectCreateModal");
 const closeProjectCreateModal = el("closeProjectCreateModal");
 const cancelProjectCreate = el("cancelProjectCreate");
@@ -88,6 +94,9 @@ let conversationLoadToken = 0;
 let jobsPollTimer = null;
 let activeJobWaiters = new Set();
 let assetManagerSelectedConversationId = "";
+let assetManagerCurrentFolderId = "";
+let assetManagerSelection = null;
+let assetManagerCache = { folders: [], assets: [], projectFiles: [] };
 
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
 const DEVICE_STORAGE_KEY = "vibeboard-active-device";
@@ -2384,6 +2393,14 @@ if (assetDropZone) {
 assetManagerBtn?.addEventListener("click", () => setAssetManagerDrawer(true));
 closeAssetManagerDrawer?.addEventListener("click", () => setAssetManagerDrawer(false));
 refreshAssetManagerBtn?.addEventListener("click", () => loadAssetManager());
+assetBackBtn?.addEventListener("click", () => {
+  assetManagerCurrentFolderId = "";
+  assetManagerSelection = null;
+  renderAssetManagerExplorer();
+});
+newAssetFolderBtn?.addEventListener("click", () => createManagedFolder());
+renameAssetItemBtn?.addEventListener("click", () => renameSelectedAssetItem());
+deleteAssetItemBtn?.addEventListener("click", () => deleteSelectedAssetItem());
 closeProjectCreateModal?.addEventListener("click", () => setProjectCreateModal(false));
 cancelProjectCreate?.addEventListener("click", () => setProjectCreateModal(false));
 projectCreateForm?.addEventListener("submit", event => {
@@ -2619,6 +2636,7 @@ async function loadAssetManager(preferredConversationId = assetManagerSelectedCo
     } else {
       assetManagerPath.textContent = "暂无项目，请先新建 Project。";
       assetFileList.innerHTML = "";
+      assetManagerCache = { folders: [], assets: [], projectFiles: [] };
     }
   } catch (error) {
     assetFileList.innerHTML = `<div class="asset-file-card"><strong>加载失败</strong><span>${escapeHtml(error.message)}</span></div>`;
@@ -2651,57 +2669,106 @@ async function loadAssetManagerConversation(conversationId) {
   if (assetManagerPath) {
     assetManagerPath.textContent = filesData.project_dir || "项目文件夹尚未创建";
   }
-  renderAssetManagerFiles(conversationId, assetData.ok ? assetData.assets || [] : [], filesData.ok ? filesData.files || [] : []);
+  assetManagerCache = {
+    folders: assetData.ok ? assetData.folders || [] : [],
+    assets: assetData.ok ? assetData.assets || [] : [],
+    projectFiles: filesData.ok ? filesData.files || [] : [],
+  };
+  renderAssetManagerExplorer();
 }
 
-function renderAssetManagerFiles(conversationId, assets = [], projectFiles = []) {
+function renderAssetManagerExplorer() {
   if (!assetFileList) return;
-  const fileOnly = projectFiles.filter(file => !String(file.path || "").startsWith("assets/"));
-  const cards = [
-    ...assets.map(asset => assetManagerAssetCard(asset)),
-    ...fileOnly.map(file => assetManagerProjectFileCard(file)),
-  ];
-  assetFileList.innerHTML = cards.length
-    ? cards.join("")
-    : `<div class="asset-file-card"><strong>暂无资产</strong><span>点击聊天框里的“导入资产”开始添加。</span></div>`;
-  assetFileList.querySelectorAll("[data-asset-rename]").forEach(button => {
-    button.addEventListener("click", () => renameManagedAsset(conversationId, button.dataset.assetRename));
+  assetManagerSelection = null;
+  const currentFolder = currentAssetFolder();
+  if (assetBreadcrumb) {
+    assetBreadcrumb.textContent = currentFolder ? `资产 > ${currentFolder.name}` : "资产";
+  }
+  if (assetBackBtn) assetBackBtn.disabled = !currentFolder;
+  if (newAssetFolderBtn) newAssetFolderBtn.disabled = Boolean(currentFolder);
+  if (assetTableHead) assetTableHead.classList.toggle("folder-mode", !currentFolder);
+
+  if (!currentFolder) {
+    const folders = assetManagerCache.folders || [];
+    assetFileList.classList.add("folder-grid");
+    assetFileList.innerHTML = folders.length
+      ? folders.map(folder => assetManagerFolderTile(folder)).join("")
+      : `<div class="asset-empty-state">暂无文件夹</div>`;
+    assetFileList.querySelectorAll("[data-folder-open]").forEach(item => {
+      item.addEventListener("dblclick", () => openAssetFolder(item.dataset.folderOpen));
+      item.addEventListener("click", () => selectAssetManagerItem("folder", item.dataset.folderOpen));
+    });
+    return;
+  }
+
+  const assets = (assetManagerCache.assets || []).filter(asset => asset.folder_id === currentFolder.id);
+  assetFileList.classList.remove("folder-grid");
+  assetFileList.innerHTML = assets.length
+    ? assets.map(asset => assetManagerFileRow(asset)).join("")
+    : `<div class="asset-empty-state">此文件夹为空。导入资产后会自动归类到这里。</div>`;
+  assetFileList.querySelectorAll("[data-asset-row]").forEach(row => {
+    row.addEventListener("click", () => selectAssetManagerItem("asset", row.dataset.assetRow));
   });
   assetFileList.querySelectorAll("[data-asset-usage]").forEach(select => {
-    select.addEventListener("change", () => updateManagedAsset(conversationId, select.dataset.assetUsage, { usage: select.value }));
+    select.addEventListener("click", event => event.stopPropagation());
+    select.addEventListener("change", () => updateManagedAsset(assetManagerSelectedConversationId, select.dataset.assetUsage, { usage: select.value }));
   });
 }
 
-function assetManagerAssetCard(asset = {}) {
+function currentAssetFolder() {
+  if (!assetManagerCurrentFolderId) return null;
+  return (assetManagerCache.folders || []).find(folder => folder.id === assetManagerCurrentFolderId) || null;
+}
+
+function assetManagerFolderTile(folder = {}) {
+  return `
+    <button class="asset-folder-tile" type="button" data-folder-open="${escapeHtml(folder.id)}" title="${escapeHtml(folder.name)}">
+      <span class="asset-folder-icon" aria-hidden="true">${folderIconSvg()}</span>
+      <span class="asset-folder-name">${escapeHtml(folder.name)}</span>
+      <span class="asset-folder-meta">${folder.asset_count || 0} 个文件</span>
+    </button>
+  `;
+}
+
+function assetManagerFileRow(asset = {}) {
   const usage = asset.usage || "auto";
   return `
-    <div class="asset-file-card">
-      <strong>▣ ${escapeHtml(asset.name || "asset")}</strong>
-      <div class="asset-file-meta">
-        <span>${escapeHtml(asset.kind || "file")}</span>
-        <span>${formatBytes(asset.size || 0)}</span>
-        <span>${escapeHtml(asset.project_path || "project path pending")}</span>
-      </div>
-      <div class="asset-file-actions">
+    <div class="asset-file-row" data-asset-row="${escapeHtml(asset.id)}" title="${escapeHtml(asset.project_path || asset.name || "")}">
+      <span class="asset-file-name"><span class="asset-file-icon" aria-hidden="true">${fileIconSvg(asset.kind)}</span>${escapeHtml(asset.name || "asset")}</span>
+      <span class="asset-file-kind">${assetKindLabel(asset.kind)}</span>
+      <span class="asset-file-size">${formatBytes(asset.size || 0)}</span>
+      <span class="asset-file-usage">
         <select data-asset-usage="${escapeHtml(asset.id)}" aria-label="Asset usage">
           ${["auto", "embeddable", "reference_only", "ignored", "used_in_build"].map(value => `<option value="${value}" ${usage === value ? "selected" : ""}>${assetUsageLabel(value)}</option>`).join("")}
         </select>
-        <button class="ghost-btn" type="button" data-asset-rename="${escapeHtml(asset.id)}">重命名</button>
-      </div>
+      </span>
     </div>
   `;
 }
 
-function assetManagerProjectFileCard(file = {}) {
-  return `
-    <div class="asset-file-card">
-      <strong>${escapeHtml(file.path || "file")}</strong>
-      <div class="asset-file-meta">
-        <span>${formatBytes(file.size || 0)}</span>
-        <span>${escapeHtml(file.updated_at || "")}</span>
-      </div>
-    </div>
-  `;
+function openAssetFolder(folderId = "") {
+  assetManagerCurrentFolderId = folderId;
+  assetManagerSelection = null;
+  renderAssetManagerExplorer();
+}
+
+function selectAssetManagerItem(type, id) {
+  assetManagerSelection = { type, id };
+  assetFileList?.querySelectorAll(".asset-folder-tile, .asset-file-row").forEach(node => {
+    node.classList.toggle("selected",
+      (type === "folder" && node.dataset.folderOpen === id) ||
+      (type === "asset" && node.dataset.assetRow === id));
+  });
+}
+
+function selectedFolder() {
+  if (assetManagerSelection?.type !== "folder") return null;
+  return (assetManagerCache.folders || []).find(folder => folder.id === assetManagerSelection.id) || null;
+}
+
+function selectedAsset() {
+  if (assetManagerSelection?.type !== "asset") return null;
+  return (assetManagerCache.assets || []).find(asset => asset.id === assetManagerSelection.id) || null;
 }
 
 function assetUsageLabel(value) {
@@ -2712,6 +2779,30 @@ function assetUsageLabel(value) {
     ignored: "忽略",
     used_in_build: "已用于构建",
   }[value] || value;
+}
+
+function assetKindLabel(kind = "") {
+  return {
+    image: "图片",
+    video: "视频",
+    audio: "音频",
+    document: "文档",
+    design: "设计",
+    archive: "压缩包",
+    text: "文本",
+    font: "字体",
+    data: "数据",
+    component: "组件",
+  }[kind] || "其他";
+}
+
+function folderIconSvg() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v8A3.5 3.5 0 0 1 17.5 20h-11A3.5 3.5 0 0 1 3 16.5v-10Z" fill="currentColor"/></svg>`;
+}
+
+function fileIconSvg(kind = "") {
+  const colorClass = kind === "image" ? "image" : kind === "video" ? "video" : kind === "audio" ? "audio" : "other";
+  return `<svg class="${colorClass}" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6V3Z" fill="currentColor" opacity=".18"/><path d="M14 3v5h5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 13h8M8 17h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
 }
 
 function formatBytes(bytes = 0) {
@@ -2725,6 +2816,79 @@ async function renameManagedAsset(conversationId, assetId) {
   const nextName = prompt("输入新的资产名称", "");
   if (!nextName?.trim()) return;
   await updateManagedAsset(conversationId, assetId, { name: nextName.trim() });
+}
+
+async function createManagedFolder() {
+  if (!assetManagerSelectedConversationId) return;
+  const name = prompt("新建文件夹名称", "新建文件夹");
+  if (!name?.trim()) return;
+  try {
+    await postJson(`${API_BASE}/api/conversations/${assetManagerSelectedConversationId}/asset-folders`, {
+      name: name.trim(),
+    }, { timeout: 30000 });
+    await loadAssetManager(assetManagerSelectedConversationId);
+  } catch (error) {
+    addMarkdownMessage("agent", `新建文件夹失败：${friendlyErrorMarkdown(error.data, error.message)}`);
+  }
+}
+
+async function renameSelectedAssetItem() {
+  if (!assetManagerSelectedConversationId || !assetManagerSelection) return;
+  const folder = selectedFolder();
+  const asset = selectedAsset();
+  const target = folder || asset;
+  if (!target) return;
+  const name = prompt("输入新的名称", target.name || "");
+  if (!name?.trim()) return;
+  try {
+    if (folder) {
+      await postJson(`${API_BASE}/api/conversations/${assetManagerSelectedConversationId}/asset-folders/${encodeURIComponent(folder.id)}`, {
+        name: name.trim(),
+      }, { method: "PATCH", timeout: 30000 });
+    } else if (asset) {
+      await updateManagedAsset(assetManagerSelectedConversationId, asset.id, { name: name.trim() });
+      return;
+    }
+    await loadAssetManager(assetManagerSelectedConversationId);
+  } catch (error) {
+    addMarkdownMessage("agent", `重命名失败：${friendlyErrorMarkdown(error.data, error.message)}`);
+  }
+}
+
+async function deleteSelectedAssetItem() {
+  if (!assetManagerSelectedConversationId || !assetManagerSelection) return;
+  const folder = selectedFolder();
+  const asset = selectedAsset();
+  const target = folder || asset;
+  if (!target) return;
+  const typeLabel = folder ? "文件夹" : "文件";
+  if (!confirm(`确定删除${typeLabel}“${target.name}”吗？`)) return;
+  try {
+    if (folder) {
+      await fetch(`${API_BASE}/api/conversations/${assetManagerSelectedConversationId}/asset-folders/${encodeURIComponent(folder.id)}`, {
+        method: "DELETE",
+      }).then(async res => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.ok === false) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { data });
+        return data;
+      });
+    } else if (asset) {
+      await fetch(`${API_BASE}/api/conversations/${assetManagerSelectedConversationId}/assets/${encodeURIComponent(asset.id)}`, {
+        method: "DELETE",
+      }).then(async res => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.ok === false) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { data });
+        return data;
+      });
+    }
+    assetManagerSelection = null;
+    await loadAssetManager(assetManagerSelectedConversationId);
+    if (assetManagerSelectedConversationId === currentConversationId) {
+      await loadConversationAssets(currentConversationId);
+    }
+  } catch (error) {
+    addMarkdownMessage("agent", `删除失败：${friendlyErrorMarkdown(error.data, error.message)}`);
+  }
 }
 
 async function updateManagedAsset(conversationId, assetId, patch = {}) {

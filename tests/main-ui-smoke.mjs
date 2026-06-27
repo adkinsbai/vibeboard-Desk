@@ -83,6 +83,11 @@ await withServer(async ({ baseUrl, json }) => {
     await page.locator("#assetManagerBtn").click();
     await page.locator("#assetManagerDrawer.open").waitFor({ timeout: 3000 });
     await page.locator(".asset-project-item").first().waitFor({ timeout: 3000 });
+    await page.locator(".asset-folder-tile").first().waitFor({ timeout: 3000 });
+    const folderCount = await page.locator(".asset-folder-tile").count();
+    assert(folderCount >= 4, "asset manager should show default category folders");
+    await page.locator(".asset-folder-tile").first().dblclick();
+    await page.waitForFunction(() => document.querySelector("#assetBreadcrumb")?.textContent?.includes(">"));
 
     await page.evaluate(() => window.setBusy(false));
     await page.locator("#promptInput").fill("Enter should submit from the main composer");

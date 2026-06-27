@@ -3,6 +3,7 @@ node_modules/
 
 # Database (runtime data)
 vibeboard.db
+VibeBoard Projects/
 
 # Logs
 *.log

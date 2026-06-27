@@ -168,7 +168,27 @@ try {
   await new Promise(resolve => setTimeout(resolve, 250));
   const assetList = await json(`/api/conversations/${conversationA.id}/assets`);
   const asset = assetList.assets?.[0];
+  assert(assetList.folders?.some(folder => folder.name === "图片"), "asset API should expose image folder");
+  assert(assetList.folders?.some(folder => folder.name === "视频"), "asset API should expose video folder");
+  assert(assetList.folders?.some(folder => folder.name === "音频"), "asset API should expose audio folder");
+  assert(assetList.folders?.some(folder => folder.name === "其他"), "asset API should expose other folder");
   assert(asset?.project_path?.includes("palette.txt"), `asset should persist into project folder: ${JSON.stringify(asset)}`);
+  const otherFolder = assetList.folders.find(folder => folder.name === "其他");
+  assert(asset.folder_id === otherFolder.id, "text asset should auto-classify into other folder");
+  const customFolder = await json(`/api/conversations/${conversationA.id}/asset-folders`, {
+    method: "POST",
+    body: JSON.stringify({ name: "参考素材" }),
+  });
+  assert(customFolder.folder?.name === "参考素材", "custom folder should be creatable");
+  const renamedFolder = await json(`/api/conversations/${conversationA.id}/asset-folders/${encodeURIComponent(customFolder.folder.id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name: "视觉参考" }),
+  });
+  assert(renamedFolder.folder?.name === "视觉参考", "custom folder should be renameable");
+  const deletedFolder = await json(`/api/conversations/${conversationA.id}/asset-folders/${encodeURIComponent(customFolder.folder.id)}`, {
+    method: "DELETE",
+  });
+  assert(deletedFolder.ok === true && deletedFolder.moved_to, "custom folder should be deleteable");
   const renamed = await json(`/api/conversations/${conversationA.id}/assets/${encodeURIComponent(asset.id)}`, {
     method: "PATCH",
     body: JSON.stringify({ name: "palette-renamed.txt", usage: "reference_only" }),
