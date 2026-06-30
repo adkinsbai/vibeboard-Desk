@@ -139,9 +139,13 @@
                 </div>
               </div>
               <div class="device-stage">
-                <div class="mac-photo" id="macPhoto">
+                <div class="mac-photo preview-loading" id="macPhoto">
                   <img id="macPhotoImg" src="/mac-frame.png" alt="Taishan Board" class="mac-photo-img">
                   <div class="mac-screen-overlay">
+                    <div class="preview-loading-mask" id="previewLoadingMask" aria-live="polite">
+                      <span></span>
+                      <strong>Loading preview</strong>
+                    </div>
                     <iframe id="deviceFrame" title="Generated 480x360 screen preview" srcdoc='<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;}</style></head><body></body></html>'></iframe>
                   </div>
                 </div>

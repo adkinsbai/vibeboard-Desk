@@ -57,6 +57,40 @@ await withServer(async ({ baseUrl, json }) => {
     const activeId = await page.locator(".conv-item.active").getAttribute("data-id");
     assert(activeId === second.id, "busy state should not block conversation selection");
 
+    await page.evaluate(() => window.__previewGateBefore = {
+      maskOpacity: getComputedStyle(document.querySelector("#previewLoadingMask")).opacity,
+      frameOpacity: getComputedStyle(document.querySelector("#deviceFrame")).opacity,
+    });
+    await page.route("**/never-finishes-preview.html*", () => {});
+    await page.evaluate(() => window.setDeviceFrameSrc("/never-finishes-preview.html"));
+    await page.waitForFunction(() => (
+      getComputedStyle(document.querySelector("#previewLoadingMask")).opacity === "1" &&
+      getComputedStyle(document.querySelector("#deviceFrame")).opacity === "0"
+    ));
+    const previewLoadingState = await page.locator("#macPhoto").evaluate(node => ({
+      loading: node.classList.contains("preview-loading"),
+      ready: node.classList.contains("preview-ready"),
+      maskOpacity: getComputedStyle(document.querySelector("#previewLoadingMask")).opacity,
+      frameOpacity: getComputedStyle(document.querySelector("#deviceFrame")).opacity,
+    }));
+    assert(previewLoadingState.loading, "device preview should enter loading state before iframe load");
+    assert(!previewLoadingState.ready, "device preview should not be ready while iframe is still loading");
+    assert(previewLoadingState.maskOpacity === "1", "loading mask should hide incomplete preview");
+    assert(previewLoadingState.frameOpacity === "0", "iframe should remain hidden before preview load completes");
+    await page.evaluate(() => window.setDeviceFrameSrc("/generated/current/index.html?test=preview-gate"));
+    await page.waitForFunction(() => (
+      document.querySelector("#macPhoto")?.classList.contains("preview-ready") &&
+      getComputedStyle(document.querySelector("#deviceFrame")).opacity === "1"
+    ));
+    const previewReadyState = await page.locator("#macPhoto").evaluate(node => ({
+      loading: node.classList.contains("preview-loading"),
+      ready: node.classList.contains("preview-ready"),
+      frameOpacity: getComputedStyle(document.querySelector("#deviceFrame")).opacity,
+    }));
+    assert(!previewReadyState.loading && previewReadyState.ready, "device preview should leave loading state after iframe load");
+    assert(previewReadyState.frameOpacity === "1", "iframe should fade in only after load");
+    await page.unroute("**/never-finishes-preview.html*");
+
     const beforeCreate = await page.locator(".conv-item").count();
     await page.locator("#newConversationBtn").click();
     await page.locator("#projectCreateModal.open").waitFor({ timeout: 3000 });

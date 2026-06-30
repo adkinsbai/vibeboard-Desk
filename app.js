@@ -42,6 +42,7 @@ const codePreview = el("codePreview");
 const screenViewport = el("screenViewport");
 const deviceScreen = el("deviceScreen");
 const deviceFrame = el("deviceFrame");
+const previewLoadingMask = el("previewLoadingMask");
 const deviceSelect = el("deviceSelect");
 const macPhoto = el("macPhoto");
 const macPhotoImg = el("macPhotoImg");
@@ -117,6 +118,8 @@ const authMessage = el("authMessage");
 let generatedFiles = {};
 let activeFile = "";
 let busy = false;
+let previewLoadToken = 0;
+let previewReadyTimer = null;
 let foregroundTaskCount = 0;
 let conversationInitPromise = null;
 let conversationLoadToken = 0;
@@ -1385,6 +1388,7 @@ function makeConversationPreviewUrl(conversationId, buildId = Date.now()) {
 
 function showBlankDeviceFrame() {
   if (!deviceFrame) return;
+  setPreviewLoading("Preparing preview");
   deviceFrame.removeAttribute("src");
   deviceFrame.srcdoc = BLANK_DEVICE_FRAME_HTML;
   scheduleFitDeviceFrame();
@@ -1392,8 +1396,34 @@ function showBlankDeviceFrame() {
 
 function setDeviceFrameSrc(src) {
   if (!deviceFrame || !src) return;
+  setPreviewLoading("Loading preview");
   deviceFrame.removeAttribute("srcdoc");
   deviceFrame.src = src;
+}
+
+function setPreviewLoading(label = "Loading preview") {
+  previewLoadToken += 1;
+  if (previewReadyTimer) {
+    window.clearTimeout(previewReadyTimer);
+    previewReadyTimer = null;
+  }
+  if (previewLoadingMask) {
+    const text = previewLoadingMask.querySelector("strong");
+    if (text) text.textContent = label;
+  }
+  macPhoto?.classList.add("preview-loading");
+  macPhoto?.classList.remove("preview-ready");
+}
+
+function markPreviewReady(token = previewLoadToken) {
+  scheduleFitDeviceFrame();
+  if (!macPhoto || token !== previewLoadToken) return;
+  if (previewReadyTimer) window.clearTimeout(previewReadyTimer);
+  previewReadyTimer = window.setTimeout(() => {
+    if (token !== previewLoadToken) return;
+    macPhoto.classList.remove("preview-loading");
+    macPhoto.classList.add("preview-ready");
+  }, 120);
 }
 
 function applyDeviceProfile({ refresh = true } = {}) {
@@ -2740,7 +2770,10 @@ syncAgentModeUi();
 loadJobs({ silent: true });
 window.addEventListener("resize", scheduleFitDeviceFrame);
 if (deviceFrame) {
-  deviceFrame.addEventListener("load", scheduleFitDeviceFrame);
+  deviceFrame.addEventListener("load", () => markPreviewReady());
+  if (deviceFrame.contentDocument?.readyState === "complete") {
+    markPreviewReady();
+  }
 }
 const macOverlay = document.querySelector('.mac-screen-overlay');
 if (macOverlay && "ResizeObserver" in window) {
