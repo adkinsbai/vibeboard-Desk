@@ -11,9 +11,9 @@
     <header class="admin-header">
       <div>
         <p class="kicker">VibeBoard Admin</p>
-        <h1>账户与 Credits</h1>
+        <h1>账户、Credits 与数据上报</h1>
       </div>
-      <a class="ghost-btn" href="/">返回工作台</a>
+      <a class="ghost-btn" href="/">返回主控</a>
     </header>
     <section class="admin-summary" id="adminSummary"></section>
     <section class="admin-grid">
@@ -59,6 +59,29 @@
               </tr>
             </thead>
             <tbody id="adminLedgerBody"></tbody>
+          </table>
+        </div>
+      </article>
+      <article class="admin-panel">
+        <div class="drawer-head">
+          <div>
+            <p class="kicker">Telemetry</p>
+            <h2>匿名数据上报</h2>
+          </div>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>用户哈希</th>
+                <th>事件</th>
+                <th>页面</th>
+                <th>开发板</th>
+                <th>详情</th>
+              </tr>
+            </thead>
+            <tbody id="adminTelemetryBody"></tbody>
           </table>
         </div>
       </article>

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibeBoard</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body class="portal-page">
+  <main class="portal-shell">
+    <header class="portal-header">
+      <div class="portal-brand">
+        <div class="mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div>
+          <p>VibeBoard</p>
+          <h1>开发板主控平台</h1>
+        </div>
+      </div>
+      <div class="portal-header-actions">
+        <a class="ghost-btn" href="/workbench">进入当前工作台</a>
+        <a class="ghost-btn" href="/admin.html" id="portalAdminLink" hidden>后台</a>
+        <button class="ghost-btn" id="portalLogoutBtn" type="button" hidden>退出登录</button>
+      </div>
+    </header>
+
+    <section class="portal-grid">
+      <article class="portal-auth-card" id="portalAuthCard">
+        <p class="kicker">Account</p>
+        <h2 id="portalAuthTitle">Sign in to VibeBoard</h2>
+        <div class="auth-tabs" role="tablist">
+          <button class="auth-tab active" id="portalLoginTab" type="button" aria-selected="true">Sign in</button>
+          <button class="auth-tab" id="portalRegisterTab" type="button" aria-selected="false">Sign up</button>
+        </div>
+        <form class="auth-form" id="portalLoginForm">
+          <label class="auth-field">
+            <span>Phone number</span>
+            <input id="portalLoginPhone" type="tel" autocomplete="tel" required>
+          </label>
+          <label class="auth-field">
+            <span>Password</span>
+            <input id="portalLoginPassword" type="password" autocomplete="current-password" required>
+          </label>
+          <button class="primary-btn wide" type="submit">Sign in</button>
+        </form>
+        <form class="auth-form hidden" id="portalRegisterForm">
+          <label class="auth-field">
+            <span>Phone number</span>
+            <input id="portalRegisterPhone" type="tel" autocomplete="tel" required>
+          </label>
+          <label class="auth-field">
+            <span>Password</span>
+            <input id="portalRegisterPassword" type="password" autocomplete="new-password" minlength="8" required>
+          </label>
+          <button class="primary-btn wide" type="submit">Sign up</button>
+        </form>
+        <p class="auth-message" id="portalAuthMessage"></p>
+      </article>
+
+      <section class="portal-board-area" id="portalBoardArea" hidden>
+        <div class="portal-section-head">
+          <div>
+            <p class="kicker">Boards</p>
+            <h2>选择你的开发板</h2>
+          </div>
+          <p id="portalUserLabel"></p>
+        </div>
+        <div class="board-catalog" id="boardCatalog"></div>
+      </section>
+    </section>
+  </main>
+  <script src="./telemetry.js"></script>
+  <script src="./portal.js"></script>
+</body>
+</html>

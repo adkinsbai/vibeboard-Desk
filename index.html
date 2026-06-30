@@ -58,12 +58,21 @@
           </div>
         </div>
         <div class="top-actions">
-          <button class="credit-chip" id="creditChip" type="button">Usage</button>
-          <a class="ghost-btn admin-link" id="adminLink" href="/admin.html" hidden>Admin</a>
-          <button class="ghost-btn" id="accountBtn" type="button">登录</button>
-          <button class="ghost-btn" id="jobCenterBtn" type="button">Tasks</button>
+          <div class="account-menu-wrap" id="accountMenuWrap">
+            <button class="ghost-btn account-menu-trigger" id="accountBtn" type="button" aria-haspopup="menu" aria-expanded="false">账户</button>
+            <div class="account-menu" id="accountMenu" role="menu" hidden>
+              <div class="account-menu-head">
+                <span>账户</span>
+                <strong id="accountIdentity">未登录</strong>
+              </div>
+              <button class="credit-chip account-menu-item" id="creditChip" type="button">用量</button>
+              <a class="account-menu-item admin-link" id="adminLink" href="/admin.html" hidden>后台管理</a>
+              <button class="account-menu-item" id="accountLogoutBtn" type="button" hidden>退出登录</button>
+            </div>
+          </div>
+          <button class="ghost-btn" id="jobCenterBtn" type="button">任务列表</button>
           <button class="icon-btn" id="codeToggle" type="button" aria-label="Open generated code">&lt;/&gt;</button>
-          <button class="ghost-btn" id="refreshBoardBtn" type="button">Status</button>
+          <button class="ghost-btn" id="refreshBoardBtn" type="button">硬件连接情况</button>
           <button class="ghost-btn model-btn" id="modelConfigBtn" type="button"><span id="modelDot"></span><span id="modelButtonLabel">Model</span></button>
         </div>
       </header>
@@ -441,6 +450,7 @@
   </section>
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="telemetry.js"></script>
   <script src="app.js"></script>
   <script src="mac-debug.js"></script>
 </body>

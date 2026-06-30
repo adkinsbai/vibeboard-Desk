@@ -9,7 +9,8 @@ await withServer(async ({ baseUrl, json }) => {
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1366, height: 820 } });
   try {
-    await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
+    await page.goto(`${baseUrl}/workbench`, { waitUntil: "domcontentloaded" });
+    await page.locator("#chatLog").waitFor({ timeout: 6000 });
     await page.evaluate(() => {
       window.__vibeboardTestEvents = [];
       const originalFetch = window.fetch.bind(window);
@@ -119,7 +120,7 @@ await withServer(async ({ baseUrl, json }) => {
     await page.locator("#closeStatusDrawer").click();
     await page.waitForFunction(() => !document.querySelector("#statusDrawer")?.classList.contains("open"));
 
-    await page.locator("#creditChip").click();
+    await page.locator("#accountBtn").click();
     await page.locator("#authModal.open").waitFor({ timeout: 3000 });
     const authStyle = await page.locator(".auth-panel").evaluate(node => {
       const visibleInputs = [...node.querySelectorAll(".auth-form:not(.hidden) .auth-field input")];
@@ -146,6 +147,7 @@ await withServer(async ({ baseUrl, json }) => {
     assert(authStyle.inputRects.every(rect => rect.x === authStyle.submitRect.x && rect.width === authStyle.submitRect.width), "auth fields and submit button should align");
     assert(authStyle.submitBackground === "rgb(31, 143, 58)", "auth submit button should use the green action color");
     assert(authStyle.activeTabBackground === "rgb(31, 143, 58)", "active auth tab should use the green selected color");
+    assert(await page.locator("#creditChip").count() === 1, "usage action should live in the account menu");
     const usageSurface = await page.locator("#usageDrawer").evaluate(node => ({
       open: node.classList.contains("open"),
       hasToolbar: Boolean(document.querySelector("#refreshUsageBtn")),

@@ -10,6 +10,8 @@ import { neon } from "@neondatabase/serverless";
 import { createAuthStore, clearSessionCookie, httpError, sessionCookie } from "./src/authStore.mjs";
 import { createCloudSqliteSnapshot } from "./src/cloudSqliteSnapshot.mjs";
 import { createPhoneVerificationService } from "./src/phoneVerification.mjs";
+import { buildBoardCatalog } from "./src/boardCatalog.mjs";
+import { createTelemetryStore } from "./src/telemetryStore.mjs";
 import { creditsForTokens, estimateTokensFromPayload, tokensFromModelResponse } from "./src/creditMeter.mjs";
 import {
   boardEndpoints,
@@ -255,6 +257,8 @@ assetLibraryStore.initSchema();
 const authStore = createAuthStore({ sqliteDb: db, saveSqlite: saveDb, pg, env: process.env });
 await authStore.initSchema();
 const phoneVerification = createPhoneVerificationService({ authStore, env: process.env });
+const telemetryStore = createTelemetryStore({ sqliteDb: db, saveSqlite: saveDb, pg, env: process.env });
+await telemetryStore.initSchema();
 
 const projectWorkspace = createProjectWorkspace({
   root: ROOT,
@@ -412,6 +416,8 @@ async function requireApiUser(req, res, url) {
 function isPublicApi(pathname) {
   return pathname === "/api/me" ||
     pathname.startsWith("/api/auth/") ||
+    pathname === "/api/board-catalog" ||
+    pathname === "/api/telemetry" ||
     pathname === "/api/health" ||
     pathname === "/healthz";
 }
@@ -530,7 +536,7 @@ function staticCacheFor(filePath) {
   if (relative === "index.html" || relative === "market.html" || ext === ".html") {
     return "no-store";
   }
-  if (relative === "app.js" || relative === "styles.css" || relative.startsWith("digital-life.")) {
+  if (relative === "app.js" || relative === "portal.js" || relative === "telemetry.js" || relative === "styles.css" || relative.startsWith("digital-life.")) {
     return "no-store";
   }
   if (relative.startsWith("generated/current/")) {
@@ -549,7 +555,11 @@ function staticCacheFor(filePath) {
 }
 
 function resolveStaticFilePath(pathname) {
-  const normalizedPath = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
+  const normalizedPath = pathname === "/"
+    ? "/portal.html"
+    : pathname === "/workbench"
+      ? "/index.html"
+      : decodeURIComponent(pathname);
   if (normalizedPath === "/generated/current" || normalizedPath.startsWith("/generated/current/")) {
     const suffix = normalizedPath.slice("/generated/current".length).replace(/^\/+/, "");
     const filePath = path.resolve(GENERATED_DIR, suffix);
@@ -2639,8 +2649,9 @@ jobRuntime.register("deploy", async (body = {}, ctx) => {
 jobRuntime.resumeQueuedJobs();
 
 async function route(req, res) {
+  let url = null;
   try {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    url = new URL(req.url, `http://${req.headers.host}`);
     if (req.method === "GET" && url.pathname === "/favicon.ico") {
       res.writeHead(200, {
         "Content-Type": "image/svg+xml; charset=utf-8",
@@ -2651,6 +2662,10 @@ async function route(req, res) {
     }
     if (req.method === "GET" && (url.pathname === "/api/health" || url.pathname === "/healthz")) {
       json(res, 200, { ok: true, publicDeployment: PUBLIC_DEPLOYMENT, auth: true, billingMode: BILLING_MODE, phoneVerificationRequired: REQUIRE_PHONE_VERIFICATION, db: pg ? "postgres" : "sqlite" });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/board-catalog") {
+      json(res, 200, { ok: true, boards: buildBoardCatalog(process.env) });
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/me") {
@@ -2697,6 +2712,13 @@ async function route(req, res) {
       jsonWithHeaders(res, 200, { ok: true }, { "Set-Cookie": clearSessionCookie() });
       return;
     }
+    if (req.method === "POST" && url.pathname === "/api/telemetry") {
+      const body = await readBody(req, { limitBytes: 256 * 1024 }).catch(() => ({}));
+      const user = await currentUser(req).catch(() => null);
+      const event = await telemetryStore.recordClientEvent({ req, user, body });
+      json(res, 200, { ok: true, event });
+      return;
+    }
 
     const requestUser = req.url.startsWith("/api/")
       ? await requireApiUser(req, res, url)
@@ -2724,6 +2746,11 @@ async function route(req, res) {
     if (req.method === "GET" && url.pathname === "/api/admin/credits") {
       await authStore.requireAdmin(req);
       json(res, 200, { ok: true, ledger: await authStore.listCreditLedger({ userId: url.searchParams.get("user_id") || "", limit: Number(url.searchParams.get("limit") || 200) }) });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/admin/telemetry") {
+      await authStore.requireAdmin(req);
+      json(res, 200, { ok: true, events: await telemetryStore.list({ limit: Number(url.searchParams.get("limit") || 300) }) });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/admin/credits") {
@@ -3410,6 +3437,23 @@ async function route(req, res) {
     await serveStatic(req, res);
   } catch (error) {
     const classified = classifyError(error);
+    if (url?.pathname !== "/api/telemetry") {
+      await telemetryStore.record({
+        req,
+        user: await currentUser(req).catch(() => null),
+        eventType: "server.error",
+        category: "api",
+        action: url?.pathname || req.url || "",
+        page: url?.pathname || "",
+        severity: "error",
+        payload: {
+          message: error.message,
+          statusCode: classified.statusCode || error.statusCode || 500,
+          errorType: classified.errorType || "",
+          stack: process.env.NODE_ENV === "production" ? "" : error.stack,
+        },
+      }).catch(() => {});
+    }
     json(res, classified.statusCode || error.statusCode || 500, {
       ok: false,
       error: error.message,

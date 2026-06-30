@@ -92,6 +92,10 @@ const projectCreateForm = el("projectCreateForm");
 const projectNameInput = el("projectNameInput");
 const projectRootHint = el("projectRootHint");
 const accountBtn = el("accountBtn");
+const accountMenuWrap = el("accountMenuWrap");
+const accountMenu = el("accountMenu");
+const accountIdentity = el("accountIdentity");
+const accountLogoutBtn = el("accountLogoutBtn");
 const adminLink = el("adminLink");
 const creditChip = el("creditChip");
 const authModal = el("authModal");
@@ -156,6 +160,12 @@ const deviceProfiles = {
 };
 
 function getActiveDeviceId() {
+  const params = new URLSearchParams(window.location.search);
+  const selected = params.get("board") || "";
+  if (selected && deviceProfiles[selected]) {
+    localStorage.setItem(DEVICE_STORAGE_KEY, selected);
+    return selected;
+  }
   const saved = localStorage.getItem(DEVICE_STORAGE_KEY);
   if (saved && deviceProfiles[saved]) return saved;
   return "taishan-gray";
@@ -750,18 +760,31 @@ async function refreshAccountState() {
     const res = await fetch("/api/me", { cache: "no-store" });
     const data = await res.json().catch(() => ({}));
     currentUser = data.user || null;
-    if (accountBtn) accountBtn.textContent = currentUser ? currentUser.phone : "登录";
+    if (accountBtn) accountBtn.textContent = "账户";
+    if (accountIdentity) accountIdentity.textContent = currentUser ? currentUser.phone : "未登录";
     if (adminLink) adminLink.hidden = currentUser?.role !== "admin";
+    if (accountLogoutBtn) accountLogoutBtn.hidden = !currentUser;
     if (creditChip) {
       const monthTokens = Number(data.usage?.month_tokens || 0);
-      creditChip.textContent = currentUser ? `Usage ${formatCompactNumber(monthTokens)} tokens` : "Usage";
+      creditChip.textContent = currentUser ? `用量 ${formatCompactNumber(monthTokens)} tokens` : "用量";
     }
     return currentUser;
   } catch {
     currentUser = null;
-    if (creditChip) creditChip.textContent = "Usage";
+    if (accountBtn) accountBtn.textContent = "账户";
+    if (accountIdentity) accountIdentity.textContent = "未登录";
+    if (accountLogoutBtn) accountLogoutBtn.hidden = true;
+    if (adminLink) adminLink.hidden = true;
+    if (creditChip) creditChip.textContent = "用量";
     return null;
   }
+}
+
+function setAccountMenu(open) {
+  if (!accountMenu || !accountBtn) return;
+  const shouldOpen = Boolean(open && currentUser);
+  accountMenu.hidden = !shouldOpen;
+  accountBtn.setAttribute("aria-expanded", String(shouldOpen));
 }
 
 function setAuthModal(open) {
@@ -2611,7 +2634,21 @@ modelForm?.addEventListener("submit", event => {
   setModelModal(false);
   addMessage("agent", `模型配置已保存：${providerPresets[modelSettings.provider]?.label || modelSettings.provider} / ${modelSettings.model || "未填写模型"}`);
 });
-accountBtn?.addEventListener("click", () => setAuthModal(true));
+accountBtn?.addEventListener("click", event => {
+  event.stopPropagation();
+  if (!currentUser) {
+    setAuthModal(true);
+    return;
+  }
+  setAccountMenu(accountMenu?.hidden);
+});
+accountLogoutBtn?.addEventListener("click", async event => {
+  event.stopPropagation();
+  await authFetch("/api/auth/logout", {}).catch(() => {});
+  currentUser = null;
+  setAccountMenu(false);
+  await refreshAccountState();
+});
 creditChip?.addEventListener("click", () => {
   if (!currentUser) {
     setAuthModal(true);
@@ -2644,6 +2681,7 @@ registerForm?.addEventListener("submit", async event => {
       phone: registerPhone.value.trim(),
       password: registerPassword.value,
     });
+    window.VibeTelemetry?.track("auth.register", { category: "auth" });
     await refreshAccountState();
     setAuthModal(false);
     await loadConversations();
@@ -2659,6 +2697,7 @@ loginForm?.addEventListener("submit", async event => {
       phone: loginPhone.value.trim(),
       password: loginPassword.value,
     });
+    window.VibeTelemetry?.track("auth.login", { category: "auth" });
     await refreshAccountState();
     setAuthModal(false);
     await loadConversations();
@@ -2673,12 +2712,16 @@ clearModelSettings?.addEventListener("click", () => {
 });
 scrim?.addEventListener("click", closeDrawers);
 document.addEventListener("click", event => {
+  if (accountMenuWrap && !accountMenuWrap.contains(event.target)) {
+    setAccountMenu(false);
+  }
   if (!assetContextMenu || assetContextMenu.hidden) return;
   if (event.target.closest("#assetContextMenu")) return;
   hideAssetContextMenu();
 });
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
+  setAccountMenu(false);
   hideAssetContextMenu();
   if (isOpen(assetPropertiesModal)) setAssetPropertiesModal(false);
 });
