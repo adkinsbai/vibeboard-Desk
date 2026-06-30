@@ -121,6 +121,31 @@ await withServer(async ({ baseUrl, json }) => {
 
     await page.locator("#creditChip").click();
     await page.locator("#authModal.open").waitFor({ timeout: 3000 });
+    const authStyle = await page.locator(".auth-panel").evaluate(node => {
+      const visibleInputs = [...node.querySelectorAll(".auth-form:not(.hidden) .auth-field input")];
+      const submit = node.querySelector(".auth-form:not(.hidden) button[type='submit']");
+      const activeTab = node.querySelector(".auth-tab.active");
+      const rect = el => {
+        const box = el.getBoundingClientRect();
+        return { x: Math.round(box.x), width: Math.round(box.width), height: Math.round(box.height) };
+      };
+      return {
+        panelBackground: getComputedStyle(node).backgroundColor,
+        panelColor: getComputedStyle(node).color,
+        panelBorder: getComputedStyle(node).borderColor,
+        inputRects: visibleInputs.map(rect),
+        inputBorders: visibleInputs.map(el => getComputedStyle(el).borderColor),
+        submitRect: rect(submit),
+        submitBackground: getComputedStyle(submit).backgroundColor,
+        activeTabBackground: getComputedStyle(activeTab).backgroundColor,
+      };
+    });
+    assert(authStyle.panelBackground === "rgb(255, 255, 255)", "auth panel should use a clean white surface");
+    assert(authStyle.panelBorder === "rgb(17, 17, 17)", "auth panel should use a black border");
+    assert(authStyle.inputBorders.every(color => color === "rgb(17, 17, 17)"), "auth inputs should use black borders");
+    assert(authStyle.inputRects.every(rect => rect.x === authStyle.submitRect.x && rect.width === authStyle.submitRect.width), "auth fields and submit button should align");
+    assert(authStyle.submitBackground === "rgb(31, 143, 58)", "auth submit button should use the green action color");
+    assert(authStyle.activeTabBackground === "rgb(31, 143, 58)", "active auth tab should use the green selected color");
     const usageSurface = await page.locator("#usageDrawer").evaluate(node => ({
       open: node.classList.contains("open"),
       hasToolbar: Boolean(document.querySelector("#refreshUsageBtn")),

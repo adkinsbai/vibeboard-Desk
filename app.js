@@ -98,6 +98,8 @@ const authModal = el("authModal");
 const closeAuthModal = el("closeAuthModal");
 const authLoginTab = el("authLoginTab");
 const authRegisterTab = el("authRegisterTab");
+const authModalTitle = el("authModalTitle");
+const authModalSubtitle = el("authModalSubtitle");
 const loginForm = el("loginForm");
 const registerForm = el("registerForm");
 const loginPhone = el("loginPhone");
@@ -773,6 +775,14 @@ function setAuthMode(mode) {
   const register = mode === "register";
   authLoginTab?.classList.toggle("active", !register);
   authRegisterTab?.classList.toggle("active", register);
+  authLoginTab?.setAttribute("aria-selected", String(!register));
+  authRegisterTab?.setAttribute("aria-selected", String(register));
+  if (authModalTitle) authModalTitle.textContent = register ? "Create your account" : "Sign in to your account";
+  if (authModalSubtitle) {
+    authModalSubtitle.textContent = register
+      ? "Start with your phone number and a password."
+      : "Use your phone number and password to continue.";
+  }
   loginForm?.classList.toggle("hidden", register);
   registerForm?.classList.toggle("hidden", !register);
   if (authMessage) authMessage.textContent = "";
