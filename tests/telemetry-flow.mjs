@@ -18,6 +18,7 @@ await withServer(async ({ baseUrl }) => {
     session_id: "session-raw-id",
     payload: {
       prompt: "用户想做一个 LVGL WiFi 页面",
+      prompt_excerpt: "用户想做一个 LVGL WiFi 页面",
       password: "should-not-store",
       api_key: "sk-should-not-store",
       databaseUrl: "postgresql://user:secret@example.com/db",
@@ -39,6 +40,8 @@ await withServer(async ({ baseUrl }) => {
   assert(!serialized.includes("should-not-store"), "telemetry should redact secrets");
   assert(!serialized.includes("postgresql://"), "telemetry should redact database URLs");
   assert(serialized.includes("[redacted]"), "telemetry payload should show redaction markers");
+  assert(found.category === "agent" && found.action === "compile", "telemetry should keep behavior classification");
+  assert(found.board_id === "szpi-esp32s3", "telemetry should keep board preference");
 }, {
   dbPrefix: "telemetry-flow",
   env: {

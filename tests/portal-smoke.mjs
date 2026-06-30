@@ -9,6 +9,18 @@ await withServer(async ({ baseUrl }) => {
     await page.locator("#portalAuthCard").waitFor({ timeout: 6000 });
     const title = await page.locator(".portal-brand h1").textContent();
     assert(title.includes("开发板主控平台"), "root page should be the board control portal");
+    const portalLayout = await page.locator(".portal-hero").evaluate(node => ({
+      justifyItems: getComputedStyle(node).justifyItems,
+      cardX: Math.round(document.querySelector("#portalAuthCard").getBoundingClientRect().x),
+      heroX: Math.round(node.getBoundingClientRect().x),
+      heroWidth: Math.round(node.getBoundingClientRect().width),
+      primaryBackground: getComputedStyle(document.querySelector("#portalLoginForm button[type='submit']")).backgroundColor,
+      bodyBackground: getComputedStyle(document.body).backgroundImage,
+    }));
+    assert(portalLayout.justifyItems === "center", "portal hero content should be centered");
+    assert(portalLayout.cardX > portalLayout.heroX + 100, "auth card should not be left-aligned");
+    assert(portalLayout.primaryBackground === "rgb(30, 89, 224)", "portal primary action should use the theme blue");
+    assert(portalLayout.bodyBackground.includes("gradient"), "portal should use a professional layered background");
 
     await page.locator("#portalRegisterTab").click();
     await page.locator("#portalRegisterPhone").fill("+15558889999");

@@ -2513,6 +2513,30 @@ async function chargeAiUsage({ user, body = {}, result = {}, reason = "ai_call" 
   });
 }
 
+async function recordProductTelemetry({ req = null, user = null, body = {}, eventType, category, action, severity = "info", extra = {} } = {}) {
+  const prompt = String(body.prompt || body.build_prompt || body.message || "").trim();
+  await telemetryStore.record({
+    req,
+    user,
+    eventType,
+    category,
+    action,
+    page: "api",
+    boardId: body.deviceId || body.board_id || body.boardId || "",
+    conversationId: body.conversation_id || body.conversationId || "",
+    severity,
+    payload: {
+      action: body.action || action || "",
+      agent_mode: body.agent_mode || "",
+      background: Boolean(body.background || body.as_job),
+      prompt_excerpt: prompt ? prompt.slice(0, 800) : "",
+      prompt_length: prompt.length,
+      model: body.modelSettings?.model || process.env.VIBEBOARD_LLM_MODEL || process.env.VIBEBOARD_MODEL || "",
+      ...extra,
+    },
+  }).catch(() => {});
+}
+
 async function writeProjectMemorySafe(conversationId, options = {}) {
   const id = String(conversationId || "").trim();
   if (!id) return null;
@@ -3005,6 +3029,15 @@ async function route(req, res) {
       if (payload?.conversation_id) ensureConversationAccess(payload.conversation_id, requestUser);
       if (type === "agent" || type === "generate") await ensureCreditsAvailable(requestUser);
       const job = enqueueBackgroundJob(type, { ...(payload || {}), user_id: requestUser?.id || "" });
+      await recordProductTelemetry({
+        req,
+        user: requestUser,
+        body: payload,
+        eventType: "job.queued",
+        category: "job",
+        action: type,
+        extra: { job_id: job.id, job_type: type },
+      });
       json(res, 202, { ok: true, job });
       return;
     }
@@ -3013,8 +3046,25 @@ async function route(req, res) {
       const body = withServerModelSettings(await readBody(req));
       if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
       await ensureCreditsAvailable(requestUser);
+      await recordProductTelemetry({
+        req,
+        user: requestUser,
+        body,
+        eventType: "agent.request",
+        category: "agent",
+        action: body?.action || "message",
+      });
       if (wantsBackgroundJob(body || {})) {
         const job = enqueueBackgroundJob("agent", { ...(body || {}), user_id: requestUser?.id || "" });
+        await recordProductTelemetry({
+          req,
+          user: requestUser,
+          body,
+          eventType: "job.queued",
+          category: "job",
+          action: "agent",
+          extra: { job_id: job.id, job_type: "agent" },
+        });
         json(res, 202, { ok: true, job });
         return;
       }
@@ -3026,9 +3076,35 @@ async function route(req, res) {
           buildId: result?.id || result?.build_id || "",
           prompt: body?.prompt || body?.build_prompt || body?.message || "",
         });
+        await recordProductTelemetry({
+          req,
+          user: requestUser,
+          body,
+          eventType: "agent.success",
+          category: "agent",
+          action: body?.action || "message",
+          extra: {
+            ready_to_build: Boolean(result?.ready_to_build),
+            mode_boundary: result?.mode_boundary?.mode || "",
+          },
+        });
         json(res, 200, result);
       } catch (err) {
         const classified = classifyError(err);
+        await recordProductTelemetry({
+          req,
+          user: requestUser,
+          body,
+          eventType: "agent.error",
+          category: "agent",
+          action: body?.action || "message",
+          severity: "error",
+          extra: {
+            error: err.message,
+            errorType: classified.errorType || "",
+            errorStage: classified.errorStage || "",
+          },
+        });
         json(res, classified.statusCode || err.statusCode || 500, { ok: false, error: err.message, ...classified });
       }
       return;
@@ -3036,12 +3112,22 @@ async function route(req, res) {
 
     // --- Generate: AI 浠ｇ爜鐢熸垚 ---
     if (req.method === "POST" && url.pathname === "/api/generate") {
+      let body = {};
       try {
-        const body = withServerModelSettings(await readBody(req));
+        body = withServerModelSettings(await readBody(req));
         if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
         await ensureCreditsAvailable(requestUser);
         if (wantsBackgroundJob(body || {})) {
           const job = enqueueBackgroundJob("generate", { ...(body || {}), user_id: requestUser?.id || "" });
+          await recordProductTelemetry({
+            req,
+            user: requestUser,
+            body,
+            eventType: "job.queued",
+            category: "job",
+            action: "generate",
+            extra: { job_id: job.id, job_type: "generate" },
+          });
           json(res, 202, { ok: true, job });
           return;
         }
@@ -3052,9 +3138,36 @@ async function route(req, res) {
           buildId: result?.id || "",
           prompt: body?.prompt || body?.build_prompt || "",
         });
+        await recordProductTelemetry({
+          req,
+          user: requestUser,
+          body,
+          eventType: "generate.success",
+          category: "generate",
+          action: "generate",
+          extra: {
+            build_id: result?.id || "",
+            file_count: Object.keys(result?.files || {}).length,
+            verification_ok: Boolean(result?.verification?.ok),
+          },
+        });
         json(res, 200, result);
       } catch (error) {
         const classified = classifyError(error, { stage: "generate" });
+        await recordProductTelemetry({
+          req,
+          user: requestUser,
+          body,
+          eventType: "generate.error",
+          category: "generate",
+          action: "generate",
+          severity: "error",
+          extra: {
+            error: error.message,
+            errorType: classified.errorType || "",
+            errorStage: classified.errorStage || "",
+          },
+        });
         json(res, classified.statusCode || error.statusCode || 500, {
           ok: false,
           error: error.message,
@@ -3125,6 +3238,15 @@ async function route(req, res) {
       const conversation = conversationStore.createConversation(undefined, title, { userId: requestUser?.id || "" });
       const project = await projectWorkspace.ensureProject(conversation.id, title);
       await writeProjectMemorySafe(conversation.id, { trigger: "project-created" });
+      await recordProductTelemetry({
+        req,
+        user: requestUser,
+        body: { conversation_id: conversation.id },
+        eventType: "project.created",
+        category: "project",
+        action: "created",
+        extra: { title },
+      });
       json(res, 200, {
         ok: true,
         id: conversation.id,

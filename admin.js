@@ -2,6 +2,7 @@ const $ = id => document.getElementById(id);
 const usersBody = $("adminUsersBody");
 const ledgerBody = $("adminLedgerBody");
 const telemetryBody = $("adminTelemetryBody");
+const telemetryInsights = $("telemetryInsights");
 const summary = $("adminSummary");
 const message = $("adminMessage");
 const refreshBtn = $("refreshAdminBtn");
@@ -25,6 +26,7 @@ async function loadAdmin() {
     renderSummary(users.users || [], telemetry.events || []);
     renderUsers(users.users || []);
     renderLedger(credits.ledger || [], users.users || []);
+    renderTelemetryInsights(telemetry.events || []);
     renderTelemetry(telemetry.events || []);
   } catch (error) {
     message.textContent = error.message;
@@ -85,6 +87,65 @@ function renderTelemetry(events) {
       <td><code>${escapeHtml(JSON.stringify(event.payload || {}).slice(0, 280))}</code></td>
     </tr>
   `).join("") || `<tr><td colspan="6">暂无上报数据</td></tr>`;
+}
+
+function renderTelemetryInsights(events) {
+  const users = uniqueCount(events.map(event => event.user_hash || event.session_hash).filter(Boolean));
+  const pages = topCounts(events.map(event => event.page || "unknown"), 4);
+  const boards = topCounts(events.map(event => event.board_id || "").filter(Boolean), 4);
+  const actions = topCounts(events.map(event => [event.category, event.action].filter(Boolean).join(":") || event.event_type), 6);
+  const errors = events.filter(event => String(event.severity || "").toLowerCase() === "error");
+  const errorTypes = topCounts(errors.map(event => event.payload?.errorType || event.event_type || "error"), 4);
+  const recentPrompts = events
+    .map(event => event.payload?.prompt_excerpt || event.payload?.prompt || "")
+    .filter(Boolean)
+    .slice(0, 4);
+
+  telemetryInsights.innerHTML = `
+    <div class="telemetry-insight-card">
+      <span>匿名用户 / 会话</span>
+      <strong>${users}</strong>
+    </div>
+    <div class="telemetry-insight-card">
+      <span>常用页面</span>
+      ${renderCountList(pages)}
+    </div>
+    <div class="telemetry-insight-card">
+      <span>开发板偏好</span>
+      ${renderCountList(boards)}
+    </div>
+    <div class="telemetry-insight-card">
+      <span>高频行为</span>
+      ${renderCountList(actions)}
+    </div>
+    <div class="telemetry-insight-card">
+      <span>错误类型</span>
+      ${renderCountList(errorTypes)}
+    </div>
+    <div class="telemetry-insight-card wide">
+      <span>最近任务摘要</span>
+      ${recentPrompts.length ? `<ul>${recentPrompts.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : "<em>暂无任务摘要</em>"}
+    </div>
+  `;
+}
+
+function topCounts(values, limit = 5) {
+  const counts = new Map();
+  for (const value of values) {
+    const key = String(value || "").trim();
+    if (!key) continue;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+}
+
+function uniqueCount(values) {
+  return new Set(values.filter(Boolean)).size;
+}
+
+function renderCountList(rows) {
+  if (!rows.length) return "<em>暂无</em>";
+  return `<ul>${rows.map(([label, count]) => `<li><b>${escapeHtml(label)}</b><span>${count}</span></li>`).join("")}</ul>`;
 }
 
 function formatCredits(value) {
