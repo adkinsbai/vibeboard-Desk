@@ -3,17 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "server.mjs",
   "scripts": {
     "start": "node server.mjs",
     "check": "node scripts/check-syntax.mjs",
+    "verify:auth": "node tests/auth-flow.mjs && node tests/phone-verification.mjs",
     "verify:agent": "node tests/verify-agent.mjs",
     "verify:offline": "node tests/offline-smoke.mjs",
     "verify:digital-life": "node tests/digital-life-affect.mjs && node tests/digital-life-dialogue.mjs && node tests/digital-life-memory-policy.mjs && node tests/digital-life-reply-policy.mjs && node tests/digital-life-brain.mjs && node tests/digital-life-cognition.mjs && node tests/digital-life-autonomy.mjs && node tests/digital-life-mind.mjs && node tests/digital-life-intents.mjs && node tests/digital-life-smoke.mjs && node tests/digital-life-ui-smoke.mjs",
     "smoke:generation": "node scripts/smoke-generation-flows.mjs",
     "verify:ui": "node tests/main-ui-smoke.mjs && node tests/digital-life-ui-smoke.mjs",
-    "verify:all": "npm run check && npm run verify:agent && npm run verify:offline && npm run verify:digital-life && npm run verify:ui"
+    "verify:all": "npm run check && npm run verify:auth && npm run verify:agent && npm run verify:offline && npm run verify:digital-life && npm run verify:ui"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "better-sqlite3": "^12.10.0",
     "playwright": "^1.60.0",
     "sql.js": "^1.14.1"

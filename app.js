@@ -31,6 +31,11 @@ const closeJobDrawer = el("closeJobDrawer");
 const refreshJobsBtn = el("refreshJobsBtn");
 const jobList = el("jobList");
 const jobSummary = el("jobSummary");
+const usageDrawer = el("usageDrawer");
+const closeUsageDrawer = el("closeUsageDrawer");
+const refreshUsageBtn = el("refreshUsageBtn");
+const usageSummary = el("usageSummary");
+const usageLedger = el("usageLedger");
 const scrim = el("scrim");
 const fileTabs = el("fileTabs");
 const codePreview = el("codePreview");
@@ -86,6 +91,22 @@ const cancelProjectCreate = el("cancelProjectCreate");
 const projectCreateForm = el("projectCreateForm");
 const projectNameInput = el("projectNameInput");
 const projectRootHint = el("projectRootHint");
+const accountBtn = el("accountBtn");
+const adminLink = el("adminLink");
+const creditChip = el("creditChip");
+const authModal = el("authModal");
+const closeAuthModal = el("closeAuthModal");
+const authLoginTab = el("authLoginTab");
+const authRegisterTab = el("authRegisterTab");
+const loginForm = el("loginForm");
+const registerForm = el("registerForm");
+const loginPhone = el("loginPhone");
+const loginPassword = el("loginPassword");
+const registerPhone = el("registerPhone");
+const registerCode = el("registerCode");
+const registerPassword = el("registerPassword");
+const sendCodeBtn = el("sendCodeBtn");
+const authMessage = el("authMessage");
 
 let generatedFiles = {};
 let activeFile = "";
@@ -100,6 +121,8 @@ let assetManagerCurrentFolderId = "";
 let assetManagerSelection = null;
 let assetManagerCache = { folders: [], assets: [], projectFiles: [] };
 let assetContextTarget = null;
+let currentUser = null;
+let registerVerificationToken = "";
 
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
 const DEVICE_STORAGE_KEY = "vibeboard-active-device";
@@ -478,6 +501,25 @@ function isActiveConversation(conversationId) {
   return !conversationId || conversationId === currentConversationId;
 }
 
+const CHAT_BOTTOM_GAP = 96;
+
+function shouldStickChatToBottom() {
+  if (!chatLog) return false;
+  return chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight <= CHAT_BOTTOM_GAP;
+}
+
+function keepChatInView(stick = true) {
+  if (!chatLog || !stick) return;
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function appendChatNode(node, { force = false } = {}) {
+  if (!chatLog || !node) return;
+  const stick = force || shouldStickChatToBottom();
+  chatLog.appendChild(node);
+  keepChatInView(stick);
+}
+
 function addMessage(role, text) {
   const article = document.createElement("article");
   article.className = `msg ${role}`;
@@ -487,8 +529,7 @@ function addMessage(role, text) {
   const body = document.createElement("p");
   body.textContent = text;
   article.append(avatar, body);
-  chatLog.appendChild(article);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  appendChatNode(article);
   return article;
 }
 
@@ -514,17 +555,17 @@ function addStageCard() {
   const log = document.createElement("div");
   log.className = "work-log";
   const addLog = message => {
+    const stick = shouldStickChatToBottom();
     const item = document.createElement("div");
     item.className = "work-log-item";
     item.textContent = `${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} ${message}`;
     log.appendChild(item);
-    chatLog.scrollTop = chatLog.scrollHeight;
+    keepChatInView(stick);
   };
   addLog("Task accepted. I am reading the request and preparing the local verification path.");
   card.append(title, list, log);
   article.append(avatar, card);
-  chatLog.appendChild(article);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  appendChatNode(article);
 
   return {
     log: addLog,
@@ -537,7 +578,6 @@ function addStageCard() {
       if (!options.silent) {
         addLog(`${row.querySelector("span")?.childNodes?.[0]?.textContent || id}: ${note || state || "wait"}`);
       }
-      chatLog.scrollTop = chatLog.scrollHeight;
     }
   };
 }
@@ -692,6 +732,121 @@ function withDevicePayload(payload = {}) {
   return { ...payload, deviceId: activeDeviceId };
 }
 
+async function authFetch(url, payload = {}, { method = "POST" } = {}) {
+  const res = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+async function refreshAccountState() {
+  try {
+    const res = await fetch("/api/me", { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    currentUser = data.user || null;
+    if (accountBtn) accountBtn.textContent = currentUser ? currentUser.phone : "登录";
+    if (adminLink) adminLink.hidden = currentUser?.role !== "admin";
+    if (creditChip) {
+      const monthTokens = Number(data.usage?.month_tokens || 0);
+      creditChip.textContent = currentUser ? `Usage ${formatCompactNumber(monthTokens)} tokens` : "Usage";
+    }
+    return currentUser;
+  } catch {
+    currentUser = null;
+    if (creditChip) creditChip.textContent = "Usage";
+    return null;
+  }
+}
+
+function setAuthModal(open) {
+  if (!authModal) return;
+  setLayerOpen(authModal, open);
+  if (open) setTimeout(() => loginPhone?.focus(), 40);
+  syncScrim();
+}
+
+function setAuthMode(mode) {
+  const register = mode === "register";
+  authLoginTab?.classList.toggle("active", !register);
+  authRegisterTab?.classList.toggle("active", register);
+  loginForm?.classList.toggle("hidden", register);
+  registerForm?.classList.toggle("hidden", !register);
+  if (authMessage) authMessage.textContent = "";
+}
+
+function formatCredits(value) {
+  return Number(value || 0).toFixed(4).replace(/\.?0+$/, "");
+}
+
+function formatCompactNumber(value) {
+  const number = Number(value || 0);
+  if (number >= 1000000) return `${(number / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (number >= 1000) return `${(number / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(Math.round(number));
+}
+
+async function loadUsage() {
+  if (!usageSummary || !usageLedger) return;
+  if (!currentUser) {
+    usageSummary.innerHTML = `<div class="usage-empty">Login to view usage.</div>`;
+    usageLedger.innerHTML = "";
+    setAuthModal(true);
+    return;
+  }
+  try {
+    usageSummary.innerHTML = `<div class="usage-empty">Loading usage...</div>`;
+    const res = await fetch("/api/credits?limit=50", { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
+    renderUsage(data);
+    await refreshAccountState();
+  } catch (error) {
+    usageSummary.innerHTML = `<div class="usage-empty danger-text">${escapeHtml(error.message)}</div>`;
+    usageLedger.innerHTML = "";
+  }
+}
+
+function renderUsage(data = {}) {
+  const usage = data.usage || {};
+  const ledger = Array.isArray(data.ledger) ? data.ledger : [];
+  const credits = data.credits || {};
+  usageSummary.innerHTML = `
+    <div><span>Mode</span><strong>${escapeHtml(usage.billing_mode || data.billingMode || "free")}</strong></div>
+    <div><span>This month</span><strong>${Number(usage.month_tokens || 0).toLocaleString()} tokens</strong></div>
+    <div><span>Total</span><strong>${Number(usage.total_tokens || 0).toLocaleString()} tokens</strong></div>
+    <div><span>AI calls</span><strong>${Number(usage.total_calls || 0).toLocaleString()}</strong></div>
+    <div><span>Estimated credits</span><strong>${formatCredits(usage.total_calculated_credits || 0)}</strong></div>
+    <div><span>Current balance</span><strong>${formatCredits(credits.credits_balance || 0)}</strong></div>
+  `;
+  const rows = ledger.filter(row => Number(row.tokens || 0) > 0).slice(0, 20);
+  usageLedger.innerHTML = rows.map(row => {
+    const meta = parseMetadata(row.metadata_json);
+    return `
+      <div class="usage-row">
+        <div>
+          <strong>${escapeHtml(row.reason || "ai_call")}</strong>
+          <span>${formatTime(row.created_at)}</span>
+        </div>
+        <div>${Number(row.tokens || 0).toLocaleString()} tokens</div>
+        <div>${formatCredits(meta.credits_calculated || Math.abs(Number(row.delta || 0)))} credits</div>
+      </div>
+    `;
+  }).join("") || `<div class="usage-empty">No AI usage recorded yet.</div>`;
+}
+
+function parseMetadata(value) {
+  try {
+    const parsed = JSON.parse(String(value || "{}"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 async function postJson(url, payload = {}, { timeout = 120000, method = "POST" } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
@@ -821,6 +976,7 @@ function renderJobs(jobs = []) {
     const card = document.createElement("article");
     card.className = "job-card";
     const latestLogs = Array.isArray(job.logs) ? job.logs.slice(-5) : [];
+    const logRows = latestLogs.map(log => `<div>${escapeHtml((log.phase ? `${log.phase}: ` : "") + (log.message || ""))}</div>`).join("") || "<div>waiting for logs</div>";
     const error = job.error || {};
     card.innerHTML = `
       <div class="job-card-head">
@@ -833,9 +989,10 @@ function renderJobs(jobs = []) {
       ${error && (error.userMessage || error.error || error.errorLabel)
         ? `<div class="job-error">${escapeHtml(error.userMessage || error.errorLabel || error.error || "Job failed")}</div>`
         : ""}
-      <div class="job-log">
-        ${latestLogs.map(log => `<div>${escapeHtml((log.phase ? `${log.phase}: ` : "") + (log.message || ""))}</div>`).join("") || "<div>waiting for logs</div>"}
-      </div>
+      <details class="job-log-details">
+        <summary>Logs · ${latestLogs.length || 1}</summary>
+        <div class="job-log">${logRows}</div>
+      </details>
       <div class="job-actions"></div>
     `;
     const actions = card.querySelector(".job-actions");
@@ -1043,16 +1200,26 @@ function isOpen(node) {
   return Boolean(node?.classList.contains("open"));
 }
 
+function setLayerOpen(node, open) {
+  if (!node) return;
+  node.classList.toggle("open", open);
+  node.setAttribute("aria-hidden", open ? "false" : "true");
+  node.inert = !open;
+  node.toggleAttribute("inert", !open);
+}
+
 function syncScrim() {
   if (!scrim) return;
   scrim.hidden = !(
     isOpen(codeDrawer) ||
     isOpen(statusDrawer) ||
     isOpen(jobDrawer) ||
+    isOpen(usageDrawer) ||
     isOpen(assetManagerDrawer) ||
     isOpen(assetPropertiesModal) ||
     isOpen(projectCreateModal) ||
     isOpen(assetImportModal) ||
+    isOpen(authModal) ||
     isOpen(modelModal) ||
     isOpen(el("deployMarketModal"))
   );
@@ -1060,39 +1227,41 @@ function syncScrim() {
 
 function setCodeDrawer(open) {
   if (!codeDrawer) return;
-  codeDrawer.classList.toggle("open", open);
-  codeDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+  setLayerOpen(codeDrawer, open);
   syncScrim();
 }
 
 function setStatusDrawer(open) {
   if (!statusDrawer) return;
-  statusDrawer.classList.toggle("open", open);
-  statusDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+  setLayerOpen(statusDrawer, open);
   syncScrim();
   if (open) refreshBoard();
 }
 
 function setJobDrawer(open) {
   if (!jobDrawer) return;
-  jobDrawer.classList.toggle("open", open);
-  jobDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+  setLayerOpen(jobDrawer, open);
   syncScrim();
   if (open) loadJobs();
 }
 
+function setUsageDrawer(open) {
+  if (!usageDrawer) return;
+  setLayerOpen(usageDrawer, open);
+  syncScrim();
+  if (open) loadUsage();
+}
+
 function setAssetManagerDrawer(open) {
   if (!assetManagerDrawer) return;
-  assetManagerDrawer.classList.toggle("open", open);
-  assetManagerDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+  setLayerOpen(assetManagerDrawer, open);
   syncScrim();
   if (open) loadAssetManager();
 }
 
 function setProjectCreateModal(open) {
   if (!projectCreateModal) return;
-  projectCreateModal.classList.toggle("open", open);
-  projectCreateModal.setAttribute("aria-hidden", open ? "false" : "true");
+  setLayerOpen(projectCreateModal, open);
   syncScrim();
   if (open) {
     loadProjectRootHint();
@@ -1102,8 +1271,7 @@ function setProjectCreateModal(open) {
 
 function setAssetImportModal(open) {
   if (!assetImportModal) return;
-  assetImportModal.classList.toggle("open", open);
-  assetImportModal.setAttribute("aria-hidden", open ? "false" : "true");
+  setLayerOpen(assetImportModal, open);
   if (open) {
     if (assetImportUpload) assetImportUpload.hidden = false;
   }
@@ -1112,15 +1280,13 @@ function setAssetImportModal(open) {
 
 function setAssetPropertiesModal(open) {
   if (!assetPropertiesModal) return;
-  assetPropertiesModal.classList.toggle("open", open);
-  assetPropertiesModal.setAttribute("aria-hidden", open ? "false" : "true");
+  setLayerOpen(assetPropertiesModal, open);
   syncScrim();
 }
 
 function setModelModal(open) {
   if (!modelModal) return;
-  modelModal.classList.toggle("open", open);
-  modelModal.setAttribute("aria-hidden", open ? "false" : "true");
+  setLayerOpen(modelModal, open);
   syncScrim();
   if (open) {
     syncModelUi();
@@ -1128,20 +1294,24 @@ function setModelModal(open) {
   }
 }
 
+function setDeployMarketModal(open) {
+  const deployModal = el("deployMarketModal");
+  if (!deployModal) return;
+  setLayerOpen(deployModal, open);
+  syncScrim();
+}
+
 function closeDrawers() {
   setCodeDrawer(false);
   setStatusDrawer(false);
   setJobDrawer(false);
+  setUsageDrawer(false);
   setAssetManagerDrawer(false);
   setAssetPropertiesModal(false);
   setProjectCreateModal(false);
   setAssetImportModal(false);
   setModelModal(false);
-  const deployModal = el("deployMarketModal");
-  if (deployModal) {
-    deployModal.classList.remove("open");
-    deployModal.setAttribute("aria-hidden", "true");
-  }
+  setDeployMarketModal(false);
   syncScrim();
 }
 
@@ -1433,8 +1603,7 @@ function addThinkingBubble(thinking) {
   });
   body.append(header, content);
   article.append(avatar, body);
-  chatLog.appendChild(article);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  appendChatNode(article);
   return article;
 }
 
@@ -1503,8 +1672,7 @@ function addAgentActionsCard(actions, summary) {
 
   body.append(header, list);
   article.append(avatar, body);
-  chatLog.appendChild(article);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  appendChatNode(article);
 }
 
 function addEvidenceCard(payload = {}) {
@@ -1576,8 +1744,7 @@ function addEvidenceCard(payload = {}) {
 
   body.append(header, list);
   article.append(avatar, body);
-  chatLog.appendChild(article);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  appendChatNode(article);
 }
 
 // Show execution animation while waiting
@@ -1592,8 +1759,7 @@ function addThinkingAnimation() {
   body.className = "thinking-body thinking-active";
   body.innerHTML = `<span class="thinking-icon">🧠</span> <span>正在执行任务</span><span class="thinking-dots">...</span>`;
   article.append(avatar, body);
-  chatLog.appendChild(article);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  appendChatNode(article);
   return article;
 }
 
@@ -1670,8 +1836,7 @@ function addClarifyCard(questions, onConfirm) {
   // 显示 reasoning
   const reasoningEl = card.querySelector(".clarify-reasoning");
 
-  chatLog.appendChild(card);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  appendChatNode(card);
 
   return new Promise((resolve) => {
     // 确认按钮
@@ -1804,8 +1969,7 @@ function addMarkdownMessage(role, text) {
   body.className = "msg-text markdown-body";
   body.innerHTML = renderMarkdown(text);
   article.append(avatar, body);
-  chatLog.appendChild(article);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  appendChatNode(article);
   return body;
 }
 
@@ -1832,8 +1996,7 @@ function addInlineButtons(buttons) {
   }
 
   article.append(avatar, body);
-  chatLog.appendChild(article);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  appendChatNode(article);
 }
 
 function addQuickReplyButtons(quickReplies = []) {
@@ -1927,8 +2090,7 @@ function addBuildPromptAction(buildPrompt, plan = {}) {
     promptInput.focus();
   });
   article.append(avatar, body);
-  chatLog.appendChild(article);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  appendChatNode(article);
 }
 
 // ─── 对话式交互 ───
@@ -2259,8 +2421,7 @@ function addDeployButton(prompt) {
   btn.addEventListener("click", () => runDeploy(btn));
   body.appendChild(btn);
   article.append(avatar, body);
-  chatLog.appendChild(article);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  appendChatNode(article);
 }
 
 async function runDeployJob() {
@@ -2439,6 +2600,61 @@ modelForm?.addEventListener("submit", event => {
   });
   setModelModal(false);
   addMessage("agent", `模型配置已保存：${providerPresets[modelSettings.provider]?.label || modelSettings.provider} / ${modelSettings.model || "未填写模型"}`);
+});
+accountBtn?.addEventListener("click", () => setAuthModal(true));
+creditChip?.addEventListener("click", () => {
+  if (!currentUser) {
+    setAuthModal(true);
+    return;
+  }
+  setUsageDrawer(true);
+});
+closeUsageDrawer?.addEventListener("click", () => setUsageDrawer(false));
+refreshUsageBtn?.addEventListener("click", () => loadUsage());
+closeAuthModal?.addEventListener("click", () => setAuthModal(false));
+authLoginTab?.addEventListener("click", () => setAuthMode("login"));
+authRegisterTab?.addEventListener("click", () => setAuthMode("register"));
+sendCodeBtn?.addEventListener("click", async () => {
+  try {
+    sendCodeBtn.disabled = true;
+    authMessage.textContent = "正在发送验证码...";
+    const data = await authFetch("/api/auth/send-code", { phone: registerPhone.value.trim() });
+    authMessage.textContent = data.dev_code ? `开发环境验证码：${data.dev_code}` : "验证码已发送，请查收短信。";
+  } catch (error) {
+    authMessage.textContent = error.message;
+  } finally {
+    sendCodeBtn.disabled = false;
+  }
+});
+registerForm?.addEventListener("submit", async event => {
+  event.preventDefault();
+  try {
+    authMessage.textContent = "Creating account...";
+    await authFetch("/api/auth/register", {
+      phone: registerPhone.value.trim(),
+      password: registerPassword.value,
+    });
+    await refreshAccountState();
+    setAuthModal(false);
+    await loadConversations();
+  } catch (error) {
+    authMessage.textContent = error.message;
+  }
+});
+loginForm?.addEventListener("submit", async event => {
+  event.preventDefault();
+  try {
+    authMessage.textContent = "正在登录...";
+    await authFetch("/api/auth/login", {
+      phone: loginPhone.value.trim(),
+      password: loginPassword.value,
+    });
+    await refreshAccountState();
+    setAuthModal(false);
+    await loadConversations();
+  } catch (error) {
+    authMessage.textContent = error.message;
+  }
 });
 clearModelSettings?.addEventListener("click", () => {
   localStorage.removeItem(MODEL_STORAGE_KEY);
@@ -3049,6 +3265,7 @@ async function loadConversations() {
   try {
     const res = await fetch(`${API_BASE}/api/conversations`);
     const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
     if (data.ok) {
       const conversations = data.conversations || [];
       renderConversationList(conversations);
@@ -3056,6 +3273,7 @@ async function loadConversations() {
       else syncDeviceFrameFromCurrent();
     }
   } catch (err) {
+    if (/Login required|401/i.test(err.message || "")) setAuthModal(true);
     console.error("Failed to load conversations:", err);
   }
 }
@@ -3260,9 +3478,7 @@ function renderMessages(messages) {
     article.append(avatar, body);
     chatLog.appendChild(article);
   }
-
-  // Scroll to bottom
-  chatLog.scrollTop = chatLog.scrollHeight;
+  chatLog.scrollTop = 0;
 }
 
 // Create new conversation
@@ -3375,9 +3591,7 @@ const deployMarketForm = document.getElementById("deployMarketForm");
 
 if (deployMarketBtn && deployMarketModal) {
   deployMarketBtn.addEventListener("click", () => {
-    deployMarketModal.classList.add("open");
-    deployMarketModal.setAttribute("aria-hidden", "false");
-    syncScrim();
+    setDeployMarketModal(true);
 
     const descField = document.getElementById("appDescription");
     if (descField && !descField.value) {
@@ -3386,9 +3600,7 @@ if (deployMarketBtn && deployMarketModal) {
   });
 
   const closeModal = () => {
-    deployMarketModal.classList.remove("open");
-    deployMarketModal.setAttribute("aria-hidden", "true");
-    syncScrim();
+    setDeployMarketModal(false);
   };
 
   closeDeployModal?.addEventListener("click", closeModal);
@@ -3438,5 +3650,19 @@ function formatTime(dateStr) {
   return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
 }
 
-// Load conversations on startup
-loadConversations();
+// Load account and conversations on startup
+[
+  codeDrawer,
+  statusDrawer,
+  jobDrawer,
+  usageDrawer,
+  assetManagerDrawer,
+  assetPropertiesModal,
+  projectCreateModal,
+  assetImportModal,
+  authModal,
+  modelModal,
+  el("deployMarketModal"),
+].forEach(node => setLayerOpen(node, isOpen(node)));
+syncScrim();
+refreshAccountState().finally(() => loadConversations());

@@ -6,6 +6,11 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import initSqlJs from "sql.js";
+import { neon } from "@neondatabase/serverless";
+import { createAuthStore, clearSessionCookie, httpError, sessionCookie } from "./src/authStore.mjs";
+import { createCloudSqliteSnapshot } from "./src/cloudSqliteSnapshot.mjs";
+import { createPhoneVerificationService } from "./src/phoneVerification.mjs";
+import { creditsForTokens, estimateTokensFromPayload, tokensFromModelResponse } from "./src/creditMeter.mjs";
 import {
   boardEndpoints,
   createBoardConfig,
@@ -115,14 +120,17 @@ const SERVER_LOG_PATH = path.join(RUNTIME_DIR, "server.log");
 const SERVER_LOG_STRING_LIMIT = 600;
 const SERVER_LOG_ARRAY_LIMIT = 20;
 const MARKET_APPS_DIR = path.join(ROOT, "market-apps");
-const PORT = Number(process.env.VIBEBOARD_PORT || 8789);
-const DB_PATH = process.env.VIBEBOARD_DB_PATH || path.join(ROOT, "vibeboard.db");
+const PORT = Number(process.env.PORT || process.env.VIBEBOARD_PORT || 8789);
+const HOST = process.env.VERCEL === "1" ? undefined : (process.env.VIBEBOARD_HOST || "127.0.0.1");
+const DB_PATH = process.env.VIBEBOARD_DB_PATH || (process.env.VERCEL === "1" ? path.join(os.tmpdir(), "vibeboard.db") : path.join(ROOT, "vibeboard.db"));
 const DEFAULT_GENERATE_AGENT_MAX_ITERATIONS = 18;
 const DEFAULT_GENERATE_AGENT_MAX_VERIFICATION_ATTEMPTS = 1;
 const DEFAULT_GENERATE_AGENT_TIMEOUT_MS = 120000;
 const DEFAULT_GENERATE_AGENT_LLM_TIMEOUT_MS = 60000;
+const PUBLIC_DEPLOYMENT = process.env.VERCEL === "1" || process.env.VIBEBOARD_PUBLIC_DEPLOYMENT === "1";
 
 async function loadLocalEnv() {
+  if (process.env.VERCEL === "1") return;
   for (const filename of [".env.local", ".env"]) {
     const envPath = path.join(ROOT, filename);
     const raw = await fs.readFile(envPath, "utf8").catch(() => "");
@@ -141,13 +149,35 @@ async function loadLocalEnv() {
 
 await loadLocalEnv();
 
+const BILLING_MODE = String(process.env.VIBEBOARD_BILLING_MODE || "free").toLowerCase() === "credits" ? "credits" : "free";
+const REQUIRE_PHONE_VERIFICATION = process.env.VIBEBOARD_REQUIRE_PHONE_VERIFICATION === "1";
+
+const pg = process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : null;
+if (process.env.VERCEL === "1" && !pg) {
+  throw new Error("DATABASE_URL is required on Vercel public deployment.");
+}
+const cloudSqliteSnapshot = createCloudSqliteSnapshot({
+  pg,
+  key: process.env.VIBEBOARD_DB_SNAPSHOT_KEY || "vibeboard-main",
+});
+if (cloudSqliteSnapshot) await cloudSqliteSnapshot.initSchema();
+
 // Initialize SQLite database
 const SQL = await initSqlJs();
 let db;
 try {
-  const dbBuffer = await fs.readFile(DB_PATH).catch(() => null);
+  const dbBuffer = await cloudSqliteSnapshot?.load().catch((error) => {
+    console.warn("[db] cloud sqlite snapshot load failed:", error.message);
+    return null;
+  }) || await fs.readFile(DB_PATH).catch(() => null);
   db = dbBuffer ? new SQL.Database(dbBuffer) : new SQL.Database();
 } catch {
+  db = new SQL.Database();
+}
+try {
+  db.exec("SELECT 1");
+} catch (error) {
+  console.warn("[db] database failed sanity check; starting from an empty database:", error.message);
   db = new SQL.Database();
 }
 
@@ -169,7 +199,16 @@ db.run(`
 // Helper to save database to file
 async function saveDb() {
   const data = db.export();
-  await fs.writeFile(DB_PATH, Buffer.from(data));
+  const buffer = Buffer.from(data);
+  await fs.mkdir(path.dirname(DB_PATH), { recursive: true }).catch(() => {});
+  await fs.writeFile(DB_PATH, buffer).catch((error) => {
+    console.warn("[db] local sqlite save failed:", error.message);
+  });
+  if (cloudSqliteSnapshot) {
+    await cloudSqliteSnapshot.save(buffer).catch((error) => {
+      console.warn("[db] cloud sqlite snapshot save failed:", error.message);
+    });
+  }
 }
 
 // Helper to run query and return results
@@ -212,6 +251,10 @@ jobStore.markInterruptedRunningJobs();
 
 const assetLibraryStore = createAssetLibraryStore(db, saveDb);
 assetLibraryStore.initSchema();
+
+const authStore = createAuthStore({ sqliteDb: db, saveSqlite: saveDb, pg, env: process.env });
+await authStore.initSchema();
+const phoneVerification = createPhoneVerificationService({ authStore, env: process.env });
 
 const projectWorkspace = createProjectWorkspace({
   root: ROOT,
@@ -336,6 +379,149 @@ function json(res, status, payload) {
     "Content-Length": body.length
   });
   res.end(body);
+}
+
+function jsonWithHeaders(res, status, payload, headers = {}) {
+  const body = Buffer.from(JSON.stringify(payload, null, 2));
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Content-Length": body.length,
+    ...headers,
+  });
+  res.end(body);
+}
+
+async function currentUser(req) {
+  return authStore.currentUserFromRequest(req);
+}
+
+async function requireApiUser(req, res, url) {
+  if (!PUBLIC_DEPLOYMENT) {
+    return await currentUser(req);
+  }
+  if (isPublicApi(url.pathname)) {
+    return await currentUser(req);
+  }
+  const user = await currentUser(req);
+  if (user) return user;
+  json(res, 401, { ok: false, error: "Login required." });
+  return null;
+}
+
+function isPublicApi(pathname) {
+  return pathname === "/api/me" ||
+    pathname.startsWith("/api/auth/") ||
+    pathname === "/api/health" ||
+    pathname === "/healthz";
+}
+
+function secureCookie(req) {
+  return process.env.VERCEL === "1" || /^https:/i.test(String(req.headers["x-forwarded-proto"] || ""));
+}
+
+function summarizeUsage(ledger = []) {
+  const now = new Date();
+  const monthKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const summary = {
+    billing_mode: BILLING_MODE,
+    total_tokens: 0,
+    month_tokens: 0,
+    total_calls: 0,
+    month_calls: 0,
+    total_calculated_credits: 0,
+    month_calculated_credits: 0,
+  };
+  for (const row of ledger || []) {
+    const tokens = Number(row?.tokens || 0);
+    if (tokens <= 0) continue;
+    const metadata = parseUsageMetadata(row.metadata_json);
+    const calculatedCredits = Number(metadata.credits_calculated ?? creditsForTokens(tokens));
+    const createdAt = new Date(row.created_at || 0);
+    const rowMonthKey = Number.isFinite(createdAt.getTime())
+      ? `${createdAt.getUTCFullYear()}-${String(createdAt.getUTCMonth() + 1).padStart(2, "0")}`
+      : "";
+    summary.total_tokens += tokens;
+    summary.total_calls += 1;
+    summary.total_calculated_credits += calculatedCredits;
+    if (rowMonthKey === monthKey) {
+      summary.month_tokens += tokens;
+      summary.month_calls += 1;
+      summary.month_calculated_credits += calculatedCredits;
+    }
+  }
+  summary.total_calculated_credits = Number(summary.total_calculated_credits.toFixed(4));
+  summary.month_calculated_credits = Number(summary.month_calculated_credits.toFixed(4));
+  return summary;
+}
+
+function parseUsageMetadata(value) {
+  try {
+    const parsed = JSON.parse(String(value || "{}"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function publicSafeModelSettings(input = {}) {
+  if (!PUBLIC_DEPLOYMENT) return input || {};
+  return {
+    provider: process.env.VIBEBOARD_LLM_PROVIDER || process.env.VIBEBOARD_MODEL_PROVIDER || input.provider || "deepseek",
+    baseUrl: process.env.VIBEBOARD_LLM_BASE_URL || process.env.VIBEBOARD_MODEL_BASE_URL || input.baseUrl || "",
+    model: process.env.VIBEBOARD_LLM_MODEL || process.env.VIBEBOARD_MODEL || input.model || "",
+    enabled: input.enabled === false ? false : true,
+  };
+}
+
+function withServerModelSettings(body = {}) {
+  const cloudAgentLimits = PUBLIC_DEPLOYMENT
+    ? {
+        max_iterations: Math.min(8, Number(body?.max_iterations || body?.maxIterations || 8)),
+        max_verification_attempts: 0,
+        repair_attempts: 0,
+      }
+    : {};
+  return {
+    ...(body || {}),
+    modelSettings: publicSafeModelSettings(body?.modelSettings || {}),
+    ...cloudAgentLimits,
+  };
+}
+
+function ensureConversationAccess(conversationId, user) {
+  const conversation = conversationStore.getConversation(conversationId);
+  if (!conversation) throw httpError(404, "Conversation not found.");
+  if (PUBLIC_DEPLOYMENT && user?.role !== "admin" && (!conversation.user_id || conversation.user_id !== user?.id)) {
+    throw httpError(403, "Conversation access denied.");
+  }
+  return conversation;
+}
+
+async function ensureCreditsAvailable(user) {
+  if (!PUBLIC_DEPLOYMENT || BILLING_MODE !== "credits" || !user?.id) return null;
+  const credits = await authStore.userCreditSummary(user.id);
+  if (Number(credits?.credits_balance || 0) <= 0) {
+    throw httpError(402, "Insufficient credits.");
+  }
+  return credits;
+}
+
+function ensureJobAccess(job, user) {
+  if (!job) throw httpError(404, "Job not found");
+  if (PUBLIC_DEPLOYMENT && user?.role !== "admin" && String(job.input?.user_id || "") !== user?.id) {
+    throw httpError(403, "Job access denied.");
+  }
+  return job;
+}
+
+function filterJobsForUser(jobs = [], user) {
+  if (!PUBLIC_DEPLOYMENT || user?.role === "admin") return jobs;
+  return jobs.filter(job => String(job.input?.user_id || "") === user?.id);
+}
+
+function requirePublicAdmin(user, message = "Admin access required.") {
+  if (PUBLIC_DEPLOYMENT && user?.role !== "admin") throw httpError(403, message);
 }
 
 function staticCacheFor(filePath) {
@@ -2187,6 +2373,11 @@ async function rawBoardStatus() {
 
 async function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  if (PUBLIC_DEPLOYMENT && /\/digital-life(?:\.html|\.js|\.css)?$/i.test(url.pathname)) {
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Not found");
+    return;
+  }
   const filePath = resolveStaticFilePath(url.pathname);
   if (!filePath) {
     res.writeHead(403);
@@ -2279,7 +2470,37 @@ const generateRuntime = createGenerateRuntime({
 });
 
 async function runGenerateRequest(body = {}) {
-  return generateRuntime.runGenerateRequest(body);
+  return generateRuntime.runGenerateRequest(withServerModelSettings(body));
+}
+
+async function chargeAiUsage({ user, body = {}, result = {}, reason = "ai_call" } = {}) {
+  if (!user?.id) return null;
+  const usageTokens = tokensFromModelResponse(result, 0);
+  const estimated = usageTokens <= 1;
+  const tokens = estimated
+    ? estimateTokensFromPayload({
+        messages: body.history || [
+          { role: "user", content: body.prompt || body.build_prompt || body.message || "" },
+        ],
+        max_tokens: 16000,
+      })
+    : usageTokens;
+  const credits = creditsForTokens(tokens);
+  if (credits <= 0 && tokens <= 0) return null;
+  const delta = BILLING_MODE === "credits" ? -credits : 0;
+  return authStore.applyCreditDelta({
+    userId: user.id,
+    delta,
+    reason,
+    tokens,
+    metadata: {
+      estimated,
+      billing_mode: BILLING_MODE,
+      credits_calculated: credits,
+      conversation_id: body.conversation_id || "",
+      model: result.model || body.modelSettings?.model || process.env.VIBEBOARD_LLM_MODEL || process.env.VIBEBOARD_MODEL || "",
+    },
+  });
 }
 
 async function writeProjectMemorySafe(conversationId, options = {}) {
@@ -2376,7 +2597,9 @@ const jobRuntime = createJobRuntime({
 
 jobRuntime.register("agent", async (body = {}, ctx) => {
   ctx.phase("agent", "Agent request is running.");
-  const result = await runAgentRequest(body || {});
+  const result = await runAgentRequest(withServerModelSettings(body || {}));
+  const user = body.user_id ? await authStore.userCreditSummary(body.user_id).catch(() => null) : null;
+  await chargeAiUsage({ user, body, result, reason: body.action === "confirm_build" ? "agent_build" : "agent" });
   await writeProjectMemorySafe(body.conversation_id, {
     trigger: body.action === "confirm_build" ? "agent-confirm-build" : "agent-message",
     buildId: result?.id || result?.build_id || "",
@@ -2388,7 +2611,9 @@ jobRuntime.register("agent", async (body = {}, ctx) => {
 
 jobRuntime.register("generate", async (body = {}, ctx) => {
   ctx.phase("generate", "Code generation is running.");
-  const result = await runGenerateRequest(body || {});
+  const result = await runGenerateRequest(withServerModelSettings(body || {}));
+  const user = body.user_id ? await authStore.userCreditSummary(body.user_id).catch(() => null) : null;
+  await chargeAiUsage({ user, body, result, reason: "generate" });
   await writeProjectMemorySafe(body.conversation_id, {
     trigger: "generate-job",
     buildId: result?.id || "",
@@ -2424,6 +2649,96 @@ async function route(req, res) {
       res.end('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="#08111d"/><path d="M14 18h36v28H14z" fill="#f8fbff"/><path d="M18 22h28v20H18z" fill="#0b63ce"/><circle cx="23" cy="49" r="3" fill="#43ff91"/><circle cx="32" cy="49" r="3" fill="#ffd166"/><circle cx="41" cy="49" r="3" fill="#ff2bd6"/></svg>');
       return;
     }
+    if (req.method === "GET" && (url.pathname === "/api/health" || url.pathname === "/healthz")) {
+      json(res, 200, { ok: true, publicDeployment: PUBLIC_DEPLOYMENT, auth: true, billingMode: BILLING_MODE, phoneVerificationRequired: REQUIRE_PHONE_VERIFICATION, db: pg ? "postgres" : "sqlite" });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/me") {
+      const user = await currentUser(req);
+      const credits = user ? await authStore.userCreditSummary(user.id) : null;
+      const ledger = user ? await authStore.listCreditLedger({ userId: user.id, limit: 50 }) : [];
+      json(res, 200, { ok: true, user, credits, usage: summarizeUsage(ledger) });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/auth/send-code") {
+      const body = await readBody(req).catch(() => ({}));
+      json(res, 200, await phoneVerification.sendCode({ phone: body.phone, purpose: "register" }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/auth/verify-code") {
+      const body = await readBody(req).catch(() => ({}));
+      json(res, 200, { ok: true, ...(await phoneVerification.verifyCode({ phone: body.phone, purpose: "register", code: body.code })) });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/auth/register") {
+      const body = await readBody(req).catch(() => ({}));
+      const user = await authStore.createUser({
+        phone: body.phone,
+        password: body.password,
+        verificationToken: body.verification_token || body.verificationToken,
+        requireVerification: REQUIRE_PHONE_VERIFICATION,
+      });
+      const login = await authStore.login({ phone: body.phone, password: body.password });
+      jsonWithHeaders(res, 200, { ok: true, user: login.user }, {
+        "Set-Cookie": sessionCookie(login.session.token, { maxAge: login.session.max_age_seconds, secure: secureCookie(req) }),
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/auth/login") {
+      const body = await readBody(req).catch(() => ({}));
+      const login = await authStore.login({ phone: body.phone, password: body.password });
+      jsonWithHeaders(res, 200, { ok: true, user: login.user }, {
+        "Set-Cookie": sessionCookie(login.session.token, { maxAge: login.session.max_age_seconds, secure: secureCookie(req) }),
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/auth/logout") {
+      await authStore.logout(req);
+      jsonWithHeaders(res, 200, { ok: true }, { "Set-Cookie": clearSessionCookie() });
+      return;
+    }
+
+    const requestUser = req.url.startsWith("/api/")
+      ? await requireApiUser(req, res, url)
+      : await currentUser(req);
+    if (req.url.startsWith("/api/") && PUBLIC_DEPLOYMENT && !requestUser && !isPublicApi(url.pathname)) {
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/credits") {
+      const user = await authStore.requireUser(req);
+      json(res, 200, {
+        ok: true,
+        credits: await authStore.userCreditSummary(user.id),
+        ledger: await authStore.listCreditLedger({ userId: user.id, limit: Number(url.searchParams.get("limit") || 50) }),
+        usage: summarizeUsage(await authStore.listCreditLedger({ userId: user.id, limit: 500 })),
+        billingMode: BILLING_MODE,
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/admin/users") {
+      await authStore.requireAdmin(req);
+      json(res, 200, { ok: true, users: await authStore.listUsers({ limit: Number(url.searchParams.get("limit") || 200) }) });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/admin/credits") {
+      await authStore.requireAdmin(req);
+      json(res, 200, { ok: true, ledger: await authStore.listCreditLedger({ userId: url.searchParams.get("user_id") || "", limit: Number(url.searchParams.get("limit") || 200) }) });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/admin/credits") {
+      await authStore.requireAdmin(req);
+      const body = await readBody(req).catch(() => ({}));
+      const result = await authStore.applyCreditDelta({
+        userId: body.user_id || body.userId,
+        delta: Number(body.delta || 0),
+        reason: body.reason || "admin_adjustment",
+        tokens: Number(body.tokens || 0),
+        metadata: { admin: true, note: body.note || "" },
+      });
+      json(res, 200, { ok: true, result });
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/chat/completions") {
       const body = await readBody(req);
       if (body?.model === "stub-model") {
@@ -2439,10 +2754,16 @@ async function route(req, res) {
         });
         return;
       }
-    }    if (await digitalLifeRoutes.handle(req, res, url)) {
+    }
+    if (PUBLIC_DEPLOYMENT && url.pathname.startsWith("/api/digital-life")) {
+      json(res, 404, { ok: false, error: "API not found" });
+      return;
+    }
+    if (await digitalLifeRoutes.handle(req, res, url)) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/board") {
+      requirePublicAdmin(requestUser);
       const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
       const status = await withDevice(deviceId, () => fastBoardStatus());
       json(res, 200, { ok: true, ...status });
@@ -2455,6 +2776,7 @@ async function route(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/board-config") {
+      requirePublicAdmin(requestUser);
       const body = await readBody(req);
       selectDevice(deviceIdFrom(body || {}, BOARD.id));
       const boardConfig = updateBoardConfig(body || {});
@@ -2479,39 +2801,46 @@ async function route(req, res) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/status") {
+      requirePublicAdmin(requestUser);
       const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
       json(res, 200, await withDevice(deviceId, () => fastRawBoardStatus()));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/audio/status") {
+      requirePublicAdmin(requestUser);
       const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
       json(res, 200, await withDevice(deviceId, () => runAudioRoute("status", () => audioStatus())));
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/audio/play") {
+      requirePublicAdmin(requestUser);
       const body = await readBody(req);
       const deviceId = deviceIdFrom(body || {}, BOARD.id);
       json(res, 200, await withDevice(deviceId, () => runAudioRoute("play", () => audioPlay(body || {}))));
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/audio/record") {
+      requirePublicAdmin(requestUser);
       const body = await readBody(req);
       const deviceId = deviceIdFrom(body || {}, BOARD.id);
       json(res, 200, await withDevice(deviceId, () => runAudioRoute("record", () => audioRecord(body || {}))));
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/audio/stop") {
+      requirePublicAdmin(requestUser);
       const body = await readBody(req).catch(() => ({}));
       const deviceId = deviceIdFrom(body || {}, BOARD.id);
       json(res, 200, await withDevice(deviceId, () => runAudioRoute("stop", () => audioStop())));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/logs") {
+      requirePublicAdmin(requestUser);
       const limit = Number(url.searchParams.get("limit") || 80);
       json(res, 200, { ok: true, logs: await readServerLogTail(limit) });
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/verify") {
+      requirePublicAdmin(requestUser);
       const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
       const id = url.searchParams.get("id") || currentBuild?.id || lastDeploy?.id || "";
       if (!hasBoardCredentials()) {
@@ -2524,9 +2853,12 @@ async function route(req, res) {
     }
     // --- Chat: 瀵硅瘽寮忚鍒掞紙涓嶇敓鎴愪唬鐮侊級 ---
     if (req.method === "POST" && url.pathname === "/api/chat") {
-      const body = await readBody(req);
+      const body = withServerModelSettings(await readBody(req));
       try {
+        if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
+        await ensureCreditsAvailable(requestUser);
         const result = await runAgentRequest({ ...(body || {}), action: "message" });
+        await chargeAiUsage({ user: requestUser, body, result, reason: "chat" });
         await writeProjectMemorySafe(body?.conversation_id, {
           trigger: "chat",
           prompt: body?.prompt || body?.message || "",
@@ -2540,27 +2872,32 @@ async function route(req, res) {
     }
     // --- Clarify: 瀹炴椂闇€姹傜粏鍖?---
     if (req.method === "POST" && url.pathname === "/api/clarify") {
-      const body = await readBody(req);
+      const body = withServerModelSettings(await readBody(req));
       const prompt = String(body.prompt || "").trim();
       if (!prompt) { json(res, 400, { ok: false, error: "Prompt is required." }); return; }
 
       const modelSettings = normalizeModelSettings(body.modelSettings || {});
       if (!modelSettings.enabled) { json(res, 200, { ok: true, questions: null, source: "skip" }); return; }
+      if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
+      await ensureCreditsAvailable(requestUser);
 
       const rawHistory = Array.isArray(body.history) ? body.history : [];
       const preferences = memoryStore.getAll();
 
       const result = await analyzeAndClarify(modelSettings, prompt, preferences, rawHistory);
+      await chargeAiUsage({ user: requestUser, body, result: { source: "clarify" }, reason: "clarify" });
       json(res, 200, { ok: true, questions: result, source: result ? "llm" : "skip" });
       return;
     }
 
     // --- Preferences: 鐢ㄦ埛鍋忓ソ CRUD ---
     if (req.method === "GET" && url.pathname === "/api/preferences") {
+      requirePublicAdmin(requestUser);
       json(res, 200, { ok: true, preferences: memoryStore.getAll() });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/preferences") {
+      requirePublicAdmin(requestUser);
       const body = await readBody(req);
       const { key, value, label, category, source } = body;
       if (!key || !value) { json(res, 400, { ok: false, error: "key and value required" }); return; }
@@ -2569,6 +2906,7 @@ async function route(req, res) {
       return;
     }
     if (req.method === "DELETE" && url.pathname === "/api/preferences") {
+      requirePublicAdmin(requestUser);
       const body = await readBody(req);
       if (body.key) memoryStore.remove(body.key);
       else if (body.category) memoryStore.removeCategory(body.category);
@@ -2578,6 +2916,7 @@ async function route(req, res) {
 
     // --- Experience: Agent 缁忛獙鏌ヨ ---
     if (req.method === "GET" && url.pathname === "/api/experience") {
+      requirePublicAdmin(requestUser);
       const taskType = url.searchParams.get("type") || "general";
       const lessons = experienceStore.getLessons(taskType, 10);
       const stats = experienceStore.getStats(taskType);
@@ -2585,6 +2924,7 @@ async function route(req, res) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/playbooks") {
+      requirePublicAdmin(requestUser);
       const taskType = url.searchParams.get("type") || "general";
       const signature = url.searchParams.get("signature") || "";
       const limit = Number(url.searchParams.get("limit") || 10);
@@ -2593,6 +2933,7 @@ async function route(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/playbooks") {
+      requirePublicAdmin(requestUser);
       const body = await readBody(req);
       const playbook = playbookStore.recordPlaybook(body || {});
       json(res, 200, { ok: true, playbook });
@@ -2600,27 +2941,25 @@ async function route(req, res) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/jobs") {
-      const jobs = jobStore.listJobs({
+      let jobs = jobStore.listJobs({
         limit: Number(url.searchParams.get("limit") || 50),
         conversationId: url.searchParams.get("conversation_id") || "",
         status: url.searchParams.get("status") || "",
       });
+      jobs = filterJobsForUser(jobs, requestUser);
       json(res, 200, { ok: true, jobs });
       return;
     }
     if (req.method === "GET" && /^\/api\/jobs\/[^/]+$/.test(url.pathname)) {
       const jobId = decodeURIComponent(url.pathname.split("/")[3] || "");
-      const job = jobStore.getJob(jobId);
-      if (!job) {
-        json(res, 404, { ok: false, error: "Job not found" });
-        return;
-      }
+      const job = ensureJobAccess(jobStore.getJob(jobId), requestUser);
       json(res, 200, { ok: true, job });
       return;
     }
     if (req.method === "POST" && /^\/api\/jobs\/[^/]+\/cancel$/.test(url.pathname)) {
       const jobId = decodeURIComponent(url.pathname.split("/")[3] || "");
       try {
+        ensureJobAccess(jobStore.getJob(jobId), requestUser);
         const job = jobStore.requestCancel(jobId);
         json(res, 200, { ok: true, job });
       } catch (cancelErr) {
@@ -2636,20 +2975,25 @@ async function route(req, res) {
         return;
       }
       const payload = body?.payload && typeof body.payload === "object" ? body.payload : body;
-      const job = enqueueBackgroundJob(type, payload || {});
+      if (payload?.conversation_id) ensureConversationAccess(payload.conversation_id, requestUser);
+      if (type === "agent" || type === "generate") await ensureCreditsAvailable(requestUser);
+      const job = enqueueBackgroundJob(type, { ...(payload || {}), user_id: requestUser?.id || "" });
       json(res, 202, { ok: true, job });
       return;
     }
 
     if (req.method === "POST" && url.pathname === "/api/agent") {
-      const body = await readBody(req);
+      const body = withServerModelSettings(await readBody(req));
+      if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
+      await ensureCreditsAvailable(requestUser);
       if (wantsBackgroundJob(body || {})) {
-        const job = enqueueBackgroundJob("agent", body || {});
+        const job = enqueueBackgroundJob("agent", { ...(body || {}), user_id: requestUser?.id || "" });
         json(res, 202, { ok: true, job });
         return;
       }
       try {
         const result = await runAgentRequest(body || {});
+        await chargeAiUsage({ user: requestUser, body, result, reason: body?.action === "confirm_build" ? "agent_build" : "agent" });
         await writeProjectMemorySafe(body?.conversation_id, {
           trigger: body?.action === "confirm_build" ? "agent-confirm-build" : "agent",
           buildId: result?.id || result?.build_id || "",
@@ -2666,13 +3010,16 @@ async function route(req, res) {
     // --- Generate: AI 浠ｇ爜鐢熸垚 ---
     if (req.method === "POST" && url.pathname === "/api/generate") {
       try {
-        const body = await readBody(req);
+        const body = withServerModelSettings(await readBody(req));
+        if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
+        await ensureCreditsAvailable(requestUser);
         if (wantsBackgroundJob(body || {})) {
-          const job = enqueueBackgroundJob("generate", body || {});
+          const job = enqueueBackgroundJob("generate", { ...(body || {}), user_id: requestUser?.id || "" });
           json(res, 202, { ok: true, job });
           return;
         }
         const result = await runGenerateRequest(body || {});
+        await chargeAiUsage({ user: requestUser, body, result, reason: "generate" });
         await writeProjectMemorySafe(body?.conversation_id, {
           trigger: "generate",
           buildId: result?.id || "",
@@ -2706,6 +3053,7 @@ async function route(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/deploy") {
+      requirePublicAdmin(requestUser);
       try {
         const body = await readBody(req);
         if (wantsBackgroundJob(body || {})) {
@@ -2740,14 +3088,14 @@ async function route(req, res) {
 
     // Conversation APIs
     if (req.method === "GET" && url.pathname === "/api/conversations") {
-      const conversations = conversationStore.listConversations();
+      const conversations = conversationStore.listConversations({ userId: requestUser?.id || "" });
       json(res, 200, { ok: true, conversations });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/conversations") {
       const body = await readBody(req).catch(() => ({}));
       const title = String(body?.title || "New Project").trim() || "New Project";
-      const conversation = conversationStore.createConversation(undefined, title);
+      const conversation = conversationStore.createConversation(undefined, title, { userId: requestUser?.id || "" });
       const project = await projectWorkspace.ensureProject(conversation.id, title);
       await writeProjectMemorySafe(conversation.id, { trigger: "project-created" });
       json(res, 200, {
@@ -2769,6 +3117,7 @@ async function route(req, res) {
       const parts = url.pathname.split("/");
       const convId = parts[3];
       if (convId && !parts[4]) {
+        ensureConversationAccess(convId, requestUser);
         assetLibraryStore.deleteConversationAssets(convId);
         conversationStore.deleteConversation(convId);
         json(res, 200, { ok: true });
@@ -2779,6 +3128,7 @@ async function route(req, res) {
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/messages")) {
       const convId = url.pathname.split("/")[3];
+      ensureConversationAccess(convId, requestUser);
       const messages = conversationStore.listMessages(convId);
       json(res, 200, { ok: true, messages });
       return;
@@ -2786,6 +3136,7 @@ async function route(req, res) {
     // Load saved files for a conversation (for state restoration)
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/files")) {
       const convId = url.pathname.split("/")[3];
+      ensureConversationAccess(convId, requestUser);
       const { buildId, files } = conversationStore.loadConversationFiles(convId);
       json(res, 200, { ok: true, buildId, files });
       return;
@@ -2796,6 +3147,7 @@ async function route(req, res) {
         json(res, 400, { ok: false, error: resolved?.error || "Invalid preview path" });
         return;
       }
+      ensureConversationAccess(resolved.conversationId, requestUser);
       const { buildId, files } = previewFilesForConversation(resolved.conversationId);
       if (!Object.keys(files).length || !(resolved.filename in files)) {
         res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
@@ -2818,11 +3170,13 @@ async function route(req, res) {
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/memory")) {
       const convId = url.pathname.split("/")[3];
+      ensureConversationAccess(convId, requestUser);
       json(res, 200, { ok: true, project_memory: conversationStore.getProjectMemory(convId) });
       return;
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/project-files")) {
       const convId = url.pathname.split("/")[3];
+      ensureConversationAccess(convId, requestUser);
       const existingConversation = conversationStore.getConversation(convId);
       if (existingConversation) {
         await projectWorkspace.ensureProject(convId, existingConversation.title || "New Project");
@@ -2834,6 +3188,7 @@ async function route(req, res) {
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/project-file")) {
       const convId = url.pathname.split("/")[3];
+      ensureConversationAccess(convId, requestUser);
       const relativePath = url.searchParams.get("path") || "";
       const file = await projectWorkspace.readProjectFile(convId, relativePath);
       if (!file) {
@@ -2845,6 +3200,7 @@ async function route(req, res) {
     }
     if (url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/assets")) {
       const convId = url.pathname.split("/")[3];
+      ensureConversationAccess(convId, requestUser);
       if (req.method === "GET") {
         assetLibraryStore.ensureDefaultFolders(convId);
         json(res, 200, {
@@ -2884,6 +3240,7 @@ async function route(req, res) {
     }
     if (url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/asset-folders")) {
       const convId = url.pathname.split("/")[3];
+      ensureConversationAccess(convId, requestUser);
       if (req.method === "GET") {
         json(res, 200, { ok: true, folders: assetLibraryStore.ensureDefaultFolders(convId) });
         return;
@@ -2900,6 +3257,7 @@ async function route(req, res) {
       const parts = url.pathname.split("/");
       const convId = parts[3];
       const folderId = decodeURIComponent(parts[5] || "");
+      ensureConversationAccess(convId, requestUser);
       try {
         if (req.method === "PATCH") {
           const body = await readBody(req).catch(() => ({}));
@@ -2932,6 +3290,7 @@ async function route(req, res) {
       const parts = url.pathname.split("/");
       const convId = parts[3];
       const assetId = decodeURIComponent(parts[5] || "");
+      ensureConversationAccess(convId, requestUser);
       const body = await readBody(req).catch(() => ({}));
       let current = assetLibraryStore.getAsset(convId, assetId);
       if (!current) {
@@ -2956,12 +3315,14 @@ async function route(req, res) {
       const parts = url.pathname.split("/");
       const convId = parts[3];
       const assetId = decodeURIComponent(parts[5] || "");
+      ensureConversationAccess(convId, requestUser);
       assetLibraryStore.deleteAsset(convId, assetId);
       json(res, 200, { ok: true });
       return;
     }
     if (req.method === "POST" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/messages")) {
       const convId = url.pathname.split("/")[3];
+      ensureConversationAccess(convId, requestUser);
       const body = await readBody(req);
       conversationStore.appendMessage(convId, body);
       json(res, 200, { ok: true });
@@ -2969,6 +3330,7 @@ async function route(req, res) {
     }
     if (req.method === "DELETE" && url.pathname.startsWith("/api/conversations/")) {
       const convId = url.pathname.split("/")[3];
+      ensureConversationAccess(convId, requestUser);
       assetLibraryStore.deleteConversationAssets(convId);
       conversationStore.deleteConversation(convId);
       json(res, 200, { ok: true });
@@ -3060,6 +3422,10 @@ async function route(req, res) {
 
 await ensureInitialGenerated();
 
-http.createServer(route).listen(PORT, "127.0.0.1", () => {
-  console.log(`VibeBoard MVP listening on http://127.0.0.1:${PORT}/ -> ${BOARD.id}:${BOARD.port}`);
-});
+const server = http.createServer(route);
+function onListen() {
+  const shownHost = HOST || "0.0.0.0";
+  console.log(`VibeBoard MVP listening on http://${shownHost}:${PORT}/ -> ${BOARD.id}:${BOARD.port}`);
+}
+if (HOST) server.listen(PORT, HOST, onListen);
+else server.listen(PORT, onListen);

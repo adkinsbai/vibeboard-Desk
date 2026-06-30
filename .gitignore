@@ -48,3 +48,6 @@ test-*.cjs
 .DS_Store
 Thumbs.db
 __pycache__/
+
+.vercel
+.env*

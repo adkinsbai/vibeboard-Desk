@@ -62,11 +62,13 @@ export function createConversationStore(db, saveDb = () => {}) {
         CREATE TABLE IF NOT EXISTS conversations (
           id TEXT PRIMARY KEY,
           title TEXT DEFAULT 'New App',
+          user_id TEXT,
           project_dir TEXT,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
       `);
+      ensureColumn(db, "conversations", "user_id", "TEXT");
       ensureColumn(db, "conversations", "project_dir", "TEXT");
       db.run(`
         CREATE TABLE IF NOT EXISTS messages (
@@ -100,14 +102,19 @@ export function createConversationStore(db, saveDb = () => {}) {
       `);
     },
 
-    listConversations() {
+    listConversations(options = {}) {
+      const userId = String(options.userId || options.user_id || "").trim();
+      if (userId) {
+        return query(db, "SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC", [userId]);
+      }
       return query(db, "SELECT * FROM conversations ORDER BY updated_at DESC");
     },
 
     createConversation(id = crypto.randomUUID(), title = "New App", options = {}) {
       const projectDir = String(options.projectDir || options.project_dir || "").trim();
-      run(db, saveDb, "INSERT INTO conversations (id, title, project_dir) VALUES (?, ?, ?)", [id, title, projectDir]);
-      return { id, title, project_dir: projectDir };
+      const userId = String(options.userId || options.user_id || "").trim();
+      run(db, saveDb, "INSERT INTO conversations (id, title, user_id, project_dir) VALUES (?, ?, ?, ?)", [id, title, userId, projectDir]);
+      return { id, title, user_id: userId, project_dir: projectDir };
     },
 
     updateConversation(id, patch = {}) {

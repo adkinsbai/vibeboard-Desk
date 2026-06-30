@@ -90,11 +90,55 @@ await withServer(async ({ baseUrl, json }) => {
     await page.locator("#jobCenterBtn").click();
     await page.locator("#jobDrawer.open").waitFor({ timeout: 3000 });
     await page.locator(".job-card").first().waitFor({ timeout: 3000 });
+    await page.locator(".job-log-details").first().waitFor({ timeout: 3000 });
+    const jobLogOverflow = await page.locator(".job-log").first().evaluate(node => getComputedStyle(node).overflowY);
+    assert(jobLogOverflow !== "auto" && jobLogOverflow !== "scroll", "job logs should not create a nested scroll area");
     await page.locator("#closeJobDrawer").click();
     await page.waitForFunction(() => !document.querySelector("#jobDrawer")?.classList.contains("open"));
+    await page.waitForFunction(() => getComputedStyle(document.querySelector("#jobDrawer")).visibility === "hidden");
+    const jobDrawerHiddenState = await page.locator("#jobDrawer").evaluate(node => ({
+      inert: node.inert,
+      ariaHidden: node.getAttribute("aria-hidden"),
+      visibility: getComputedStyle(node).visibility,
+      pointerEvents: getComputedStyle(node).pointerEvents,
+    }));
+    assert(jobDrawerHiddenState.inert === true, "closed drawers should be inert");
+    assert(jobDrawerHiddenState.ariaHidden === "true", "closed drawers should be hidden from assistive tech");
+    assert(jobDrawerHiddenState.visibility === "hidden", "closed drawers should not remain visually hittable offscreen");
+    assert(jobDrawerHiddenState.pointerEvents === "none", "closed drawers should not receive pointer events");
+
+    await page.locator("#refreshBoardBtn").click();
+    await page.locator("#statusDrawer.open").waitFor({ timeout: 3000 });
+    const statusDrawerScroll = await page.locator("#statusDrawer").evaluate(node => ({
+      overflowY: getComputedStyle(node).overflowY,
+      scrollHeight: node.scrollHeight,
+      clientHeight: node.clientHeight,
+    }));
+    assert(statusDrawerScroll.overflowY !== "hidden", "status drawer should not clip overflowing status content");
+    assert(statusDrawerScroll.scrollHeight >= statusDrawerScroll.clientHeight, "status drawer should own its vertical scroll when needed");
+    await page.locator("#closeStatusDrawer").click();
+    await page.waitForFunction(() => !document.querySelector("#statusDrawer")?.classList.contains("open"));
+
+    await page.locator("#creditChip").click();
+    await page.locator("#authModal.open").waitFor({ timeout: 3000 });
+    const usageSurface = await page.locator("#usageDrawer").evaluate(node => ({
+      open: node.classList.contains("open"),
+      hasToolbar: Boolean(document.querySelector("#refreshUsageBtn")),
+      hasSummary: Boolean(document.querySelector("#usageSummary")),
+      hasLedger: Boolean(document.querySelector("#usageLedger")),
+    }));
+    assert(!usageSurface.open && usageSurface.hasToolbar && usageSurface.hasSummary && usageSurface.hasLedger, "usage drawer should be available but require login before opening");
+    await page.locator("#closeAuthModal").click();
+    await page.waitForFunction(() => !document.querySelector("#authModal")?.classList.contains("open"));
 
     await page.locator("#assetManagerBtn").click();
     await page.locator("#assetManagerDrawer.open").waitFor({ timeout: 3000 });
+    const assetSurface = await page.locator("#assetManagerDrawer").evaluate(node => ({
+      background: getComputedStyle(node).backgroundColor,
+      color: getComputedStyle(node).color,
+    }));
+    assert(!assetSurface.background.includes("248, 250, 252") && !assetSurface.background.includes("255, 255, 255"), "asset manager should use the app dark surface");
+    assert(!assetSurface.color.includes("15, 23, 42"), "asset manager text should not use the old light-theme foreground");
     await page.locator(".asset-project-item").first().waitFor({ timeout: 3000 });
     await page.locator(".asset-folder-tile").first().waitFor({ timeout: 3000 });
     const folderCount = await page.locator(".asset-folder-tile").count();

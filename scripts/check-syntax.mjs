@@ -8,6 +8,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const explicitFiles = [
   "server.mjs",
   "app.js",
+  "admin.js",
   "digital-life-expression.js",
   "digital-life.js",
 ];

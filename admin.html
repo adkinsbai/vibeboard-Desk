@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibeBoard Admin</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body class="admin-page">
+  <main class="admin-shell">
+    <header class="admin-header">
+      <div>
+        <p class="kicker">VibeBoard Admin</p>
+        <h1>账户与 Credits</h1>
+      </div>
+      <a class="ghost-btn" href="/">返回工作台</a>
+    </header>
+    <section class="admin-summary" id="adminSummary"></section>
+    <section class="admin-grid">
+      <article class="admin-panel">
+        <div class="drawer-head">
+          <div>
+            <p class="kicker">Users</p>
+            <h2>账户列表</h2>
+          </div>
+          <button class="ghost-btn" id="refreshAdminBtn" type="button">Refresh</button>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>手机号</th>
+                <th>角色</th>
+                <th>Credits</th>
+                <th>注册时间</th>
+              </tr>
+            </thead>
+            <tbody id="adminUsersBody"></tbody>
+          </table>
+        </div>
+      </article>
+      <article class="admin-panel">
+        <div class="drawer-head">
+          <div>
+            <p class="kicker">Ledger</p>
+            <h2>Credit 账本</h2>
+          </div>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>账户</th>
+                <th>变动</th>
+                <th>余额</th>
+                <th>原因</th>
+                <th>Tokens</th>
+                <th>时间</th>
+              </tr>
+            </thead>
+            <tbody id="adminLedgerBody"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+    <p class="auth-message" id="adminMessage"></p>
+  </main>
+  <script src="./admin.js"></script>
+</body>
+</html>

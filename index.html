@@ -22,10 +22,25 @@
       </div>
       <div class="sidebar-footer">
         <button class="market-link sidebar-action" id="assetManagerBtn" type="button">
-          <span>▣</span> 资产管理
+          <span class="market-link-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7.5h7v7H4z"/>
+              <path d="M13 7.5h7v7h-7z"/>
+              <path d="M4 16.5h16"/>
+            </svg>
+          </span>
+          <span class="market-link-label">资产管理</span>
         </button>
         <a href="/market.html" class="market-link">
-          <span>🏪</span> 应用市场
+          <span class="market-link-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 10h16"/>
+              <path d="M5 10l1.2-5h11.6L19 10"/>
+              <path d="M6 10v9h12v-9"/>
+              <path d="M9 19v-5h6v5"/>
+            </svg>
+          </span>
+          <span class="market-link-label">应用市场</span>
         </a>
       </div>
     </aside>
@@ -43,6 +58,9 @@
           </div>
         </div>
         <div class="top-actions">
+          <button class="credit-chip" id="creditChip" type="button">Usage</button>
+          <a class="ghost-btn admin-link" id="adminLink" href="/admin.html" hidden>Admin</a>
+          <button class="ghost-btn" id="accountBtn" type="button">登录</button>
           <button class="ghost-btn" id="jobCenterBtn" type="button">Tasks</button>
           <button class="icon-btn" id="codeToggle" type="button" aria-label="Open generated code">&lt;/&gt;</button>
           <button class="ghost-btn" id="refreshBoardBtn" type="button">Status</button>
@@ -103,7 +121,6 @@
                   <h2>小屏效果</h2>
                 </div>
                 <div class="device-actions">
-                  <a class="ghost-btn digital-life-link" href="/digital-life.html">Digital Life</a>
                   <select id="deviceSelect" class="device-select" aria-label="选择设备">
                     <option value="taishan-transparent">透明版</option>
                     <option value="taishan-gray">灰色版</option>
@@ -193,6 +210,22 @@
       <span class="pill" id="jobSummary">0 jobs</span>
     </div>
     <div class="job-list" id="jobList"></div>
+  </aside>
+
+  <aside class="drawer usage-drawer" id="usageDrawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <p class="kicker">Account Usage</p>
+        <h2>Usage</h2>
+      </div>
+      <button class="icon-btn" id="closeUsageDrawer" type="button" aria-label="Close usage">x</button>
+    </div>
+    <div class="usage-toolbar">
+      <button class="ghost-btn" id="refreshUsageBtn" type="button">Refresh</button>
+      <span class="pill">Public beta: free</span>
+    </div>
+    <div class="usage-summary" id="usageSummary"></div>
+    <div class="usage-ledger" id="usageLedger"></div>
   </aside>
 
   <aside class="drawer asset-manager-drawer" id="assetManagerDrawer" aria-hidden="true">
@@ -290,6 +323,52 @@
           <span>支持图片、视频、文本、音乐、设计文件和压缩包</span>
         </div>
       </div>
+    </div>
+  </section>
+
+  <section class="modal auth-modal" id="authModal" aria-hidden="true" role="dialog" aria-labelledby="authModalTitle">
+    <div class="modal-panel auth-panel">
+      <div class="drawer-head">
+        <div>
+          <p class="kicker">Account</p>
+          <h2 id="authModalTitle">登录 / 注册</h2>
+        </div>
+        <button class="icon-btn" id="closeAuthModal" type="button" aria-label="Close account dialog">x</button>
+      </div>
+      <div class="auth-tabs" role="tablist">
+        <button class="auth-tab active" id="authLoginTab" type="button">登录</button>
+        <button class="auth-tab" id="authRegisterTab" type="button">注册</button>
+      </div>
+      <form class="auth-form" id="loginForm">
+        <label>
+          <span>手机号</span>
+          <input id="loginPhone" type="tel" autocomplete="tel" placeholder="+8613800000000" required>
+        </label>
+        <label>
+          <span>密码</span>
+          <input id="loginPassword" type="password" autocomplete="current-password" required>
+        </label>
+        <button class="primary-btn wide" type="submit">登录</button>
+      </form>
+      <form class="auth-form hidden" id="registerForm">
+        <label>
+          <span>手机号</span>
+          <input id="registerPhone" type="tel" autocomplete="tel" placeholder="+8613800000000" required>
+        </label>
+        <div class="auth-code-row hidden">
+          <label>
+            <span>验证码</span>
+            <input id="registerCode" type="text" inputmode="numeric" autocomplete="one-time-code">
+          </label>
+          <button class="ghost-btn" id="sendCodeBtn" type="button">发送验证码</button>
+        </div>
+        <label>
+          <span>密码</span>
+          <input id="registerPassword" type="password" autocomplete="new-password" minlength="8" required>
+        </label>
+        <button class="primary-btn wide" type="submit">Register</button>
+      </form>
+      <p class="auth-message" id="authMessage"></p>
     </div>
   </section>
 

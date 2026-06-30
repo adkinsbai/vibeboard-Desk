@@ -171,7 +171,9 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 12px;
   background: transparent;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -179,13 +181,15 @@ button {
   text-decoration: none;
   font-size: 13px;
   font-weight: 500;
+  line-height: 1;
   transition: all 0.12s ease;
 }
 
 .sidebar-action {
-  width: 100%;
   margin-bottom: 8px;
   text-align: left;
+  font-family: inherit;
+  cursor: pointer;
 }
 
 .market-link:hover {
@@ -193,8 +197,28 @@ button {
   border-color: rgba(56, 189, 248, .2);
 }
 
-.market-link span {
-  font-size: 16px;
+.market-link-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+}
+
+.market-link-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.9;
+}
+
+.market-link-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
 }
 
 .shell {
@@ -294,6 +318,26 @@ h2 {
 
 .top-actions {
   gap: 8px;
+}
+
+.credit-chip {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .03);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.admin-link {
+  min-height: 32px;
+  padding: 0 10px;
+  text-decoration: none;
 }
 
 .primary-btn,
@@ -818,12 +862,6 @@ textarea:focus {
   box-shadow: 0 0 0 2px rgba(56, 189, 248, .12);
 }
 
-.digital-life-link {
-  min-height: 32px;
-  padding: 0 10px;
-  text-decoration: none;
-}
-
 .device-stage {
   display: grid;
   place-items: center;
@@ -1191,17 +1229,27 @@ textarea:focus {
   display: grid;
   grid-template-rows: auto auto 1fr;
   transform: translateX(calc(100% + 24px));
-  transition: transform .22s ease;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: transform .22s ease, opacity .18s ease, visibility 0s linear .22s;
   box-shadow: -20px 0 60px rgba(0, 0, 0, .5);
 }
 
 .status-drawer {
-  grid-template-rows: auto auto auto auto minmax(96px, auto) minmax(0, 1fr);
+  display: block;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .job-drawer {
   width: min(520px, 100vw);
   grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.usage-drawer {
+  width: min(560px, 100vw);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
 }
 
 .status-drawer .drawer-head h2 span {
@@ -1245,6 +1293,87 @@ textarea:focus {
   overflow: auto;
 }
 
+.usage-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-summary div,
+.usage-row,
+.usage-empty {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.usage-summary div {
+  min-width: 0;
+  padding: 10px;
+}
+
+.usage-summary span {
+  display: block;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.usage-summary strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.usage-ledger {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 10px;
+  overflow: auto;
+}
+
+.usage-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.usage-row strong {
+  display: block;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+}
+
+.usage-row span {
+  color: var(--text-3);
+}
+
+.usage-empty {
+  padding: 14px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
 .job-card {
   display: grid;
   gap: 8px;
@@ -1277,15 +1406,30 @@ textarea:focus {
   line-height: 1.45;
 }
 
+.job-log-details {
+  border: 1px solid rgba(255, 255, 255, .06);
+  border-radius: 5px;
+  background: rgba(0, 0, 0, .16);
+}
+
+.job-log-details summary {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  color: var(--text-2);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  user-select: none;
+}
+
 .job-log {
   display: grid;
   gap: 3px;
-  max-height: 110px;
-  overflow: auto;
-  padding: 8px;
-  border: 1px solid rgba(255, 255, 255, .06);
-  border-radius: 5px;
-  background: rgba(0, 0, 0, .18);
+  padding: 0 8px 8px;
+  border: 0;
+  background: transparent;
 }
 
 .job-status {
@@ -1354,6 +1498,10 @@ textarea:focus {
 
 .drawer.open {
   transform: translateX(0);
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
 }
 
 .drawer-head {
@@ -1475,6 +1623,149 @@ pre {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.auth-panel {
+  max-width: 430px;
+}
+
+.auth-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 12px 12px 0;
+}
+
+.auth-tab {
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.auth-tab.active {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: rgba(56, 189, 248, .4);
+}
+
+.auth-form {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.auth-code-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.auth-message {
+  min-height: 20px;
+  margin: 0;
+  padding: 0 12px 12px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.admin-page {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.admin-shell {
+  width: min(1180px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 24px 0 40px;
+}
+
+.admin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 18px;
+}
+
+.admin-header h1 {
+  margin: 4px 0 0;
+  font-size: 24px;
+}
+
+.admin-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.admin-summary div,
+.admin-panel {
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.admin-summary div {
+  padding: 14px;
+  border-radius: var(--radius);
+}
+
+.admin-summary span {
+  display: block;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.admin-summary strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 20px;
+}
+
+.admin-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.admin-table-wrap {
+  overflow: auto;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.admin-table th,
+.admin-table td {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.admin-table th {
+  color: var(--text-3);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.ok-text {
+  color: var(--green);
+}
+
+.danger-text {
+  color: var(--red);
 }
 
 .asset-manager-drawer {
@@ -2142,6 +2433,126 @@ pre {
 
 .deploy-btn.done {
   background: var(--green);
+}
+
+/* Unified dark treatment for asset management surfaces */
+.asset-manager-drawer,
+.asset-properties-panel {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.asset-manager-drawer .drawer-head,
+.asset-properties-panel .drawer-head {
+  background: var(--surface);
+  border-bottom-color: var(--border);
+}
+
+.asset-manager-drawer .kicker,
+.asset-manager-drawer .drawer-head h2 {
+  color: var(--text);
+}
+
+.asset-manager-layout,
+.asset-files-pane {
+  background: var(--surface);
+}
+
+.asset-projects {
+  border-right-color: var(--border);
+  background: rgba(10, 15, 26, .64);
+}
+
+.asset-section-title,
+.asset-project-item span,
+.asset-manager-toolbar p,
+.asset-breadcrumb-separator,
+.asset-breadcrumb-current,
+.asset-folder-meta,
+.asset-file-kind,
+.asset-file-size,
+.asset-property-row span {
+  color: var(--text-2);
+}
+
+.asset-project-item,
+.asset-folder-tile,
+.asset-file-row {
+  color: var(--text);
+}
+
+.asset-project-item:hover,
+.asset-folder-tile:hover,
+.asset-file-row:hover {
+  background: rgba(255, 255, 255, .045);
+  border-color: rgba(255, 255, 255, .08);
+}
+
+.asset-project-item.active,
+.asset-folder-tile.selected,
+.asset-file-row.selected {
+  background: rgba(56, 189, 248, .14);
+  border-color: rgba(56, 189, 248, .34);
+}
+
+.asset-project-item strong,
+.asset-folder-name,
+.asset-file-name,
+.asset-property-row strong {
+  color: var(--text);
+}
+
+.asset-manager-toolbar,
+.asset-table-head {
+  border-bottom-color: var(--border);
+}
+
+.asset-breadcrumb,
+.asset-command-bar .ghost-btn,
+.asset-file-usage select {
+  border-color: var(--border);
+  background: rgba(10, 15, 26, .72);
+  color: var(--text);
+}
+
+.asset-breadcrumb-link,
+.asset-folder-icon,
+.asset-file-icon svg.image,
+.asset-command-bar .ghost-btn {
+  color: var(--accent);
+}
+
+.asset-command-bar .ghost-btn:hover,
+.asset-context-menu button:hover {
+  background: rgba(56, 189, 248, .12);
+}
+
+.asset-command-bar .ghost-btn.danger {
+  border-color: rgba(239, 68, 68, .28);
+  color: #fca5a5;
+}
+
+.asset-empty-state {
+  border-color: rgba(255, 255, 255, .1);
+  color: var(--text-2);
+}
+
+.asset-context-menu {
+  border-color: var(--border);
+  background: #111827;
+  box-shadow: 0 18px 45px rgba(0, 0, 0, .5);
+}
+
+.asset-context-menu button {
+  color: var(--text);
+}
+
+.asset-properties-body {
+  background: var(--border);
+}
+
+.asset-property-row {
+  background: var(--surface);
 }
 
 /* Welcome block */
