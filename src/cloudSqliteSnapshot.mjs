@@ -1,6 +1,7 @@
 const DEFAULT_KEY = "vibeboard-main";
 
-export function createCloudSqliteSnapshot({ pg, key = DEFAULT_KEY } = {}) {
+export function createCloudSqliteSnapshot({ pg, key = DEFAULT_KEY, filePath = "" } = {}) {
+  if (filePath) return createFileSqliteSnapshot(filePath);
   if (!pg) return null;
   const snapshotKey = String(key || DEFAULT_KEY);
 
@@ -32,4 +33,20 @@ export function createCloudSqliteSnapshot({ pg, key = DEFAULT_KEY } = {}) {
   }
 
   return { initSchema, load, save };
+}
+
+function createFileSqliteSnapshot(filePath) {
+  return {
+    async initSchema() {},
+    async load() {
+      const { promises: fs } = await import("node:fs");
+      return await fs.readFile(filePath).catch(() => null);
+    },
+    async save(buffer) {
+      const { promises: fs } = await import("node:fs");
+      const path = await import("node:path");
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, Buffer.from(buffer || []));
+    },
+  };
 }

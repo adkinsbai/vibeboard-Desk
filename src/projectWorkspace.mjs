@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { normalizeProjectMemory } from "./conversationStore.mjs";
@@ -14,7 +15,10 @@ export function createProjectWorkspace({
 } = {}) {
   if (!root) throw new Error("project workspace root is required");
   if (!conversationStore) throw new Error("conversationStore is required");
-  const baseDir = path.resolve(env.VIBEBOARD_PROJECTS_DIR || path.join(root, DEFAULT_PROJECTS_DIR));
+  const defaultBaseDir = env.VERCEL === "1"
+    ? path.join(os.tmpdir(), DEFAULT_PROJECTS_DIR)
+    : path.join(root, DEFAULT_PROJECTS_DIR);
+  const baseDir = path.resolve(env.VIBEBOARD_PROJECTS_DIR || defaultBaseDir);
 
   async function ensureBaseDir() {
     await fs.mkdir(baseDir, { recursive: true });

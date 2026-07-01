@@ -28,6 +28,8 @@ await withServer(async ({ baseUrl }) => {
 
   const conversation = await postJson(baseUrl, "/api/conversations", { title: "Public Auth Test" }, cookie);
   assert(conversation.id, "authenticated user should be able to create a conversation");
+  const listedConversations = await getJson(baseUrl, "/api/conversations", cookie);
+  assert(listedConversations.conversations?.some(item => item.id === conversation.id), "created conversation should remain listed after creation");
 
   const users = await getJson(baseUrl, "/api/admin/users", cookie);
   assert(users.users?.some(user => user.phone === PHONE), "admin should list registered users");

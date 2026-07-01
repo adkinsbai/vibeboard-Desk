@@ -154,13 +154,15 @@ await loadLocalEnv();
 const BILLING_MODE = String(process.env.VIBEBOARD_BILLING_MODE || "free").toLowerCase() === "credits" ? "credits" : "free";
 const REQUIRE_PHONE_VERIFICATION = process.env.VIBEBOARD_REQUIRE_PHONE_VERIFICATION === "1";
 
-const pg = process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : null;
-if (process.env.VERCEL === "1" && !pg) {
+const TEST_CLOUD_SQLITE_FILE = process.env.VIBEBOARD_TEST_CLOUD_SQLITE_FILE || "";
+const pg = process.env.DATABASE_URL && !TEST_CLOUD_SQLITE_FILE ? neon(process.env.DATABASE_URL) : null;
+if (process.env.VERCEL === "1" && !pg && !TEST_CLOUD_SQLITE_FILE) {
   throw new Error("DATABASE_URL is required on Vercel public deployment.");
 }
 const cloudSqliteSnapshot = createCloudSqliteSnapshot({
   pg,
   key: process.env.VIBEBOARD_DB_SNAPSHOT_KEY || "vibeboard-main",
+  filePath: TEST_CLOUD_SQLITE_FILE,
 });
 if (cloudSqliteSnapshot) await cloudSqliteSnapshot.initSchema();
 
@@ -199,18 +201,42 @@ db.run(`
 `);
 
 // Helper to save database to file
+let dbSaveQueue = Promise.resolve();
+let dbSaveError = null;
 async function saveDb() {
-  const data = db.export();
-  const buffer = Buffer.from(data);
-  await fs.mkdir(path.dirname(DB_PATH), { recursive: true }).catch(() => {});
-  await fs.writeFile(DB_PATH, buffer).catch((error) => {
-    console.warn("[db] local sqlite save failed:", error.message);
-  });
-  if (cloudSqliteSnapshot) {
-    await cloudSqliteSnapshot.save(buffer).catch((error) => {
-      console.warn("[db] cloud sqlite snapshot save failed:", error.message);
+  dbSaveQueue = dbSaveQueue
+    .catch(() => {})
+    .then(async () => {
+      dbSaveError = null;
+      const data = db.export();
+      const buffer = Buffer.from(data);
+      await fs.mkdir(path.dirname(DB_PATH), { recursive: true }).catch(() => {});
+      await fs.writeFile(DB_PATH, buffer).catch((error) => {
+        console.warn("[db] local sqlite save failed:", error.message);
+      });
+      if (cloudSqliteSnapshot) {
+        await cloudSqliteSnapshot.save(buffer);
+      }
+    })
+    .catch((error) => {
+      dbSaveError = error;
+      console.warn("[db] sqlite snapshot save failed:", error.message);
     });
+  return dbSaveQueue;
+}
+
+async function flushDbSaves({ requireCloudSnapshot = false } = {}) {
+  await dbSaveQueue.catch(() => {});
+  if (requireCloudSnapshot && dbSaveError) {
+    const error = new Error("Failed to save project data. Please retry.");
+    error.statusCode = 503;
+    error.cause = dbSaveError;
+    throw error;
   }
+}
+
+async function flushMutationSaves() {
+  await flushDbSaves({ requireCloudSnapshot: Boolean(cloudSqliteSnapshot) });
 }
 
 // Helper to run query and return results
@@ -2914,6 +2940,7 @@ async function route(req, res) {
           trigger: "chat",
           prompt: body?.prompt || body?.message || "",
         });
+        await flushMutationSaves();
         json(res, 200, result);
       } catch (err) {
         const classified = classifyError(err);
@@ -2953,6 +2980,7 @@ async function route(req, res) {
       const { key, value, label, category, source } = body;
       if (!key || !value) { json(res, 400, { ok: false, error: "key and value required" }); return; }
       memoryStore.set(key, value, { label, category, source: source || "user" });
+      await flushMutationSaves();
       json(res, 200, { ok: true, preferences: memoryStore.getAll() });
       return;
     }
@@ -2961,6 +2989,7 @@ async function route(req, res) {
       const body = await readBody(req);
       if (body.key) memoryStore.remove(body.key);
       else if (body.category) memoryStore.removeCategory(body.category);
+      await flushMutationSaves();
       json(res, 200, { ok: true, preferences: memoryStore.getAll() });
       return;
     }
@@ -2987,6 +3016,7 @@ async function route(req, res) {
       requirePublicAdmin(requestUser);
       const body = await readBody(req);
       const playbook = playbookStore.recordPlaybook(body || {});
+      await flushMutationSaves();
       json(res, 200, { ok: true, playbook });
       return;
     }
@@ -3012,6 +3042,7 @@ async function route(req, res) {
       try {
         ensureJobAccess(jobStore.getJob(jobId), requestUser);
         const job = jobStore.requestCancel(jobId);
+        await flushMutationSaves();
         json(res, 200, { ok: true, job });
       } catch (cancelErr) {
         json(res, 404, { ok: false, error: cancelErr.message });
@@ -3038,6 +3069,7 @@ async function route(req, res) {
         action: type,
         extra: { job_id: job.id, job_type: type },
       });
+      await flushMutationSaves();
       json(res, 202, { ok: true, job });
       return;
     }
@@ -3065,6 +3097,7 @@ async function route(req, res) {
           action: "agent",
           extra: { job_id: job.id, job_type: "agent" },
         });
+        await flushMutationSaves();
         json(res, 202, { ok: true, job });
         return;
       }
@@ -3088,6 +3121,7 @@ async function route(req, res) {
             mode_boundary: result?.mode_boundary?.mode || "",
           },
         });
+        await flushMutationSaves();
         json(res, 200, result);
       } catch (err) {
         const classified = classifyError(err);
@@ -3128,6 +3162,7 @@ async function route(req, res) {
             action: "generate",
             extra: { job_id: job.id, job_type: "generate" },
           });
+          await flushMutationSaves();
           json(res, 202, { ok: true, job });
           return;
         }
@@ -3151,6 +3186,7 @@ async function route(req, res) {
             verification_ok: Boolean(result?.verification?.ok),
           },
         });
+        await flushMutationSaves();
         json(res, 200, result);
       } catch (error) {
         const classified = classifyError(error, { stage: "generate" });
@@ -3198,6 +3234,7 @@ async function route(req, res) {
         const body = await readBody(req);
         if (wantsBackgroundJob(body || {})) {
           const job = enqueueBackgroundJob("deploy", body || {});
+          await flushMutationSaves();
           json(res, 202, { ok: true, job });
           return;
         }
@@ -3208,6 +3245,7 @@ async function route(req, res) {
           prompt: currentBuild?.prompt || "",
           deploy: result,
         });
+        await flushMutationSaves();
         json(res, 200, result);
       } catch (error) {
         console.error("[deploy] Error:", error.message);
@@ -3247,6 +3285,7 @@ async function route(req, res) {
         action: "created",
         extra: { title },
       });
+      await flushMutationSaves();
       json(res, 200, {
         ok: true,
         id: conversation.id,
@@ -3269,6 +3308,7 @@ async function route(req, res) {
         ensureConversationAccess(convId, requestUser);
         assetLibraryStore.deleteConversationAssets(convId);
         conversationStore.deleteConversation(convId);
+        await flushMutationSaves();
         json(res, 200, { ok: true });
       } else {
         json(res, 400, { ok: false, error: "Invalid conversation ID" });
@@ -3329,6 +3369,7 @@ async function route(req, res) {
       const existingConversation = conversationStore.getConversation(convId);
       if (existingConversation) {
         await projectWorkspace.ensureProject(convId, existingConversation.title || "New Project");
+        await flushMutationSaves();
       }
       const files = await projectWorkspace.listProjectFiles(convId);
       const conversation = conversationStore.getConversation(convId);
@@ -3379,6 +3420,7 @@ async function route(req, res) {
             kinds: summary.byKind,
           });
           await writeProjectMemorySafe(convId, { trigger: "assets-uploaded" });
+          await flushMutationSaves();
           json(res, 200, { ok: true, assets, folders: assetLibraryStore.listFolders(convId), rejected: result.rejected, summary });
         } catch (assetErr) {
           const classified = classifyError(assetErr);
@@ -3398,6 +3440,7 @@ async function route(req, res) {
         const body = await readBody(req).catch(() => ({}));
         const folder = assetLibraryStore.createFolder(convId, body.name || "新建文件夹");
         await writeProjectMemorySafe(convId, { trigger: "asset-folder-created" });
+        await flushMutationSaves();
         json(res, 200, { ok: true, folder, folders: assetLibraryStore.listFolders(convId) });
         return;
       }
@@ -3416,6 +3459,7 @@ async function route(req, res) {
             return;
           }
           await writeProjectMemorySafe(convId, { trigger: "asset-folder-renamed" });
+          await flushMutationSaves();
           json(res, 200, { ok: true, folder, folders: assetLibraryStore.listFolders(convId) });
           return;
         }
@@ -3426,6 +3470,7 @@ async function route(req, res) {
             return;
           }
           await writeProjectMemorySafe(convId, { trigger: "asset-folder-deleted" });
+          await flushMutationSaves();
           json(res, 200, { ok: true, ...result, folders: assetLibraryStore.listFolders(convId), assets: assetLibraryStore.listAssets(convId) });
           return;
         }
@@ -3457,6 +3502,7 @@ async function route(req, res) {
         projectPath,
       });
       await writeProjectMemorySafe(convId, { trigger: "asset-updated" });
+      await flushMutationSaves();
       json(res, 200, { ok: true, asset, folders: assetLibraryStore.listFolders(convId), summary: assetLibraryStore.summarize(convId) });
       return;
     }
@@ -3466,6 +3512,7 @@ async function route(req, res) {
       const assetId = decodeURIComponent(parts[5] || "");
       ensureConversationAccess(convId, requestUser);
       assetLibraryStore.deleteAsset(convId, assetId);
+      await flushMutationSaves();
       json(res, 200, { ok: true });
       return;
     }
@@ -3474,6 +3521,7 @@ async function route(req, res) {
       ensureConversationAccess(convId, requestUser);
       const body = await readBody(req);
       conversationStore.appendMessage(convId, body);
+      await flushMutationSaves();
       json(res, 200, { ok: true });
       return;
     }
@@ -3482,6 +3530,7 @@ async function route(req, res) {
       ensureConversationAccess(convId, requestUser);
       assetLibraryStore.deleteConversationAssets(convId);
       conversationStore.deleteConversation(convId);
+      await flushMutationSaves();
       json(res, 200, { ok: true });
       return;
     }
