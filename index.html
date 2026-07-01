@@ -136,6 +136,7 @@
                     <option value="taishan-black">亮黑版</option>
                   </select>
                   <span class="pill" id="deployState">not deployed</span>
+                  <button class="ghost-btn calibrate-btn" id="calibrateScreenBtn" type="button">校准屏幕</button>
                 </div>
               </div>
               <div class="device-stage">
@@ -146,8 +147,14 @@
                       <span></span>
                       <strong>Loading preview</strong>
                     </div>
+                    <div class="calibration-resize-handle" id="calibrationResizeHandle" aria-hidden="true"></div>
                     <iframe id="deviceFrame" title="Generated 480x360 screen preview" srcdoc='<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;}</style></head><body></body></html>'></iframe>
                   </div>
+                </div>
+                <div class="calibration-panel" id="calibrationPanel" hidden>
+                  <span id="calibrationReadout">left 0% / top 0% / width 0% / height 0%</span>
+                  <button class="ghost-btn" id="resetCalibrationBtn" type="button">重置</button>
+                  <button class="primary-btn" id="saveCalibrationBtn" type="button">确认位置</button>
                 </div>
               </div>
               <!-- Deploy to Market Button -->

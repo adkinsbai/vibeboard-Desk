@@ -46,6 +46,12 @@ const previewLoadingMask = el("previewLoadingMask");
 const deviceSelect = el("deviceSelect");
 const macPhoto = el("macPhoto");
 const macPhotoImg = el("macPhotoImg");
+const calibrateScreenBtn = el("calibrateScreenBtn");
+const calibrationPanel = el("calibrationPanel");
+const calibrationReadout = el("calibrationReadout");
+const resetCalibrationBtn = el("resetCalibrationBtn");
+const saveCalibrationBtn = el("saveCalibrationBtn");
+const calibrationResizeHandle = el("calibrationResizeHandle");
 const modelConfigBtn = el("modelConfigBtn");
 const modelModal = el("modelModal");
 const closeModelModal = el("closeModelModal");
@@ -135,6 +141,7 @@ let registerVerificationToken = "";
 
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
 const DEVICE_STORAGE_KEY = "vibeboard-active-device";
+const DEVICE_CALIBRATION_STORAGE_KEY = "vibeboard-device-screen-calibration";
 const CONVERSATION_STORAGE_KEY = "vibeboard-current-conversation";
 const AGENT_MODE_STORAGE_KEY = "vibeboard-agent-mode";
 const BLANK_DEVICE_FRAME_HTML = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;}*{box-sizing:border-box;}</style></head><body></body></html>';
@@ -144,7 +151,7 @@ const deviceProfiles = {
     label: "透明版",
     image: "/mac-frame-transparent.png",
     previewPath: "/generated/current/index.html",
-    screen: { left: "22.6%", top: "29.1%", width: "55.4%", height: "26.0%" }
+    screen: { left: "22.8%", top: "29.35%", width: "54.7%", height: "25.35%" }
   },
   "taishan-gray": {
     id: "taishan-gray",
@@ -176,6 +183,8 @@ function getActiveDeviceId() {
 
 let activeDeviceId = getActiveDeviceId();
 let currentAssetSummary = { count: 0, totalBytes: 0, byKind: {}, items: [] };
+let screenCalibrationDraft = null;
+let calibrationDrag = null;
 
 function getAgentMode() {
   const value = agentModeSelect?.value || localStorage.getItem(AGENT_MODE_STORAGE_KEY) || "vibeboard";
@@ -1386,6 +1395,80 @@ function makeConversationPreviewUrl(conversationId, buildId = Date.now()) {
   return makePreviewUrl(`/api/conversations/${encodedId}/preview/index.html`, buildId);
 }
 
+function parsePercent(value, fallback = 0) {
+  const number = Number.parseFloat(String(value || "").replace("%", ""));
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function formatPercent(value) {
+  return `${Number(value).toFixed(2).replace(/\.?0+$/, "")}%`;
+}
+
+function normalizeScreenRect(rect = {}) {
+  const minWidth = 8;
+  const minHeight = 6;
+  const width = Math.max(minWidth, Math.min(95, Number(rect.width || 0)));
+  const height = Math.max(minHeight, Math.min(95, Number(rect.height || 0)));
+  const left = Math.max(0, Math.min(95 - width, Number(rect.left || 0)));
+  const top = Math.max(0, Math.min(95 - height, Number(rect.top || 0)));
+  return { left, top, width, height };
+}
+
+function profileScreenRect(profile = deviceProfiles["taishan-gray"]) {
+  return normalizeScreenRect({
+    left: parsePercent(profile.screen.left, 30),
+    top: parsePercent(profile.screen.top, 30),
+    width: parsePercent(profile.screen.width, 44),
+    height: parsePercent(profile.screen.height, 22),
+  });
+}
+
+function loadScreenCalibrations() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DEVICE_CALIBRATION_STORAGE_KEY) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveScreenCalibration(deviceId, rect) {
+  const calibrations = loadScreenCalibrations();
+  calibrations[deviceId] = normalizeScreenRect(rect);
+  localStorage.setItem(DEVICE_CALIBRATION_STORAGE_KEY, JSON.stringify(calibrations));
+}
+
+function clearScreenCalibration(deviceId) {
+  const calibrations = loadScreenCalibrations();
+  delete calibrations[deviceId];
+  localStorage.setItem(DEVICE_CALIBRATION_STORAGE_KEY, JSON.stringify(calibrations));
+}
+
+function activeScreenRect() {
+  const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
+  const saved = loadScreenCalibrations()[profile.id];
+  return normalizeScreenRect(saved || profileScreenRect(profile));
+}
+
+function setScreenRect(rect, { draft = false } = {}) {
+  const normalized = normalizeScreenRect(rect);
+  if (draft) screenCalibrationDraft = normalized;
+  if (macPhoto) {
+    macPhoto.style.setProperty("--screen-left", formatPercent(normalized.left));
+    macPhoto.style.setProperty("--screen-top", formatPercent(normalized.top));
+    macPhoto.style.setProperty("--screen-width", formatPercent(normalized.width));
+    macPhoto.style.setProperty("--screen-height", formatPercent(normalized.height));
+  }
+  updateCalibrationReadout(normalized);
+  scheduleFitDeviceFrame();
+  return normalized;
+}
+
+function updateCalibrationReadout(rect = activeScreenRect()) {
+  if (!calibrationReadout) return;
+  calibrationReadout.textContent = `left ${formatPercent(rect.left)} / top ${formatPercent(rect.top)} / width ${formatPercent(rect.width)} / height ${formatPercent(rect.height)}`;
+}
+
 function showBlankDeviceFrame() {
   if (!deviceFrame) return;
   setPreviewLoading("Preparing preview");
@@ -1435,16 +1518,90 @@ function applyDeviceProfile({ refresh = true } = {}) {
   }
   if (macPhoto) {
     macPhoto.dataset.device = profile.id;
-    macPhoto.style.setProperty("--screen-left", profile.screen.left);
-    macPhoto.style.setProperty("--screen-top", profile.screen.top);
-    macPhoto.style.setProperty("--screen-width", profile.screen.width);
-    macPhoto.style.setProperty("--screen-height", profile.screen.height);
+    setScreenRect(activeScreenRect());
   }
   scheduleFitDeviceFrame();
   if (refresh) {
     syncDeviceFrameFromActiveContext();
     refreshBoard();
   }
+}
+
+function setCalibrationMode(open) {
+  if (!macPhoto) return;
+  const isOpen = Boolean(open);
+  macPhoto.classList.toggle("calibration-mode", isOpen);
+  if (calibrationPanel) calibrationPanel.hidden = !isOpen;
+  if (calibrateScreenBtn) {
+    calibrateScreenBtn.textContent = isOpen ? "退出校准" : "校准屏幕";
+    calibrateScreenBtn.setAttribute("aria-pressed", String(isOpen));
+  }
+  screenCalibrationDraft = activeScreenRect();
+  setScreenRect(screenCalibrationDraft, { draft: true });
+}
+
+function isCalibrationMode() {
+  return Boolean(macPhoto?.classList.contains("calibration-mode"));
+}
+
+function saveCurrentCalibration() {
+  if (!screenCalibrationDraft) return;
+  saveScreenCalibration(activeDeviceId, screenCalibrationDraft);
+  setCalibrationMode(false);
+  setScreenRect(activeScreenRect());
+}
+
+function resetCurrentCalibration() {
+  clearScreenCalibration(activeDeviceId);
+  screenCalibrationDraft = profileScreenRect(deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"]);
+  setScreenRect(screenCalibrationDraft, { draft: true });
+}
+
+function pointerToScreenPercent(event) {
+  const rect = macPhoto?.getBoundingClientRect();
+  if (!rect?.width || !rect?.height) return null;
+  return {
+    x: ((event.clientX - rect.left) / rect.width) * 100,
+    y: ((event.clientY - rect.top) / rect.height) * 100,
+  };
+}
+
+function startCalibrationDrag(event, mode = "move") {
+  if (!isCalibrationMode() || !macPhoto) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const point = pointerToScreenPercent(event);
+  if (!point) return;
+  calibrationDrag = {
+    mode,
+    pointerId: event.pointerId,
+    target: event.currentTarget,
+    start: point,
+    rect: screenCalibrationDraft || activeScreenRect(),
+  };
+  event.currentTarget?.setPointerCapture?.(event.pointerId);
+  macPhoto.classList.add("calibration-dragging");
+}
+
+function updateCalibrationDrag(event) {
+  if (!calibrationDrag) return;
+  event.preventDefault();
+  const point = pointerToScreenPercent(event);
+  if (!point) return;
+  const dx = point.x - calibrationDrag.start.x;
+  const dy = point.y - calibrationDrag.start.y;
+  const base = calibrationDrag.rect;
+  const next = calibrationDrag.mode === "resize"
+    ? { ...base, width: base.width + dx, height: base.height + dy }
+    : { ...base, left: base.left + dx, top: base.top + dy };
+  setScreenRect(next, { draft: true });
+}
+
+function finishCalibrationDrag(event) {
+  if (!calibrationDrag) return;
+  calibrationDrag.target?.releasePointerCapture?.(calibrationDrag.pointerId);
+  calibrationDrag = null;
+  macPhoto?.classList.remove("calibration-dragging");
 }
 
 function renderDevicePreview(prompt, statusText) {
@@ -2648,11 +2805,23 @@ projectCreateForm?.addEventListener("submit", event => {
   createConversation({ resetChat: true, title });
 });
 deviceSelect?.addEventListener("change", () => {
+  setCalibrationMode(false);
   activeDeviceId = deviceProfiles[deviceSelect.value] ? deviceSelect.value : "taishan-gray";
   localStorage.setItem(DEVICE_STORAGE_KEY, activeDeviceId);
   deployState.textContent = "device changed";
   applyDeviceProfile();
 });
+calibrateScreenBtn?.addEventListener("click", () => setCalibrationMode(!isCalibrationMode()));
+saveCalibrationBtn?.addEventListener("click", saveCurrentCalibration);
+resetCalibrationBtn?.addEventListener("click", resetCurrentCalibration);
+document.querySelector(".mac-screen-overlay")?.addEventListener("pointerdown", event => {
+  if (event.target === calibrationResizeHandle) return;
+  startCalibrationDrag(event, "move");
+});
+calibrationResizeHandle?.addEventListener("pointerdown", event => startCalibrationDrag(event, "resize"));
+window.addEventListener("pointermove", updateCalibrationDrag);
+window.addEventListener("pointerup", finishCalibrationDrag);
+window.addEventListener("pointercancel", finishCalibrationDrag);
 modelForm?.addEventListener("submit", event => {
   event.preventDefault();
   saveModelSettings({
