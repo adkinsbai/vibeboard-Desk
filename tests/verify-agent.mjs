@@ -702,6 +702,8 @@ await test("error classifier returns actionable generation failure details", asy
   assert(render.errorStage === "local_verify", "render error should point to local verification");
   const contrast = classifyError(new Error("local verification failed: TEXT_CONTRAST_LOW: Rendered page has low contrast text."));
   assert(contrast.errorType === "render_failed", `expected contrast error to be render_failed, got ${JSON.stringify(contrast)}`);
+  const missingPython = classifyError(new Error("spawn python3 ENOENT while running py_compile for hardware_app.py"));
+  assert(missingPython.errorType === "python_runtime_unavailable", `expected python_runtime_unavailable, got ${JSON.stringify(missingPython)}`);
 
   const busy = classifyError(createStructuredError("Another generation is already running.", "generate_busy"));
   assert(busy.statusCode === 409, "busy generation should be an HTTP 409 conflict");
@@ -3343,6 +3345,49 @@ await test("agent accepts complete text-only final answer after local verificati
   });
 });
 
+await test("agent degrades hardware Python checks when Python runtime is unavailable", async () => {
+  const { runAgent } = await import(pathToFileURL(path.join(ROOT, "src", "agent.mjs")).href);
+  const files = validGeneratedFiles();
+  const oldPython = process.env.PYTHON;
+  process.env.PYTHON = "python-vibeboard-missing-for-test";
+  try {
+    await withMockChatServer([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          createFileToolCall("call-index-missing-python", "index.html", files["index.html"]),
+          createFileToolCall("call-style-missing-python", "style.css", files["style.css"]),
+          createFileToolCall("call-app-missing-python", "app.js", files["app.js"]),
+          createFileToolCall("call-hardware-missing-python", "hardware_app.py", files["hardware_app.py"]),
+        ],
+      },
+      {
+        role: "assistant",
+        content: "done",
+      },
+    ], async mock => {
+      const result = await runAgent({
+        baseUrl: mock.baseUrl,
+        apiKey: "test-key",
+        model: "mock-tools",
+        maxIterations: 4,
+        maxVerificationAttempts: 1,
+        llmTimeoutMs: 10000,
+      }, "make a status dashboard", {}, []);
+
+      assert(result.success === true, `expected success with degraded Python checks, got ${JSON.stringify(result)}`);
+      const syntaxAction = result.actions.find(action => action.tool === "verify_syntax");
+      const hardwareAction = result.actions.find(action => action.tool === "run_hardware");
+      assert(syntaxAction?.result.includes("Python runtime unavailable"), `expected skipped Python syntax warning, got ${syntaxAction?.result}`);
+      assert(hardwareAction?.args?.degraded === true, `expected degraded hardware run, got ${JSON.stringify(hardwareAction)}`);
+    });
+  } finally {
+    if (oldPython == null) delete process.env.PYTHON;
+    else process.env.PYTHON = oldPython;
+  }
+});
+
 await test("agent treats chat-only history with empty files as a new project", async () => {
   const { runAgent } = await import(pathToFileURL(path.join(ROOT, "src", "agent.mjs")).href);
   const files = validGeneratedFiles();
@@ -3455,6 +3500,22 @@ if (!verifier) {
       const result = await runVerifyAllLocal(verifier.verifyAllLocal, dir, files);
       assert(result && result.ok === true, `verifyAllLocal did not return ok result: ${JSON.stringify(result)}`);
       return `loaded ${verifier.path}`;
+    });
+  });
+
+  await test("verifyAllLocal degrades when Python runtime is unavailable", async () => {
+    await withTempDir("vibeboard-verify-no-python-", async dir => {
+      const files = validGeneratedFiles();
+      await writeFiles(dir, files);
+      const mod = await importVerifiers();
+      const result = await mod.verifyAllLocal(files, {
+        dir,
+        root: ROOT,
+        pythonBin: "python-vibeboard-missing-for-test",
+      });
+      assert(result && result.ok === true, `missing Python should not block cloud verification: ${JSON.stringify(result)}`);
+      assert(result.degraded === true, `missing Python should mark verification degraded: ${JSON.stringify(result)}`);
+      assert(result.issues.some(issue => issue.code === "PYTHON_RUNTIME_UNAVAILABLE" && issue.severity === SEVERITY.WARNING), `expected PYTHON_RUNTIME_UNAVAILABLE warning, got ${JSON.stringify(result.issues)}`);
     });
   });
 

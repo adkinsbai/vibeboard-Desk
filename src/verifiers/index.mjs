@@ -108,13 +108,15 @@ export async function verifySyntax(input = {}, options = {}) {
         timeout: DEFAULT_TIMEOUT_MS,
       });
       if (!pyResult.ok) {
-        issues.push({
-          code: "PYTHON_SYNTAX_ERROR",
-          message: "hardware_app.py failed python -m py_compile.",
-          phase,
-          evidence: commandEvidence(pyResult),
-          suggestedFixes: ["Fix the Python syntax error reported by py_compile."],
-        });
+        issues.push(isPythonRuntimeUnavailable(pyResult)
+          ? pythonRuntimeUnavailableIssue(phase, python, pyResult, "py_compile")
+          : {
+              code: "PYTHON_SYNTAX_ERROR",
+              message: "hardware_app.py failed python -m py_compile.",
+              phase,
+              evidence: commandEvidence(pyResult),
+              suggestedFixes: ["Fix the Python syntax error reported by py_compile."],
+            });
       }
     } else {
       issues.push({
@@ -125,11 +127,18 @@ export async function verifySyntax(input = {}, options = {}) {
       });
     }
 
+    const blockingIssueCount = issues.filter(issue => issue.severity !== SEVERITY.WARNING && issue.severity !== SEVERITY.INFO).length;
+
     return toolResult({
-      ok: issues.length === 0,
+      ok: blockingIssueCount === 0,
       phase,
-      summary: issues.length === 0 ? "JavaScript and Python syntax checks passed." : "Syntax verification failed.",
+      summary: blockingIssueCount === 0
+        ? issues.length === 0
+          ? "JavaScript and Python syntax checks passed."
+          : "JavaScript syntax passed; Python syntax check was skipped because the runtime is unavailable."
+        : "Syntax verification failed.",
       issues,
+      degraded: blockingIssueCount === 0 && issues.length > 0,
       evidence: {
         tmpDir,
         nodeBin: process.execPath,
@@ -166,6 +175,19 @@ export async function verifyHardwareRun(input = {}, options = {}) {
     });
 
     if (!runResult.ok) {
+      if (isPythonRuntimeUnavailable(runResult)) {
+        const fallbackData = mockHardwareResult();
+        return toolResult({
+          ok: true,
+          phase,
+          summary: "hardware_app.py runtime execution skipped because Python is unavailable.",
+          issues: [pythonRuntimeUnavailableIssue(phase, python, runResult, "hardware_run")],
+          evidence: { tmpDir, pythonBin: python },
+          data: fallbackData,
+          degraded: true,
+        });
+      }
+
       return failResult(phase, "hardware_app.py exited with an error.", [{
         code: "PYTHON_RUNTIME_ERROR",
         message: "hardware_app.py did not complete successfully.",
@@ -748,6 +770,8 @@ async function execText(command, args, options = {}) {
       stdout: err.stdout || "",
       stderr: err.stderr || "",
       exitCode: typeof err.code === "number" ? err.code : null,
+      errorCode: typeof err.code === "string" ? err.code : null,
+      errno: err.errno ?? null,
       signal: err.signal || null,
       message: err.message,
     };
@@ -758,6 +782,8 @@ function commandEvidence(result) {
   return {
     command: [result.command, ...(result.args || [])].join(" "),
     exitCode: result.exitCode,
+    errorCode: result.errorCode,
+    errno: result.errno,
     signal: result.signal,
     stdout: truncate(result.stdout),
     stderr: truncate(result.stderr),
@@ -767,7 +793,47 @@ function commandEvidence(result) {
 
 function resolvePythonBin(pythonBin) {
   if (pythonBin) return pythonBin;
+  if (process.env.PYTHON) return process.env.PYTHON;
   return process.platform === "win32" ? "python" : "python3";
+}
+
+function isPythonRuntimeUnavailable(result = {}) {
+  if (result.errorCode === "ENOENT") return true;
+  const command = String(result.command || "");
+  const text = [
+    result.errorCode,
+    result.message,
+    result.stderr,
+    result.stdout,
+  ].filter(Boolean).join("\n");
+
+  if (command && new RegExp(`spawn\\s+${escapeRegExp(command)}\\s+ENOENT`, "i").test(text)) {
+    return true;
+  }
+
+  if (!/\b(?:python|python3|py)\b/i.test(command)) return false;
+  return /spawn\s+\S*python\S*\s+ENOENT|\bENOENT\b[\s\S]*\bpython\b|Python was not found|unable to find Python|could not find Python|No Python at|not recognized as an internal or external command|command not found/i.test(text);
+}
+
+function pythonRuntimeUnavailableIssue(phase, python, result, checkName) {
+  return {
+    code: "PYTHON_RUNTIME_UNAVAILABLE",
+    severity: SEVERITY.WARNING,
+    message: `Python runtime is unavailable, so ${checkName} was skipped in this environment.`,
+    phase,
+    evidence: {
+      pythonBin: python,
+      checkName,
+      ...commandEvidence(result),
+    },
+    suggestedFixes: [
+      "Install Python in the cloud runtime, or keep this as a degraded cloud check and run hardware_app.py on the target board.",
+    ],
+  };
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function parseLastJson(text) {

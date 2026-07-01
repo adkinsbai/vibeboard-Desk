@@ -153,6 +153,15 @@ const ERROR_PROFILES = Object.freeze({
     statusCode: 422,
     nextActions: ["重试生成", "查看 Python 详情"],
   },
+  python_runtime_unavailable: {
+    label: "Python runtime is unavailable",
+    stage: "local_verify",
+    userMessage: "Cloud verification could not find a Python runtime for hardware_app.py. The generated files may still be valid, but the hardware script execution check was degraded.",
+    suggestion: "Keep the cloud check degraded, or install Python in the runtime if you want py_compile and hardware_app.py execution to run on the server.",
+    retryable: true,
+    statusCode: 503,
+    nextActions: ["Retry generation", "View technical details", "Run on a board with Python"],
+  },
   hardware_contract: {
     label: "Generated hardware contract is invalid",
     stage: "local_verify",
@@ -287,6 +296,7 @@ function explicitType(error) {
 }
 
 function detectType(text, lower, context = {}) {
+  if (/spawn\s+\S*python\S*\s+ENOENT|\bENOENT\b[\s\S]*\bpython\b|PYTHON_RUNTIME_UNAVAILABLE|Python runtime is unavailable|Python was not found|unable to find Python|could not find Python|No Python at|not recognized as an internal or external command|command not found/i.test(text) && /python|py_compile|hardware_app\.py/i.test(text)) return "python_runtime_unavailable";
   if (/another generation|generation.*running|generate_busy|already.*running|in progress/i.test(text)) return "generate_busy";
   if (/Prompt is required|empty.*prompt/i.test(text)) return "empty_prompt";
   if (/larger than|payload too large|request entity too large|HTTP 413|413/i.test(text)) return "request_too_large";

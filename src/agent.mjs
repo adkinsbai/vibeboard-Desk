@@ -435,7 +435,10 @@ export function createToolExecutor(fileStore, hardware = null) {
             const py = fileStore["hardware_app.py"];
             let pyOk = true;
             const pySyntax = await validatePythonSyntax(py, "hardware_app.py", tmpDir);
-            for (const issue of pySyntax) {
+            if (pySyntax.skipped) {
+              results.push(`⚠️ ${pySyntax.warning}`);
+            }
+            for (const issue of pySyntax.issues) {
               results.push(`❌ ${issue}`);
               hasError = true;
               pyOk = false;
@@ -612,6 +615,12 @@ export function createToolExecutor(fileStore, hardware = null) {
             } catch (execErr) {
               const stderr = execErr.stderr || "";
               const stdout = execErr.stdout || "";
+              if (isPythonRuntimeUnavailableError(execErr)) {
+                action.result = `⚠️ 当前云端环境没有可用 Python 解释器，已跳过 hardware_app.py 实际运行；静态合同检查和 480x360 渲染验证会继续执行。`;
+                action.args = { error: stderr || stdout || execErr.message, degraded: true };
+                actions.push(action);
+                return action.result;
+              }
               action.result = `❌ hardware_app.py 运行失败:\n${stderr || stdout || execErr.message}`;
               action.args = { error: stderr || stdout || execErr.message };
               actions.push(action);
@@ -1280,21 +1289,31 @@ async function validateJavaScriptSyntax(source, label, tmpDir) {
 async function validatePythonSyntax(source, label, tmpDir) {
   const filePath = path.join(tmpDir, label);
   await fs.writeFile(filePath, source, "utf-8");
-  const candidates = process.platform === "win32"
-    ? [process.env.PYTHON || "python", "py"]
-    : [process.env.PYTHON || "python3", "python"];
+  const candidates = pythonCandidates();
   const errors = [];
 
   for (const bin of candidates) {
     try {
       await execFileText(bin, ["-m", "py_compile", filePath], { cwd: tmpDir, timeout: 5000 });
-      return [];
+      return { issues: [], skipped: false };
     } catch (err) {
-      errors.push(`${bin}: ${(err.stderr || err.stdout || err.message).trim()}`);
+      errors.push({ bin, err });
     }
   }
 
-  return [`${label}: Python 编译失败 - ${errors.join("; ")}`];
+  if (errors.every(({ err }) => isPythonRuntimeUnavailableError(err))) {
+    const detail = errors.map(({ bin, err }) => `${bin}: ${(err.stderr || err.stdout || err.message).trim()}`).join("; ");
+    return {
+      issues: [],
+      skipped: true,
+      warning: `${label}: Python runtime unavailable; skipped py_compile in this cloud environment. ${detail}`,
+    };
+  }
+
+  return {
+    issues: [`${label}: Python compile failed - ${errors.map(({ bin, err }) => `${bin}: ${(err.stderr || err.stdout || err.message).trim()}`).join("; ")}`],
+    skipped: false,
+  };
 }
 
 async function ensureRenderSupport() {
@@ -1407,9 +1426,7 @@ function simulateHardwareTool(toolName, args = {}) {
 }
 
 async function runPythonScript(scriptPath, cwd, timeoutMs) {
-  const candidates = process.platform === "win32"
-    ? [process.env.PYTHON || "python", "py"]
-    : [process.env.PYTHON || "python3", "python"];
+  const candidates = pythonCandidates();
   const errors = [];
 
   for (const bin of candidates) {
@@ -1423,6 +1440,24 @@ async function runPythonScript(scriptPath, cwd, timeoutMs) {
   const error = new Error(`无法运行 Python。尝试过: ${errors.join("; ")}`);
   error.stderr = errors.join("\n");
   throw error;
+}
+
+function pythonCandidates() {
+  if (process.env.PYTHON) return [process.env.PYTHON];
+  return process.platform === "win32" ? ["python", "py"] : ["python3", "python"];
+}
+
+function isPythonRuntimeUnavailableError(error = {}) {
+  if (error.code === "ENOENT") return true;
+  const text = [
+    error.code,
+    error.errno,
+    error.message,
+    error.stderr,
+    error.stdout,
+  ].filter(Boolean).join("\n");
+
+  return /spawn\s+\S*python\S*\s+ENOENT|\bENOENT\b[\s\S]*\bpython\b|Python was not found|unable to find Python|could not find Python|No Python at|not recognized as an internal or external command|command not found/i.test(text);
 }
 
 function execFileText(file, args, options = {}) {
