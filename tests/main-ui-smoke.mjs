@@ -91,70 +91,21 @@ await withServer(async ({ baseUrl, json }) => {
     assert(previewReadyState.frameOpacity === "1", "iframe should fade in only after load");
     await page.unroute("**/never-finishes-preview.html*");
 
-    await page.evaluate(() => localStorage.removeItem("vibeboard-device-screen-calibration"));
     await page.locator("#deviceSelect").selectOption("taishan-transparent");
-    await page.locator("#calibrateScreenBtn").click();
-    await page.locator("#calibrationPanel:not([hidden])").waitFor({ timeout: 3000 });
-    const calibrationOpenState = await page.locator("#macPhoto").evaluate(node => ({
-      mode: node.classList.contains("calibration-mode"),
+    const transparentScreen = await page.locator("#macPhoto").evaluate(node => ({
       left: node.style.getPropertyValue("--screen-left"),
       top: node.style.getPropertyValue("--screen-top"),
       width: node.style.getPropertyValue("--screen-width"),
       height: node.style.getPropertyValue("--screen-height"),
-      handleDisplay: getComputedStyle(document.querySelector("#calibrationResizeHandle")).display,
+      hasCalibrationButton: Boolean(document.querySelector("#calibrateScreenBtn")),
+      hasCalibrationPanel: Boolean(document.querySelector("#calibrationPanel")),
+      hasResizeHandle: Boolean(document.querySelector("#calibrationResizeHandle")),
+      overlayCursor: getComputedStyle(document.querySelector(".mac-screen-overlay")).cursor,
     }));
-    assert(calibrationOpenState.mode, "screen calibration mode should open from the device toolbar");
-    assert(calibrationOpenState.handleDisplay !== "none", "calibration mode should expose a resize handle");
-
-    const overlay = page.locator(".mac-screen-overlay");
-    let overlayBox = await overlay.boundingBox();
-    assert(overlayBox, "screen overlay should be measurable before calibration drag");
-    await page.mouse.move(overlayBox.x + overlayBox.width / 2, overlayBox.y + overlayBox.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(overlayBox.x + overlayBox.width / 2 + 28, overlayBox.y + overlayBox.height / 2 + 18);
-    await page.mouse.up();
-    const movedCalibration = await page.locator("#macPhoto").evaluate(node => ({
-      left: Number.parseFloat(node.style.getPropertyValue("--screen-left")),
-      top: Number.parseFloat(node.style.getPropertyValue("--screen-top")),
-      width: Number.parseFloat(node.style.getPropertyValue("--screen-width")),
-      height: Number.parseFloat(node.style.getPropertyValue("--screen-height")),
-    }));
-    assert(movedCalibration.left > Number.parseFloat(calibrationOpenState.left), "dragging should move the calibrated screen horizontally");
-    assert(movedCalibration.top > Number.parseFloat(calibrationOpenState.top), "dragging should move the calibrated screen vertically");
-
-    const resizeHandleBox = await page.locator("#calibrationResizeHandle").boundingBox();
-    assert(resizeHandleBox, "calibration resize handle should be measurable");
-    await page.mouse.move(resizeHandleBox.x + resizeHandleBox.width / 2, resizeHandleBox.y + resizeHandleBox.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(resizeHandleBox.x + resizeHandleBox.width / 2 + 30, resizeHandleBox.y + resizeHandleBox.height / 2 + 24);
-    await page.mouse.up();
-    const resizedCalibration = await page.locator("#macPhoto").evaluate(node => ({
-      left: Number.parseFloat(node.style.getPropertyValue("--screen-left")),
-      top: Number.parseFloat(node.style.getPropertyValue("--screen-top")),
-      width: Number.parseFloat(node.style.getPropertyValue("--screen-width")),
-      height: Number.parseFloat(node.style.getPropertyValue("--screen-height")),
-    }));
-    assert(resizedCalibration.width > movedCalibration.width, "resizing should increase the calibrated screen width");
-    assert(resizedCalibration.height > movedCalibration.height, "resizing should increase the calibrated screen height");
-
-    await page.locator("#saveCalibrationBtn").click();
-    await page.waitForFunction(() => document.querySelector("#calibrationPanel")?.hidden === true);
-    const savedCalibration = await page.evaluate(() => JSON.parse(localStorage.getItem("vibeboard-device-screen-calibration") || "{}")["taishan-transparent"]);
-    assert(savedCalibration && Math.abs(savedCalibration.width - resizedCalibration.width) < 0.02, "confirmed calibration should persist for the active device");
-    await page.locator("#deviceSelect").selectOption("taishan-gray");
-    await page.locator("#deviceSelect").selectOption("taishan-transparent");
-    const restoredCalibration = await page.locator("#macPhoto").evaluate(node => ({
-      left: Number.parseFloat(node.style.getPropertyValue("--screen-left")),
-      top: Number.parseFloat(node.style.getPropertyValue("--screen-top")),
-      width: Number.parseFloat(node.style.getPropertyValue("--screen-width")),
-      height: Number.parseFloat(node.style.getPropertyValue("--screen-height")),
-    }));
-    assert(Math.abs(restoredCalibration.left - savedCalibration.left) < 0.02 && Math.abs(restoredCalibration.width - savedCalibration.width) < 0.02, "saved calibration should restore when returning to the device");
-    await page.locator("#calibrateScreenBtn").click();
-    await page.locator("#resetCalibrationBtn").click();
-    const resetCalibration = await page.evaluate(() => JSON.parse(localStorage.getItem("vibeboard-device-screen-calibration") || "{}")["taishan-transparent"]);
-    assert(!resetCalibration, "reset should clear saved calibration for the active device");
-    await page.locator("#calibrateScreenBtn").click();
+    assert(transparentScreen.left === "21.06%" && transparentScreen.top === "22.88%", "transparent board should use the confirmed screen position");
+    assert(transparentScreen.width === "58.43%" && transparentScreen.height === "30.66%", "transparent board should use the confirmed screen size");
+    assert(!transparentScreen.hasCalibrationButton && !transparentScreen.hasCalibrationPanel && !transparentScreen.hasResizeHandle, "screen calibration controls should not be exposed to users");
+    assert(!["move", "grab", "grabbing"].includes(transparentScreen.overlayCursor), "screen overlay should not advertise draggable calibration");
 
     const beforeCreate = await page.locator(".conv-item").count();
     await page.locator("#newConversationBtn").click();
