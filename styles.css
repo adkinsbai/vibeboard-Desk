@@ -7,6 +7,16 @@
   --accent: #38bdf8;
   --accent-dim: rgba(56, 189, 248, .15);
   --border: rgba(255, 255, 255, .06);
+  --panel: var(--surface);
+  --panel-2: var(--surface-2);
+  --panel-3: #223044;
+  --line: rgba(255, 255, 255, .12);
+  --line-soft: var(--border);
+  --blue: var(--accent);
+  --amber: #f8c14a;
+  --muted: #cbd5e1;
+  --subtle: var(--text-2);
+  --dim: var(--text-3);
   /* Text hierarchy */
   --text: #f1f5f9;
   --text-2: #94a3b8;
@@ -115,6 +125,10 @@ button {
 .conv-item.active {
   background: var(--accent-dim);
   border-color: rgba(56, 189, 248, .2);
+}
+
+.conv-item.pending {
+  opacity: .72;
 }
 
 .conv-item .conv-title {
@@ -386,6 +400,37 @@ h2 {
   border-color: var(--border);
   background: rgba(255, 255, 255, .05);
   color: var(--text);
+}
+
+.guide-panel {
+  width: min(860px, calc(100vw - 32px));
+}
+
+.guide-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.guide-grid section {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, .03);
+}
+
+.guide-grid h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.guide-grid p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .credit-chip {

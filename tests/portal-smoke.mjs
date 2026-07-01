@@ -35,6 +35,20 @@ await withServer(async ({ baseUrl }) => {
     await page.goto(`${baseUrl}/workbench`, { waitUntil: "domcontentloaded" });
     await page.locator("#chatLog").waitFor({ timeout: 6000 });
     assert(await page.locator("#currentConversationTitle").count() === 1, "workbench route should preserve current UI");
+
+    const market = await fetch(`${baseUrl}/api/market`).then(res => res.json());
+    const previewable = market.apps?.find(app => app.id === "vb-cyber-weather-shrine") || market.apps?.[0];
+    assert(previewable?.id, "market should expose at least one app for preview");
+    const preview = await fetch(`${baseUrl}/api/market/${encodeURIComponent(previewable.id)}/preview`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: "taishan-transparent" }),
+    }).then(res => res.json());
+    assert(preview.ok === true && preview.conversation_id, "market preview should create an editable conversation");
+    const files = await fetch(`${baseUrl}/api/conversations/${preview.conversation_id}/files`).then(res => res.json());
+    assert(files.ok === true && files.files?.["index.html"] && files.files?.["hardware_app.py"], "market preview files should persist on the new project");
+    const html = await fetch(`${baseUrl}${preview.preview_url}`).then(res => res.text());
+    assert(html.includes("VibeBoardHardware") || html.includes("<html"), "market preview URL should render the generated app HTML");
   } finally {
     await browser.close();
   }

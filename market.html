@@ -206,22 +206,43 @@
       gap: 4px;
     }
 
+    .app-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .btn-preview-app,
     .btn-deploy-app {
       width: 100%;
       padding: 10px;
-      margin-top: 12px;
-      background: var(--green);
-      border: none;
       border-radius: var(--radius);
-      color: #04130a;
       font-weight: 600;
       font-size: 13px;
       cursor: pointer;
       transition: all 0.15s;
     }
 
+    .btn-preview-app {
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--text);
+    }
+
+    .btn-preview-app:hover {
+      background: var(--panel-3);
+      border-color: var(--blue);
+    }
+
+    .btn-deploy-app {
+      background: var(--blue);
+      border: 1px solid rgba(56, 189, 248, .35);
+      color: #04121f;
+    }
+
     .btn-deploy-app:hover {
-      background: #16a34a;
+      background: #7dd3fc;
     }
 
     .empty-state {
@@ -568,15 +589,32 @@
               </div>
               <div class="app-downloads">⬇ ${app.downloads || 0}</div>
             </div>
-            <button class="btn-deploy-app" onclick="deployApp('${app.id}')">
-              部署到我的设备
-            </button>
+            <div class="app-actions">
+              <button class="btn-preview-app" type="button" data-market-preview="${escapeHtml(app.id)}">预览</button>
+              <button class="btn-deploy-app" type="button" data-market-deploy="${escapeHtml(app.id)}">一键部署</button>
+            </div>
           </div>
         </div>
       `).join('');
 
       grid.style.display = 'grid';
       emptyState.style.display = 'none';
+      bindMarketActions(grid);
+    }
+
+    function bindMarketActions(root) {
+      root.querySelectorAll('[data-market-preview]').forEach(button => {
+        button.addEventListener('click', event => {
+          event.stopPropagation();
+          previewApp(button.dataset.marketPreview, button);
+        });
+      });
+      root.querySelectorAll('[data-market-deploy]').forEach(button => {
+        button.addEventListener('click', event => {
+          event.stopPropagation();
+          deployApp(button.dataset.marketDeploy);
+        });
+      });
     }
 
     // Show empty state
@@ -652,6 +690,31 @@
     }
 
     // Deploy app to device
+    async function previewApp(appId, button) {
+      const original = button?.textContent || '预览';
+      if (button) {
+        button.disabled = true;
+        button.textContent = '载入中';
+      }
+      try {
+        const res = await fetch(`${API_BASE}/api/market/${encodeURIComponent(appId)}/preview`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId: activeDeviceId() })
+        });
+        const data = await res.json();
+        if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
+        const conversation = encodeURIComponent(data.conversation_id || '');
+        window.location.href = `/workbench?conversation=${conversation}&marketPreview=1`;
+      } catch (err) {
+        alert(`预览失败：${err.message}`);
+        if (button) {
+          button.disabled = false;
+          button.textContent = original;
+        }
+      }
+    }
+
     async function deployApp(appId) {
       showDeployOverlay();
       startDeployProgress();

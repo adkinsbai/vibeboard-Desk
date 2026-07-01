@@ -2634,7 +2634,44 @@ const marketRuntime = createMarketRuntime({
   withDevice,
   deviceIdFrom,
   getBoard: () => BOARD,
+  createPreviewProject: createMarketPreviewProject,
 });
+
+async function createMarketPreviewProject({ title, files = {}, appId = "", source = "", body = {} } = {}) {
+  const requestUser = body.requestUser || null;
+  const projectTitle = String(title || "Market Preview").trim() || "Market Preview";
+  const conversation = conversationStore.createConversation(undefined, projectTitle, { userId: requestUser?.id || "" });
+  const project = await projectWorkspace.ensureProject(conversation.id, projectTitle);
+  const buildId = `market-preview-${String(appId || conversation.id).slice(0, 24)}-${Date.now().toString(36)}`;
+  conversationStore.saveConversationFiles(conversation.id, buildId, files);
+  conversationStore.appendMessage(conversation.id, {
+    role: "agent",
+    content: `已从应用市场载入「${projectTitle}」。你可以先在右侧小屏预览，也可以继续和 Agent 对话修改。`,
+    build_id: buildId,
+  });
+  await projectWorkspace.writeBuildSnapshot(conversation.id, buildId, files, []);
+  await writeProjectMemorySafe(conversation.id, {
+    trigger: "market-preview",
+    buildId,
+    prompt: `Preview market app ${projectTitle}`,
+  });
+  await recordProductTelemetry({
+    req: body.req || null,
+    user: requestUser,
+    body: { conversation_id: conversation.id, app_id: appId },
+    eventType: "market.preview",
+    category: "market",
+    action: "preview",
+    extra: { title: projectTitle, source, file_count: Object.keys(files || {}).length },
+  });
+  await flushMutationSaves();
+  return {
+    conversation_id: conversation.id,
+    build_id: buildId,
+    project_dir: project.project_dir,
+    preview_url: `/api/conversations/${encodeURIComponent(conversation.id)}/preview/index.html?build=${encodeURIComponent(buildId)}`,
+  };
+}
 
 const { runAgentRequest } = createAgentOrchestrator({
   conversationStore,
@@ -3591,6 +3628,25 @@ async function route(req, res) {
           error: publishErr.message,
           ...classified,
           previewReport: publishErr.previewReport,
+        });
+      }
+      return;
+    }
+    if (req.method === "POST" && url.pathname.startsWith("/api/market/") && url.pathname.endsWith("/preview")) {
+      const appId = url.pathname.split("/")[3];
+      try {
+        const body = await readBody(req).catch(() => ({}));
+        json(res, 200, await marketRuntime.previewApp(appId, {
+          ...(body || {}),
+          req,
+          requestUser,
+        }));
+      } catch (previewErr) {
+        const classified = classifyError(previewErr);
+        json(res, classified.statusCode || previewErr.statusCode || 500, {
+          ok: false,
+          error: previewErr.message,
+          ...classified,
         });
       }
       return;

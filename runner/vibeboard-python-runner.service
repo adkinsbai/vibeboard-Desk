@@ -1,0 +1,17 @@
+[Unit]
+Description=VibeBoard Python Runner
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vibeboard-python-runner
+EnvironmentFile=/etc/vibeboard-python-runner.env
+ExecStart=/opt/vibeboard-python-runner/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8091
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+

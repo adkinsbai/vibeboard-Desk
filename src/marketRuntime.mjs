@@ -25,6 +25,7 @@ export function createMarketRuntime(deps = {}) {
     withDevice,
     deviceIdFrom,
     getBoard,
+    createPreviewProject,
     log = console,
     idFactory = randomUUID,
   } = deps;
@@ -114,6 +115,28 @@ export function createMarketRuntime(deps = {}) {
     };
   }
 
+  async function previewApp(appId, body = {}) {
+    requireFunction(createPreviewProject, "createPreviewProject");
+    const { app, codeFiles, isStaticApp } = await loadMarketAppCode(appId);
+    const name = String(body.name || app?.name || appId || "Market App").trim() || "Market App";
+    const generatedFiles = filterDeployableFiles(codeFiles, generatedFileNames);
+    const result = await createPreviewProject({
+      appId,
+      app,
+      title: name,
+      files: generatedFiles,
+      source: isStaticApp ? "static" : "database",
+      body,
+    });
+    return {
+      ok: true,
+      appId,
+      title: name,
+      source: isStaticApp ? "static" : "database",
+      ...result,
+    };
+  }
+
   async function snapshotCurrentGeneratedApp(currentBuild) {
     if (currentBuild?.files) return JSON.stringify(serializeFileMap(currentBuild.files));
     try {
@@ -153,6 +176,7 @@ export function createMarketRuntime(deps = {}) {
     publishApp,
     getApp,
     deployApp,
+    previewApp,
   };
 }
 

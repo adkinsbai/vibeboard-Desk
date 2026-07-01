@@ -25,7 +25,9 @@ const statusDrawer = el("statusDrawer");
 const codeToggle = el("codeToggle");
 const closeDrawer = el("closeDrawer");
 const closeStatusDrawer = el("closeStatusDrawer");
-const jobCenterBtn = el("jobCenterBtn");
+const guideBtn = el("guideBtn");
+const guideModal = el("guideModal");
+const closeGuideModal = el("closeGuideModal");
 const jobDrawer = el("jobDrawer");
 const closeJobDrawer = el("closeJobDrawer");
 const refreshJobsBtn = el("refreshJobsBtn");
@@ -176,6 +178,8 @@ function getActiveDeviceId() {
 
 let activeDeviceId = getActiveDeviceId();
 let currentAssetSummary = { count: 0, totalBytes: 0, byKind: {}, items: [] };
+let conversationCache = [];
+let optimisticConversations = [];
 
 function getAgentMode() {
   const value = agentModeSelect?.value || localStorage.getItem(AGENT_MODE_STORAGE_KEY) || "vibeboard";
@@ -1250,6 +1254,7 @@ function syncScrim() {
     isOpen(codeDrawer) ||
     isOpen(statusDrawer) ||
     isOpen(jobDrawer) ||
+    isOpen(guideModal) ||
     isOpen(usageDrawer) ||
     isOpen(assetManagerDrawer) ||
     isOpen(assetPropertiesModal) ||
@@ -1279,6 +1284,12 @@ function setJobDrawer(open) {
   setLayerOpen(jobDrawer, open);
   syncScrim();
   if (open) loadJobs();
+}
+
+function setGuideModal(open) {
+  if (!guideModal) return;
+  setLayerOpen(guideModal, open);
+  syncScrim();
 }
 
 function setUsageDrawer(open) {
@@ -1341,6 +1352,7 @@ function closeDrawers() {
   setCodeDrawer(false);
   setStatusDrawer(false);
   setJobDrawer(false);
+  setGuideModal(false);
   setUsageDrawer(false);
   setAssetManagerDrawer(false);
   setAssetPropertiesModal(false);
@@ -2072,6 +2084,13 @@ function addQuickReplyButtons(quickReplies = []) {
   })));
 }
 
+function addFallbackChoiceButtonsFromText(text) {
+  const choices = extractTextChoices(text);
+  if (!choices.length) return false;
+  addQuickReplyButtons(choices);
+  return true;
+}
+
 function normalizeQuickReplyButtons(quickReplies = []) {
   if (!Array.isArray(quickReplies)) return [];
   const seen = new Set();
@@ -2085,6 +2104,20 @@ function normalizeQuickReplyButtons(quickReplies = []) {
     if (choices.length >= 4) break;
   }
   return choices;
+}
+
+function extractTextChoices(text = "") {
+  const lines = String(text || "").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const choices = [];
+  for (const line of lines) {
+    const match = line.match(/^(?:选项\s*)?(?:\(?([1-9][0-9]?|[A-Da-d])\)?[\.、:：\)]|\-\s+)\s*(.{2,80})$/);
+    if (!match) continue;
+    const label = match[2].replace(/[*_`]/g, "").trim();
+    if (!label || /^(下一步|技术详情|阶段|查看|请查看)$/i.test(label)) continue;
+    choices.push({ label: truncateButtonText(label, 18), value: label });
+    if (choices.length >= 4) break;
+  }
+  return choices.length >= 2 ? choices : [];
 }
 
 function truncateButtonText(value, maxLength) {
@@ -2292,7 +2325,9 @@ async function handleChat(prompt) {
       }
       addBuildPromptAction(pendingGeneratePrompt, result);
     } else {
-      addQuickReplyButtons(result.quick_replies);
+      const choices = normalizeQuickReplyButtons(result.quick_replies);
+      if (choices.length) addQuickReplyButtons(choices);
+      else addFallbackChoiceButtonsFromText(reply);
     }
   } catch (error) {
     removeThinkingAnimation();
@@ -2591,12 +2626,13 @@ generateBtn?.addEventListener("click", event => {
 });
 
 refreshBoardBtn?.addEventListener("click", () => setStatusDrawer(true));
-jobCenterBtn?.addEventListener("click", () => setJobDrawer(true));
+guideBtn?.addEventListener("click", () => setGuideModal(true));
 refreshJobsBtn?.addEventListener("click", () => loadJobs());
 codeToggle?.addEventListener("click", () => setCodeDrawer(true));
 closeDrawer?.addEventListener("click", () => setCodeDrawer(false));
 closeStatusDrawer?.addEventListener("click", () => setStatusDrawer(false));
 closeJobDrawer?.addEventListener("click", () => setJobDrawer(false));
+closeGuideModal?.addEventListener("click", () => setGuideModal(false));
 modelConfigBtn?.addEventListener("click", () => setModelModal(true));
 closeModelModal?.addEventListener("click", () => setModelModal(false));
 modelProvider?.addEventListener("change", () => applyProviderPreset(modelProvider.value));
@@ -3333,7 +3369,9 @@ function rememberConversation(id) {
 }
 
 function rememberedConversationId() {
-  return localStorage.getItem(CONVERSATION_STORAGE_KEY) || "";
+  const params = new URLSearchParams(window.location.search);
+  const fromUrl = params.get("conversation") || params.get("conversation_id") || "";
+  return fromUrl || localStorage.getItem(CONVERSATION_STORAGE_KEY) || "";
 }
 
 // Sidebar toggle
@@ -3353,7 +3391,11 @@ async function loadConversations() {
     const data = await res.json();
     if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
     if (data.ok) {
-      const conversations = data.conversations || [];
+      const serverConversations = data.conversations || [];
+      conversationCache = serverConversations;
+      const serverIds = new Set(serverConversations.map(conv => conv.id));
+      optimisticConversations = optimisticConversations.filter(conv => !serverIds.has(conv.id));
+      const conversations = [...optimisticConversations, ...serverConversations];
       renderConversationList(conversations);
       if (conversations.length) restoreCurrentConversation(conversations);
       else syncDeviceFrameFromCurrent();
@@ -3378,10 +3420,10 @@ function renderConversationList(conversations) {
   if (!list) return;
 
   list.innerHTML = conversations.map(conv => `
-    <div class="conv-item ${conv.id === currentConversationId ? 'active' : ''}" data-id="${conv.id}">
+    <div class="conv-item ${conv.id === currentConversationId ? 'active' : ''} ${conv.optimistic ? 'pending' : ''}" data-id="${conv.id}">
       <div class="conv-title">${escapeHtml(conv.title)}</div>
-      <div class="conv-time">${formatTime(conv.updated_at)}</div>
-      <button class="conv-delete" data-id="${conv.id}" title="删除对话">×</button>
+      <div class="conv-time">${conv.optimistic ? '创建中...' : formatTime(conv.updated_at)}</div>
+      ${conv.optimistic ? '' : `<button class="conv-delete" data-id="${conv.id}" title="删除对话">×</button>`}
     </div>
   `).join("");
 
@@ -3390,6 +3432,7 @@ function renderConversationList(conversations) {
     item.addEventListener("click", (e) => {
       // Don't select if clicking delete button
       if (e.target.closest(".conv-delete")) return;
+      if (item.classList.contains("pending")) return;
       selectConversation(item.dataset.id);
     });
   });
@@ -3569,15 +3612,26 @@ function renderMessages(messages) {
 
 // Create new conversation
 async function createConversation({ resetChat = true, title = "" } = {}) {
+  const projectTitle = String(title || "New Project").trim() || "New Project";
+  const optimisticId = `pending-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  optimisticConversations.unshift({
+    id: optimisticId,
+    title: projectTitle,
+    updated_at: new Date().toISOString(),
+    optimistic: true,
+  });
+  currentConversationId = optimisticId;
+  renderConversationList([...optimisticConversations, ...conversationCache]);
   try {
-    const projectTitle = String(title || "New Project").trim() || "New Project";
     const res = await fetch(`${API_BASE}/api/conversations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: projectTitle }),
     });
     const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
     if (data.ok) {
+      optimisticConversations = optimisticConversations.filter(conv => conv.id !== optimisticId);
       currentConversationId = data.id;
       rememberConversation(data.id);
       pendingGeneratePrompt = null;
@@ -3619,6 +3673,9 @@ async function createConversation({ resetChat = true, title = "" } = {}) {
       }
     }
   } catch (err) {
+    optimisticConversations = optimisticConversations.filter(conv => conv.id !== optimisticId);
+    renderConversationList([...optimisticConversations, ...conversationCache]);
+    currentConversationId = null;
     console.error("Failed to create conversation:", err);
   }
 }
@@ -3741,6 +3798,7 @@ function formatTime(dateStr) {
   codeDrawer,
   statusDrawer,
   jobDrawer,
+  guideModal,
   usageDrawer,
   assetManagerDrawer,
   assetPropertiesModal,

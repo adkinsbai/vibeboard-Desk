@@ -597,6 +597,70 @@ async function withMockChatServer(responses, fn) {
   }
 }
 
+async function withMockPythonRunner(fn) {
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    if (req.method !== "POST" || req.url !== "/v1/python/execute") {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "not found" }));
+      return;
+    }
+
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    const body = JSON.parse(raw || "{}");
+    requests.push(body);
+
+    if (body.mode === "compile") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        ok: true,
+        mode: "compile",
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+        files: {},
+      }));
+      return;
+    }
+
+    const hardwareResult = {
+      build_id: "vb-runner-test",
+      prompt: "runner executed",
+      runtime: { mode: "python_runner", executed_on_board: false },
+      available_apis: ["/api/status", "./hardware-result.json"],
+    };
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      ok: true,
+      mode: "run",
+      stdout: JSON.stringify(hardwareResult),
+      stderr: "",
+      exitCode: 0,
+      files: {
+        "hardware-result.json": JSON.stringify(hardwareResult),
+      },
+    }));
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  try {
+    return await fn({
+      url: `http://127.0.0.1:${server.address().port}`,
+      requests: () => requests,
+    });
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+
 function createFileToolCall(id, pathName, content) {
   return {
     id,
@@ -1123,6 +1187,66 @@ await test("market runtime deploys database app through build and deploy seams",
   assert(calls.join(">") === "lock>device:board-b>write:generated/current>load>build>deploy", `unexpected deploy order: ${calls.join(">")}`);
 });
 
+await test("market runtime preview creates an editable project from app code", async () => {
+  const { createMarketRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "marketRuntime.mjs")).href);
+  const codeFiles = {
+    ...validGeneratedFilesWithAsset(),
+    [HARDWARE_RESULT_FILE]: "{\"stale\":true}",
+    "notes.txt": "not part of preview",
+  };
+  const marketRows = createMarketRows([{
+    id: "market-preview-app",
+    name: "Previewable App",
+    code: JSON.stringify(codeFiles),
+  }]);
+  let previewProject = null;
+  const runtime = createMarketRuntime({
+    generatedFileNames: HARDWARE_APP_CONTRACT.generatedFiles,
+    query: marketRows.query,
+    run: marketRows.run,
+    loadStaticMarketApps: async () => [],
+    readStaticMarketCode: async () => {
+      throw new Error("database preview should not read static code");
+    },
+    mergeMarketApps: (dbApps, staticApps) => [...dbApps, ...staticApps],
+    readGeneratedFiles: async () => ({}),
+    writeGeneratedFiles: async () => {
+      throw new Error("preview should not overwrite the current generated workspace");
+    },
+    generatedDir: "generated/current",
+    getCurrentBuild: () => null,
+    capturePreview: async () => ({ ok: false }),
+    loadGeneratedBuild: async () => ({ id: "unused" }),
+    buildCurrent: async () => {},
+    deployCurrent: async () => ({ id: "unused" }),
+    withDeployLock: async fn => fn(),
+    withDevice: async (_deviceId, fn) => fn(),
+    deviceIdFrom: (_body, fallback) => fallback,
+    getBoard: () => ({ id: "board-default" }),
+    createPreviewProject: async payload => {
+      previewProject = payload;
+      return {
+        conversation_id: "conv-market-preview",
+        build_id: "market-preview-build",
+        preview_url: "/api/conversations/conv-market-preview/preview/index.html?build=market-preview-build",
+      };
+    },
+    log: { log: () => {} },
+  });
+
+  const preview = await runtime.previewApp("market-preview-app", {});
+  const actualFiles = Object.keys(previewProject?.files || {}).sort().join(",");
+  const expectedFiles = [...HARDWARE_APP_CONTRACT.generatedFiles, "assets/pet.json", "assets/sprite.webp"].sort().join(",");
+
+  assert(preview.ok === true, `expected preview ok, got ${JSON.stringify(preview)}`);
+  assert(preview.conversation_id === "conv-market-preview", "preview should expose the new conversation");
+  assert(preview.title === "Previewable App", "preview should use the market app name as project title");
+  assert(previewProject.title === "Previewable App", "preview project should receive market app title");
+  assert(actualFiles === expectedFiles, `preview should keep only generated files and declared assets, got ${actualFiles}`);
+  assert(!previewProject.files[HARDWARE_RESULT_FILE], "preview should not import stale hardware output");
+  assert(Buffer.isBuffer(previewProject.files["assets/sprite.webp"]), "preview should preserve binary declared assets");
+});
+
 await test("market runtime deploys static fallback and reports missing apps", async () => {
   const { createMarketRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "marketRuntime.mjs")).href);
   const marketRows = createMarketRows();
@@ -1425,7 +1549,9 @@ await test("main UI keeps navigation usable during running tasks", async () => {
   assert(js.includes('event.key !== "Enter" || event.shiftKey || event.isComposing'), "Enter handling should preserve shift-enter and IME composition");
   assert(!js.includes("generateBtn.disabled = value"), "running state should not disable the send button");
   assert(!js.includes("if (busy) return; // Don't switch while a flow is running"), "running state should not block conversation selection");
-  assert(html.includes('id="jobCenterBtn"'), "main UI should expose a task center button");
+  assert(!html.includes('id="jobCenterBtn"'), "main UI should remove the old task center topbar entry");
+  assert(html.includes('id="guideBtn"'), "main UI should expose the new beginner guide entry");
+  assert(html.includes('id="guideModal"'), "main UI should include beginner guide content");
   assert(js.includes("background: true"), "main UI should start long generation/deploy actions as background jobs");
 });
 
@@ -3388,6 +3514,55 @@ await test("agent degrades hardware Python checks when Python runtime is unavail
   }
 });
 
+await test("agent uses configured Python runner for hardware checks", async () => {
+  const { runAgent } = await import(pathToFileURL(path.join(ROOT, "src", "agent.mjs")).href);
+  const files = validGeneratedFiles();
+  const oldPython = process.env.PYTHON;
+  const oldRunnerUrl = process.env.PYTHON_RUNNER_URL;
+  process.env.PYTHON = "python-vibeboard-missing-for-test";
+  try {
+    await withMockPythonRunner(async runner => {
+      process.env.PYTHON_RUNNER_URL = runner.url;
+      await withMockChatServer([
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            createFileToolCall("call-index-runner", "index.html", files["index.html"]),
+            createFileToolCall("call-style-runner", "style.css", files["style.css"]),
+            createFileToolCall("call-app-runner", "app.js", files["app.js"]),
+            createFileToolCall("call-hardware-runner", "hardware_app.py", files["hardware_app.py"]),
+          ],
+        },
+        {
+          role: "assistant",
+          content: "done",
+        },
+      ], async mock => {
+        const result = await runAgent({
+          baseUrl: mock.baseUrl,
+          apiKey: "test-key",
+          model: "mock-tools",
+          maxIterations: 4,
+          maxVerificationAttempts: 1,
+          llmTimeoutMs: 10000,
+        }, "make a runner-backed status dashboard", {}, []);
+
+        assert(result.success === true, `expected success with Python runner, got ${JSON.stringify(result)}`);
+        const hardwareAction = result.actions.find(action => action.tool === "run_hardware");
+        assert(hardwareAction?.result.includes("运行正常"), `expected hardware run to pass, got ${hardwareAction?.result}`);
+        assert(runner.requests().some(item => item.mode === "compile"), "runner should receive a compile request");
+        assert(runner.requests().some(item => item.mode === "run"), "runner should receive a run request");
+      });
+    });
+  } finally {
+    if (oldPython == null) delete process.env.PYTHON;
+    else process.env.PYTHON = oldPython;
+    if (oldRunnerUrl == null) delete process.env.PYTHON_RUNNER_URL;
+    else process.env.PYTHON_RUNNER_URL = oldRunnerUrl;
+  }
+});
+
 await test("agent treats chat-only history with empty files as a new project", async () => {
   const { runAgent } = await import(pathToFileURL(path.join(ROOT, "src", "agent.mjs")).href);
   const files = validGeneratedFiles();
@@ -3516,6 +3691,27 @@ if (!verifier) {
       assert(result && result.ok === true, `missing Python should not block cloud verification: ${JSON.stringify(result)}`);
       assert(result.degraded === true, `missing Python should mark verification degraded: ${JSON.stringify(result)}`);
       assert(result.issues.some(issue => issue.code === "PYTHON_RUNTIME_UNAVAILABLE" && issue.severity === SEVERITY.WARNING), `expected PYTHON_RUNTIME_UNAVAILABLE warning, got ${JSON.stringify(result.issues)}`);
+    });
+  });
+
+  await test("verifyAllLocal uses configured Python runner", async () => {
+    await withTempDir("vibeboard-verify-runner-", async dir => {
+      await withMockPythonRunner(async runner => {
+        const files = validGeneratedFiles();
+        await writeFiles(dir, files);
+        const mod = await importVerifiers();
+        const result = await mod.verifyAllLocal(files, {
+          dir,
+          root: ROOT,
+          pythonBin: "python-vibeboard-missing-for-test",
+          pythonRunnerUrl: runner.url,
+        });
+        assert(result && result.ok === true, `runner-backed verification should pass: ${JSON.stringify(result)}`);
+        assert(result.degraded === false, `runner-backed verification should not be degraded: ${JSON.stringify(result)}`);
+        assert(result.data?.hardware_run?.runtime?.mode === "python_runner", `expected runner hardware data, got ${JSON.stringify(result.data)}`);
+        assert(runner.requests().some(item => item.mode === "compile"), "runner should receive compile request");
+        assert(runner.requests().some(item => item.mode === "run"), "runner should receive run request");
+      });
     });
   });
 

@@ -22,6 +22,12 @@ import {
   REQUIRED_RUNTIME_FILE_NAMES,
   validationRulesText,
 } from "./contracts.mjs";
+import {
+  executePythonRunner,
+  isPythonRunnerTransportError,
+  pythonRunnerRequired,
+  resolvePythonRunnerConfig,
+} from "./pythonRunnerClient.mjs";
 
 const DEFAULT_MAX_ITERATIONS = 30;
 const DEFAULT_MAX_VERIFICATION_ATTEMPTS = 3;
@@ -1289,6 +1295,21 @@ async function validateJavaScriptSyntax(source, label, tmpDir) {
 async function validatePythonSyntax(source, label, tmpDir) {
   const filePath = path.join(tmpDir, label);
   await fs.writeFile(filePath, source, "utf-8");
+  const runnerResult = await executePythonRunner({ [label]: source }, {
+    mode: "compile",
+    entry: label,
+    timeoutMs: 5000,
+  });
+  if (runnerResult?.ok) {
+    return { issues: [], skipped: false, runner: true };
+  }
+  if (runnerResult && (!isPythonRunnerTransportError(runnerResult) || pythonRunnerRequired())) {
+    return {
+      issues: [`${label}: Python runner compile failed - ${(runnerResult.stderr || runnerResult.stdout || runnerResult.message).trim()}`],
+      skipped: false,
+    };
+  }
+
   const candidates = pythonCandidates();
   const errors = [];
 
@@ -1426,6 +1447,29 @@ function simulateHardwareTool(toolName, args = {}) {
 }
 
 async function runPythonScript(scriptPath, cwd, timeoutMs) {
+  const runnerFiles = await readRunnerFiles(cwd);
+  const entry = path.relative(cwd, scriptPath).replace(/\\/g, "/") || "hardware_app.py";
+  const runnerResult = await executePythonRunner(runnerFiles, {
+    mode: "run",
+    entry,
+    timeoutMs,
+  });
+  if (runnerResult?.ok) {
+    await writeRunnerReturnedFiles(cwd, runnerResult.files);
+    return {
+      stdout: runnerResult.stdout,
+      stderr: runnerResult.stderr,
+      runner: true,
+    };
+  }
+  if (runnerResult && (!isPythonRunnerTransportError(runnerResult) || pythonRunnerRequired())) {
+    const error = new Error(runnerResult.message || runnerResult.stderr || runnerResult.stdout || "Python runner execution failed.");
+    error.stdout = runnerResult.stdout || "";
+    error.stderr = runnerResult.stderr || runnerResult.message || "";
+    error.code = runnerResult.exitCode;
+    throw error;
+  }
+
   const candidates = pythonCandidates();
   const errors = [];
 
@@ -1440,6 +1484,37 @@ async function runPythonScript(scriptPath, cwd, timeoutMs) {
   const error = new Error(`无法运行 Python。尝试过: ${errors.join("; ")}`);
   error.stderr = errors.join("\n");
   throw error;
+}
+
+async function readRunnerFiles(rootDir) {
+  if (!resolvePythonRunnerConfig()) return {};
+  const files = {};
+  const root = path.resolve(rootDir);
+  async function walk(dir) {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      const relative = path.relative(root, fullPath).replace(/\\/g, "/");
+      if (!relative || relative.startsWith("..")) continue;
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else if (entry.isFile() && /\.(html|css|js|json|py|txt|md)$/i.test(entry.name)) {
+        files[relative] = await fs.readFile(fullPath, "utf8");
+      }
+    }
+  }
+  await walk(root);
+  return files;
+}
+
+async function writeRunnerReturnedFiles(rootDir, files = {}) {
+  const root = path.resolve(rootDir);
+  for (const [name, content] of Object.entries(files || {})) {
+    const target = path.resolve(root, String(name).replace(/^[/\\]+/, ""));
+    if (target !== root && !target.startsWith(root + path.sep)) continue;
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, String(content || ""), "utf8");
+  }
 }
 
 function pythonCandidates() {

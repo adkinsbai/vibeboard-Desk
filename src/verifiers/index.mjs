@@ -19,6 +19,11 @@ import {
   toolResult,
   warnResult,
 } from "../toolResult.mjs";
+import {
+  executePythonRunner,
+  isPythonRunnerTransportError,
+  pythonRunnerRequired,
+} from "../pythonRunnerClient.mjs";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 10000;
@@ -103,12 +108,24 @@ export async function verifySyntax(input = {}, options = {}) {
 
     if (typeof files["hardware_app.py"] === "string") {
       const hardwarePath = path.join(tmpDir, "hardware_app.py");
-      const pyResult = await execText(python, ["-m", "py_compile", hardwarePath], {
-        cwd: tmpDir,
-        timeout: DEFAULT_TIMEOUT_MS,
+      const runnerResult = await executePythonRunner(files, {
+        ...options,
+        mode: "compile",
+        entry: "hardware_app.py",
+        timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS,
       });
+      const shouldUseLocalPython = !runnerResult
+        || (isPythonRunnerTransportError(runnerResult) && !pythonRunnerRequired(options));
+      const pyResult = shouldUseLocalPython
+        ? await execText(python, ["-m", "py_compile", hardwarePath], {
+            cwd: tmpDir,
+            timeout: DEFAULT_TIMEOUT_MS,
+          })
+        : runnerResult;
       if (!pyResult.ok) {
-        issues.push(isPythonRuntimeUnavailable(pyResult)
+        issues.push(isPythonRunnerTransportError(pyResult)
+          ? pythonRunnerUnavailableIssue(phase, pyResult, "py_compile", pythonRunnerRequired(options))
+          : isPythonRuntimeUnavailable(pyResult)
           ? pythonRuntimeUnavailableIssue(phase, python, pyResult, "py_compile")
           : {
               code: "PYTHON_SYNTAX_ERROR",
@@ -168,13 +185,35 @@ export async function verifyHardwareRun(input = {}, options = {}) {
     }
 
     const hardwarePath = path.join(tmpDir, "hardware_app.py");
-    const runResult = await execText(python, [hardwarePath], {
-      cwd: tmpDir,
-      timeout: DEFAULT_TIMEOUT_MS,
-      maxBuffer: 1024 * 1024,
+    const runnerResult = await executePythonRunner(files, {
+      ...options,
+      mode: "run",
+      entry: "hardware_app.py",
+      timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS,
     });
+    const shouldUseLocalPython = !runnerResult
+      || (isPythonRunnerTransportError(runnerResult) && !pythonRunnerRequired(options));
+    const runResult = shouldUseLocalPython
+      ? await execText(python, [hardwarePath], {
+          cwd: tmpDir,
+          timeout: DEFAULT_TIMEOUT_MS,
+          maxBuffer: 1024 * 1024,
+        })
+      : runnerResult;
 
     if (!runResult.ok) {
+      if (isPythonRunnerTransportError(runResult)) {
+        return toolResult({
+          ok: !pythonRunnerRequired(options),
+          phase,
+          summary: "Python runner is unavailable.",
+          issues: [pythonRunnerUnavailableIssue(phase, runResult, "hardware_run", pythonRunnerRequired(options))],
+          evidence: { tmpDir, pythonBin: python },
+          data: mockHardwareResult(),
+          degraded: !pythonRunnerRequired(options),
+        });
+      }
+
       if (isPythonRuntimeUnavailable(runResult)) {
         const fallbackData = mockHardwareResult();
         return toolResult({
@@ -199,17 +238,20 @@ export async function verifyHardwareRun(input = {}, options = {}) {
 
     const stdout = runResult.stdout.trim();
     const parsed = parseLastJson(stdout);
-    if (!parsed.ok) {
+    const fileParsed = !parsed.ok && runResult.files?.["hardware-result.json"]
+      ? parseLastJson(String(runResult.files["hardware-result.json"]))
+      : parsed;
+    if (!fileParsed.ok) {
       return failResult(phase, "hardware_app.py did not print valid JSON.", [{
         code: "HARDWARE_JSON_INVALID",
-        message: parsed.error,
+        message: fileParsed.error,
         phase,
         evidence: { stdout: truncate(stdout), stderr: truncate(runResult.stderr) },
         suggestedFixes: ["Print exactly one JSON object or ensure the last stdout JSON object contains the hardware result."],
       }], { evidence: { tmpDir, pythonBin: python } });
     }
 
-    const data = parsed.value;
+    const data = fileParsed.value;
     const issues = validateHardwareResultContract(data, {
       label: "hardware_app.py JSON output",
     }).map(issue => ({
@@ -828,6 +870,19 @@ function pythonRuntimeUnavailableIssue(phase, python, result, checkName) {
     },
     suggestedFixes: [
       "Install Python in the cloud runtime, or keep this as a degraded cloud check and run hardware_app.py on the target board.",
+    ],
+  };
+}
+
+function pythonRunnerUnavailableIssue(phase, result, checkName, required = false) {
+  return {
+    code: "PYTHON_RUNNER_UNAVAILABLE",
+    severity: required ? SEVERITY.BLOCKING : SEVERITY.WARNING,
+    message: `Python runner is unavailable, so ${checkName} could not run remotely.`,
+    phase,
+    evidence: commandEvidence(result),
+    suggestedFixes: [
+      "Check PYTHON_RUNNER_URL, PYTHON_RUNNER_TOKEN, and the FRP tunnel or runner service health.",
     ],
   };
 }

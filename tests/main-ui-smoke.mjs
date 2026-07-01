@@ -113,6 +113,10 @@ await withServer(async ({ baseUrl, json }) => {
     await page.locator("#projectNameInput").fill("UI smoke project");
     await page.locator("#projectCreateForm button[type='submit']").click();
     await page.waitForFunction(count => document.querySelectorAll(".conv-item").length > count, beforeCreate);
+    await page.waitForFunction(() => {
+      const active = document.querySelector(".conv-item.active");
+      return active && !active.classList.contains("pending") && !active.dataset.id.startsWith("pending-");
+    });
     const afterCreate = await page.locator(".conv-item").count();
     assert(afterCreate > beforeCreate, "busy state should not block new conversation creation");
     const createdProjectId = await page.locator(".conv-item.active").getAttribute("data-id");
@@ -138,15 +142,14 @@ await withServer(async ({ baseUrl, json }) => {
     await page.locator("#closeAssetImportModal").click();
     await page.waitForFunction(() => !document.querySelector("#assetImportModal")?.classList.contains("open"));
 
-    await page.locator("#jobCenterBtn").click();
-    await page.locator("#jobDrawer.open").waitFor({ timeout: 3000 });
-    await page.locator(".job-card").first().waitFor({ timeout: 3000 });
-    await page.locator(".job-log-details").first().waitFor({ timeout: 3000 });
-    const jobLogOverflow = await page.locator(".job-log").first().evaluate(node => getComputedStyle(node).overflowY);
-    assert(jobLogOverflow !== "auto" && jobLogOverflow !== "scroll", "job logs should not create a nested scroll area");
-    await page.locator("#closeJobDrawer").click();
-    await page.waitForFunction(() => !document.querySelector("#jobDrawer")?.classList.contains("open"));
-    await page.waitForFunction(() => getComputedStyle(document.querySelector("#jobDrawer")).visibility === "hidden");
+    assert(await page.locator("#jobCenterBtn").count() === 0, "top navigation should no longer expose the old task-list entry");
+    await page.locator("#guideBtn").click();
+    await page.locator("#guideModal.open").waitFor({ timeout: 3000 });
+    const guideText = await page.locator("#guideModal").textContent();
+    assert(guideText.includes("平台功能") && guideText.includes("Runner") && guideText.includes("应用市场"), "new guide should explain core workflows");
+    await page.locator("#closeGuideModal").click();
+    await page.waitForFunction(() => !document.querySelector("#guideModal")?.classList.contains("open"));
+    await page.waitForFunction(() => getComputedStyle(document.querySelector("#guideModal")).display === "none");
     const jobDrawerHiddenState = await page.locator("#jobDrawer").evaluate(node => ({
       inert: node.inert,
       ariaHidden: node.getAttribute("aria-hidden"),

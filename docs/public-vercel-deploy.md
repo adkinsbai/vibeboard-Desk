@@ -21,6 +21,10 @@ VIBEBOARD_LLM_PROVIDER=deepseek
 VIBEBOARD_LLM_BASE_URL=https://api.deepseek.com
 VIBEBOARD_LLM_MODEL=deepseek-v4-flash
 VIBEBOARD_LLM_API_KEY=...
+
+PYTHON_RUNNER_URL=http://150.158.146.192:7108
+PYTHON_RUNNER_TOKEN=...
+PYTHON_RUNNER_REQUIRED=false
 ```
 
 Do not set `VIBEBOARD_ALLOW_DEV_SMS_CODES=1` in production. It is only for local tests, where the API returns `dev_code` instead of sending SMS.
@@ -82,6 +86,21 @@ Vercel Functions have a read-only filesystem and only `/tmp` is writable scratch
 
 This snapshot bridge is a production bootstrap. For higher concurrency, migrate the remaining stores into first-class Postgres tables or a worker service.
 
+## Python Runner
+
+Vercel does not provide a durable Python execution environment for the hardware app verification path. The production web app therefore calls the separate FastAPI runner in `runner/`:
+
+- Local runner port on the 4060Ti server: `127.0.0.1:8091`.
+- Public FRP tunnel name: `4060ti-vibeboard-runner`.
+- Preferred public route: `http://150.158.146.192:7108`.
+- Fixed fallback route if `7108` is occupied: `http://150.158.146.192:10080`.
+- API: `POST /v1/python/execute`.
+- Auth: `Authorization: Bearer $PYTHON_RUNNER_TOKEN`.
+
+The Vercel app will use the runner for Python compile/run checks when `PYTHON_RUNNER_URL` is set. With `PYTHON_RUNNER_REQUIRED=false`, an unavailable runner downgrades to web preview instead of blocking the whole user flow. Set `PYTHON_RUNNER_REQUIRED=true` only after the FRP route and service health are monitored.
+
+Deployment notes live in [runner/README.md](../runner/README.md).
+
 ## Admin
 
 The phones in `VIBEBOARD_ADMIN_PHONES` become admin accounts at registration time.
@@ -106,6 +125,6 @@ POST /api/admin/credits
 
 ## Known Vercel Boundary
 
-The public web app can handle accounts, credits, chat/generation requests, and project records. In public deployment, hardware deployment, hardware status, logs, audio control, global preferences, and experience/playbook APIs are admin-only. Local hardware operations such as Python verification, Playwright browser rendering, SSH deploy, and persistent filesystem project folders are not a good fit for Vercel Serverless storage/runtime.
+The public web app can handle accounts, credits, chat/generation requests, project records, market preview, and Python compile/run checks through the runner. In public deployment, hardware deployment, hardware status, logs, audio control, global preferences, and experience/playbook APIs are admin-only.
 
-Public Vercel mode therefore caps Agent generation to a shorter cloud-safe run and disables automatic local repair/verification attempts. Move the full L0-L4 verification and real board deployment path into a separate worker/runner service before exposing production hardware deployment to all users.
+Playwright screenshot capture and true board deployment still need a worker/hardware service before exposing production hardware deployment to all users.
