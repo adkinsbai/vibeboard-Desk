@@ -19,9 +19,11 @@ let cookie = "";
 let conversationId = "";
 let jobId = "";
 
+const stale = await startServer(await findFreePort());
 const first = await startServer(await findFreePort());
 try {
   const baseUrl = `http://127.0.0.1:${first.port}`;
+  await waitForServer(`http://127.0.0.1:${stale.port}`, { path: "/api/health" });
   await waitForServer(baseUrl, { path: "/api/health" });
   const register = await raw(baseUrl, "/api/auth/register", {
     method: "POST",
@@ -68,8 +70,28 @@ try {
 
   const snapshotStat = await fs.stat(snapshotPath).catch(() => null);
   assert(snapshotStat?.size > 0, "cloud sqlite snapshot should be saved before the create response returns");
+
+  const staleBaseUrl = `http://127.0.0.1:${stale.port}`;
+  const staleLogin = await raw(staleBaseUrl, "/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ phone: PHONE, password: PASSWORD }),
+  });
+  assert(staleLogin.status === 200, `login on already-warm instance should succeed, got ${staleLogin.status}: ${JSON.stringify(staleLogin.data)}`);
+  const staleCookie = cookieFrom(staleLogin.response);
+  const staleListed = await getJson(staleBaseUrl, "/api/conversations", staleCookie);
+  assert(
+    staleListed.conversations.some(item => item.id === conversationId),
+    `already-warm instance should load the newest cloud sqlite snapshot before reading conversations: ${JSON.stringify(staleListed.conversations)}`
+  );
+  const staleMessages = await getJson(staleBaseUrl, `/api/conversations/${conversationId}/messages`, staleCookie);
+  assert(
+    staleMessages.messages.some(item => item.content === "keep this message after restart"),
+    `already-warm instance should load the newest cloud sqlite snapshot before reading messages: ${JSON.stringify(staleMessages.messages)}`
+  );
 } finally {
   await stopChild(first.child);
+  await stopChild(stale.child);
 }
 
 const second = await startServer(await findFreePort());

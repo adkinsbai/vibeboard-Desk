@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import initSqlJs from "sql.js";
 import { neon } from "@neondatabase/serverless";
@@ -185,7 +186,14 @@ try {
   db = new SQL.Database();
 }
 
-db.run(`
+const sqliteDb = {
+  prepare: (...args) => db.prepare(...args),
+  run: (...args) => db.run(...args),
+  exec: (...args) => db.exec(...args),
+  export: (...args) => db.export(...args),
+};
+
+sqliteDb.run(`
   CREATE TABLE IF NOT EXISTS market_apps (
     id TEXT PRIMARY KEY,
     conversation_id TEXT,
@@ -203,6 +211,8 @@ db.run(`
 // Helper to save database to file
 let dbSaveQueue = Promise.resolve();
 let dbSaveError = null;
+let dbSnapshotHash = hashBuffer(db.export());
+let dbSyncQueue = Promise.resolve();
 async function saveDb() {
   dbSaveQueue = dbSaveQueue
     .catch(() => {})
@@ -210,6 +220,7 @@ async function saveDb() {
       dbSaveError = null;
       const data = db.export();
       const buffer = Buffer.from(data);
+      dbSnapshotHash = hashBuffer(buffer);
       await fs.mkdir(path.dirname(DB_PATH), { recursive: true }).catch(() => {});
       await fs.writeFile(DB_PATH, buffer).catch((error) => {
         console.warn("[db] local sqlite save failed:", error.message);
@@ -239,9 +250,29 @@ async function flushMutationSaves() {
   await flushDbSaves({ requireCloudSnapshot: Boolean(cloudSqliteSnapshot) });
 }
 
+function hashBuffer(buffer) {
+  return createHash("sha256").update(Buffer.from(buffer || [])).digest("hex");
+}
+
+async function syncDbFromSnapshot() {
+  if (!cloudSqliteSnapshot) return;
+  dbSyncQueue = dbSyncQueue
+    .catch(() => {})
+    .then(async () => {
+      await flushDbSaves();
+      const buffer = await cloudSqliteSnapshot.load();
+      if (!buffer?.length) return;
+      const nextHash = hashBuffer(buffer);
+      if (nextHash === dbSnapshotHash) return;
+      db = new SQL.Database(buffer);
+      dbSnapshotHash = nextHash;
+    });
+  await dbSyncQueue;
+}
+
 // Helper to run query and return results
 function query(sql, params = []) {
-  const stmt = db.prepare(sql);
+  const stmt = sqliteDb.prepare(sql);
   if (params.length) stmt.bind(params);
   const results = [];
   while (stmt.step()) {
@@ -253,37 +284,37 @@ function query(sql, params = []) {
 
 // Helper to run insert/update/delete
 function run(sql, params = []) {
-  db.run(sql, params);
+  sqliteDb.run(sql, params);
   saveDb();
 }
 
-const conversationStore = createConversationStore(db, saveDb);
+const conversationStore = createConversationStore(sqliteDb, saveDb);
 conversationStore.initSchema();
 
-const memoryStore = createMemoryStore(db, saveDb);
+const memoryStore = createMemoryStore(sqliteDb, saveDb);
 memoryStore.initSchema();
 
-const digitalLifeStore = createDigitalLifeStore(db, saveDb);
+const digitalLifeStore = createDigitalLifeStore(sqliteDb, saveDb);
 digitalLifeStore.initSchema();
 
-const experienceStore = createExperienceStore(db, saveDb);
+const experienceStore = createExperienceStore(sqliteDb, saveDb);
 experienceStore.initSchema();
 
-const playbookStore = createPlaybookStore(db, saveDb);
+const playbookStore = createPlaybookStore(sqliteDb, saveDb);
 playbookStore.initSchema();
 experienceStore.setPlaybookStore?.(playbookStore);
 
-const jobStore = createJobStore(db, saveDb);
+const jobStore = createJobStore(sqliteDb, saveDb);
 jobStore.initSchema();
 jobStore.markInterruptedRunningJobs();
 
-const assetLibraryStore = createAssetLibraryStore(db, saveDb);
+const assetLibraryStore = createAssetLibraryStore(sqliteDb, saveDb);
 assetLibraryStore.initSchema();
 
-const authStore = createAuthStore({ sqliteDb: db, saveSqlite: saveDb, pg, env: process.env });
+const authStore = createAuthStore({ sqliteDb, saveSqlite: saveDb, pg, env: process.env });
 await authStore.initSchema();
 const phoneVerification = createPhoneVerificationService({ authStore, env: process.env });
-const telemetryStore = createTelemetryStore({ sqliteDb: db, saveSqlite: saveDb, pg, env: process.env });
+const telemetryStore = createTelemetryStore({ sqliteDb, saveSqlite: saveDb, pg, env: process.env });
 await telemetryStore.initSchema();
 
 const projectWorkspace = createProjectWorkspace({
@@ -446,6 +477,12 @@ function isPublicApi(pathname) {
     pathname === "/api/telemetry" ||
     pathname === "/api/health" ||
     pathname === "/healthz";
+}
+
+function shouldSyncSqliteSnapshot(pathname) {
+  if (!cloudSqliteSnapshot) return false;
+  if (!isPublicApi(pathname)) return true;
+  return TEST_CLOUD_SQLITE_FILE && /^\/api\/auth\//.test(pathname);
 }
 
 function secureCookie(req) {
@@ -2713,6 +2750,9 @@ async function route(req, res) {
     if (req.method === "GET" && (url.pathname === "/api/health" || url.pathname === "/healthz")) {
       json(res, 200, { ok: true, publicDeployment: PUBLIC_DEPLOYMENT, auth: true, billingMode: BILLING_MODE, phoneVerificationRequired: REQUIRE_PHONE_VERIFICATION, db: pg ? "postgres" : "sqlite" });
       return;
+    }
+    if (req.url.startsWith("/api/") && shouldSyncSqliteSnapshot(url.pathname)) {
+      await syncDbFromSnapshot();
     }
     if (req.method === "GET" && url.pathname === "/api/board-catalog") {
       json(res, 200, { ok: true, boards: buildBoardCatalog(process.env) });
