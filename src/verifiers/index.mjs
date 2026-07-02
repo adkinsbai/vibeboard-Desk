@@ -294,7 +294,7 @@ export async function verifyRender(input = {}, options = {}) {
 
     server = await startMockHttpServer(tmpDir);
     const baseUrl = `http://127.0.0.1:${server.port}`;
-    const { chromium } = await import("playwright");
+    const chromium = options.chromium || (await import("playwright")).chromium;
 
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage({
@@ -694,6 +694,17 @@ export async function verifyRender(input = {}, options = {}) {
       },
     });
   } catch (err) {
+    if (isCloudRenderRuntimeUnavailable(err, options)) {
+      return warnResult(phase, "Render verification skipped because the cloud runtime has no Playwright browser.", [{
+        code: "RENDER_RUNTIME_UNAVAILABLE",
+        message: "Playwright Chromium is unavailable in this cloud runtime, so render verification was skipped.",
+        phase,
+        evidence: { stack: truncate(err.stack, 2000), message: err.message },
+        suggestedFixes: [
+          "Install Playwright browsers in the runtime, or run render verification in the external runner.",
+        ],
+      }], { evidence: { tmpDir } });
+    }
     return failResult(phase, "Render verification could not complete.", [{
       code: "RENDER_VERIFIER_ERROR",
       message: err.message,
@@ -706,6 +717,20 @@ export async function verifyRender(input = {}, options = {}) {
     if (server) await server.close().catch(() => {});
     await removeDir(tmpDir);
   }
+}
+
+function isCloudRenderRuntimeUnavailable(error = {}, options = {}) {
+  if (options.allowRenderRuntimeDegrade === false) return false;
+  const vercel = String(options.env?.VERCEL ?? process.env.VERCEL ?? "").trim();
+  const publicDeployment = String(options.env?.VIBEBOARD_PUBLIC_DEPLOYMENT ?? process.env.VIBEBOARD_PUBLIC_DEPLOYMENT ?? "").trim();
+  if (!["1", "true", "yes"].includes(vercel.toLowerCase()) && !["1", "true", "yes"].includes(publicDeployment.toLowerCase())) {
+    return false;
+  }
+  const text = [
+    error?.message,
+    error?.stack,
+  ].filter(Boolean).join("\n");
+  return /Executable doesn't exist|playwright install|browserType\.launch|chromium_headless_shell|chrome-headless-shell|Failed to launch/i.test(text);
 }
 
 export async function verifyAllLocal(input = {}, options = {}) {

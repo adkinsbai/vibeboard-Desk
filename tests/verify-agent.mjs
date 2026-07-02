@@ -3848,6 +3848,21 @@ if (!verifier) {
     assert(result.issues.some(issue => issue.code === "HARDWARE_JSON_INVALID"), `expected HARDWARE_JSON_INVALID, got ${JSON.stringify(result.issues)}`);
   });
 
+  await test("verifyRender degrades when cloud Playwright browser is unavailable", async () => {
+    const mod = await importVerifiers();
+    const result = await mod.verifyRender(validGeneratedFiles(), {
+      env: { VERCEL: "1" },
+      chromium: {
+        launch: async () => {
+          throw new Error("browserType.launch: Executable doesn't exist at /home/sbx/.cache/ms-playwright/chromium_headless_shell/chrome-headless-shell");
+        },
+      },
+    });
+    assert(result.ok === true, `cloud browser runtime absence should not block generation: ${JSON.stringify(result)}`);
+    assert(result.degraded === true, "cloud browser runtime absence should mark render verification degraded");
+    assert(result.issues.some(issue => issue.code === "RENDER_RUNTIME_UNAVAILABLE" && issue.severity === SEVERITY.WARNING), `expected RENDER_RUNTIME_UNAVAILABLE warning, got ${JSON.stringify(result.issues)}`);
+  });
+
   await test("verifyRender rejects 480x360 overflow", async () => {
     const mod = await importVerifiers();
     const files = validGeneratedFiles();
