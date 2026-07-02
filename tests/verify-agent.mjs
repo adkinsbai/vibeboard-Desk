@@ -3563,6 +3563,31 @@ await test("agent uses configured Python runner for hardware checks", async () =
   }
 });
 
+await test("python runner client preserves URL path prefixes", async () => {
+  const { resolvePythonRunnerConfig, executePythonRunner } = await import(pathToFileURL(path.join(ROOT, "src", "pythonRunnerClient.mjs")).href);
+  let requestedUrl = "";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requestedUrl = String(url);
+    return new Response(JSON.stringify({ ok: true, mode: "compile", entry: "hardware_app.py", stdout: "", stderr: "", files: {} }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const config = resolvePythonRunnerConfig({ pythonRunnerUrl: "http://runner.example.com/vibeboard-runner/" });
+    assert(config.url === "http://runner.example.com/vibeboard-runner", `runner URL should trim only trailing slash, got ${config.url}`);
+    const result = await executePythonRunner({ "hardware_app.py": "print(1)" }, {
+      pythonRunnerUrl: "http://runner.example.com/vibeboard-runner/",
+      mode: "compile",
+    });
+    assert(result.ok === true, "mocked runner request should succeed");
+    assert(requestedUrl === "http://runner.example.com/vibeboard-runner/v1/python/execute", `runner path prefix should be preserved, got ${requestedUrl}`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 await test("agent treats chat-only history with empty files as a new project", async () => {
   const { runAgent } = await import(pathToFileURL(path.join(ROOT, "src", "agent.mjs")).href);
   const files = validGeneratedFiles();

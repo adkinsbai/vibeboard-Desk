@@ -16,7 +16,7 @@ export async function executePythonRunner(files = {}, options = {}) {
   const config = resolvePythonRunnerConfig(options);
   if (!config) return null;
 
-  const endpoint = new URL("/v1/python/execute", config.url);
+  const endpoint = runnerEndpoint(config.url, "/v1/python/execute");
   const timeoutMs = positiveInt(options.timeoutMs, config.timeoutMs);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs + 1000);
@@ -145,6 +145,16 @@ function normalizeRunnerUrl(value) {
   } catch {
     return "";
   }
+}
+
+function runnerEndpoint(baseUrl, route) {
+  const url = new URL(baseUrl);
+  const basePath = url.pathname.replace(/\/+$/, "");
+  const routePath = String(route || "").replace(/^\/+/, "");
+  url.pathname = `${basePath}/${routePath}`;
+  url.search = "";
+  url.hash = "";
+  return url;
 }
 
 function parseJson(text) {
