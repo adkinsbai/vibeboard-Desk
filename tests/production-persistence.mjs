@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { assert, delay, waitForServer } from "./support/serverHarness.mjs";
@@ -14,6 +16,35 @@ const TITLE = `Production Persistence ${randomUUID().slice(0, 8)}`;
 const snapshotPath = fileURLToPath(new URL(`../runtime/prod-persist-${randomUUID()}.db`, import.meta.url));
 const KEEP_SNAPSHOT = process.env.VIBEBOARD_KEEP_PROD_PERSIST_SNAPSHOT === "1";
 await fs.rm(snapshotPath, { force: true }).catch(() => {});
+
+const defaultVercel = await startServer(await findFreePort(), {
+  VIBEBOARD_GENERATED_DIR: undefined,
+  VIBEBOARD_RUNTIME_DIR: undefined,
+  VIBEBOARD_PREVIEWS_DIR: undefined,
+});
+try {
+  const baseUrl = `http://127.0.0.1:${defaultVercel.port}`;
+  await waitForServer(baseUrl, { path: "/api/health" });
+  const register = await raw(baseUrl, "/api/auth/register", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ phone: `+1555${String(Math.floor(Math.random() * 1000000)).padStart(6, "0")}`, password: PASSWORD }),
+  });
+  assert(register.status === 200, `default Vercel register should succeed, got ${register.status}: ${JSON.stringify(register.data)}`);
+  const defaultCookie = cookieFrom(register.response);
+  const created = await raw(baseUrl, "/api/conversations", {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: defaultCookie },
+    body: JSON.stringify({ title: "Default Vercel Writable Dirs" }),
+  });
+  assert(created.status === 200, `default Vercel conversation create should succeed, got ${created.status}: ${JSON.stringify(created.data)}`);
+  assert(
+    path.resolve(created.data.projects_root || "").startsWith(path.resolve(os.tmpdir())),
+    `Vercel project workspace should default to tmp, got ${created.data.projects_root}`
+  );
+} finally {
+  await stopChild(defaultVercel.child);
+}
 
 let cookie = "";
 let conversationId = "";
@@ -129,11 +160,11 @@ try {
 
 console.log(JSON.stringify({ ok: true, conversationId, jobId, title: TITLE, snapshotPath: KEEP_SNAPSHOT ? snapshotPath : undefined }, null, 2));
 
-async function startServer(port) {
+async function startServer(port, envOverrides = {}) {
   await fs.mkdir(RUNTIME_ROOT, { recursive: true });
   const child = spawn(process.execPath, ["server.mjs"], {
     cwd: ROOT,
-    env: {
+    env: removeUndefined({
       ...process.env,
       VERCEL: "1",
       VIBEBOARD_PUBLIC_DEPLOYMENT: "1",
@@ -152,11 +183,16 @@ async function startServer(port) {
       VIBEBOARD_LLM_BASE_URL: "https://api.deepseek.com",
       VIBEBOARD_LLM_MODEL: "deepseek-v4-flash",
       VIBEBOARD_LLM_API_KEY: "test-key",
-    },
+      ...envOverrides,
+    }),
     stdio: "ignore",
     windowsHide: true,
   });
   return { child, port };
+}
+
+function removeUndefined(value = {}) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
 async function findFreePort() {

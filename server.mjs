@@ -113,12 +113,22 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
-const DEFAULT_GENERATED_DIR = path.join(ROOT, "generated", "current");
+const DEFAULT_GENERATED_DIR = process.env.VERCEL === "1"
+  ? path.join(os.tmpdir(), "vibeboard-generated", "current")
+  : path.join(ROOT, "generated", "current");
 const GENERATED_DIR = process.env.VIBEBOARD_GENERATED_DIR
   ? path.resolve(process.env.VIBEBOARD_GENERATED_DIR)
   : DEFAULT_GENERATED_DIR;
-const PREVIEWS_DIR = path.join(ROOT, "previews");
-const RUNTIME_DIR = path.join(ROOT, "runtime");
+const PREVIEWS_DIR = process.env.VIBEBOARD_PREVIEWS_DIR
+  ? path.resolve(process.env.VIBEBOARD_PREVIEWS_DIR)
+  : process.env.VERCEL === "1"
+    ? path.join(os.tmpdir(), "vibeboard-previews")
+    : path.join(ROOT, "previews");
+const RUNTIME_DIR = process.env.VIBEBOARD_RUNTIME_DIR
+  ? path.resolve(process.env.VIBEBOARD_RUNTIME_DIR)
+  : process.env.VERCEL === "1"
+    ? path.join(os.tmpdir(), "vibeboard-runtime")
+    : path.join(ROOT, "runtime");
 const SERVER_LOG_PATH = path.join(RUNTIME_DIR, "server.log");
 const SERVER_LOG_STRING_LIMIT = 600;
 const SERVER_LOG_ARRAY_LIMIT = 20;
