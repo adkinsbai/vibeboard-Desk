@@ -16,6 +16,11 @@ import {
   appendEvidence,
 } from "./agentStateMachine.mjs";
 import { createBuildIntelligenceSummary } from "./buildIntelligence.mjs";
+import {
+  executePythonRunner,
+  isPythonRunnerTransportError,
+  pythonRunnerRequired,
+} from "./pythonRunnerClient.mjs";
 
 export function createBuildRuntime(deps = {}) {
   const {
@@ -30,6 +35,7 @@ export function createBuildRuntime(deps = {}) {
     getBoard = () => ({}),
     pythonBin,
     nodeBin = process.execPath,
+    env = process.env,
   } = deps;
 
   requireFunction(execFileP, "execFileP");
@@ -82,8 +88,29 @@ export function createBuildRuntime(deps = {}) {
     } catch {}
 
     await execFileP(nodeBin, ["--check", appFile], { timeout: 10000 });
-    const hardwareCompile = await execFileP(pythonBin, ["-m", "py_compile", hardwareFile], { timeout: 10000 });
-    const hardwareRun = await execFileP(pythonBin, [hardwareFile], { cwd: currentBuild.dir, timeout: 10000 });
+    const filesForRunner = await readGeneratedFiles(currentBuild.dir, HARDWARE_APP_CONTRACT.generatedFiles);
+    const hardwareCompile = await runPythonCheck({
+      files: filesForRunner,
+      mode: "compile",
+      entry: "hardware_app.py",
+      pythonBin,
+      execFileP,
+      args: ["-m", "py_compile", hardwareFile],
+      cwd: currentBuild.dir,
+      timeout: 10000,
+      env,
+    });
+    const hardwareRun = await runPythonCheck({
+      files: filesForRunner,
+      mode: "run",
+      entry: "hardware_app.py",
+      pythonBin,
+      execFileP,
+      args: [hardwareFile],
+      cwd: currentBuild.dir,
+      timeout: 10000,
+      env,
+    });
 
     const hardwareResult = parseJsonObject(hardwareRun.stdout, "hardware_app.py output");
     const hardwareIssues = validateHardwareResultContract(hardwareResult, {
@@ -139,6 +166,10 @@ export function createBuildRuntime(deps = {}) {
       dir: currentBuild.dir,
       pythonBin,
       timeoutMs: 15000,
+      pythonRunnerUrl: env.PYTHON_RUNNER_URL,
+      pythonRunnerToken: env.PYTHON_RUNNER_TOKEN,
+      pythonRunnerRequired: env.PYTHON_RUNNER_REQUIRED,
+      pythonRunnerTimeoutMs: env.PYTHON_RUNNER_TIMEOUT_MS,
     });
     if (!verification.ok) {
       await appendServerLog("build.failed", {
@@ -189,6 +220,43 @@ export function createBuildRuntime(deps = {}) {
   }
 
   return { buildCurrent };
+}
+
+async function runPythonCheck({
+  files,
+  mode,
+  entry,
+  pythonBin,
+  execFileP,
+  args,
+  cwd,
+  timeout,
+  env,
+} = {}) {
+  const runnerResult = await executePythonRunner(files, {
+    mode,
+    entry,
+    timeoutMs: timeout,
+    pythonRunnerUrl: env.PYTHON_RUNNER_URL,
+    pythonRunnerToken: env.PYTHON_RUNNER_TOKEN,
+    pythonRunnerRequired: env.PYTHON_RUNNER_REQUIRED,
+    pythonRunnerTimeoutMs: env.PYTHON_RUNNER_TIMEOUT_MS,
+  });
+  if (runnerResult && (!isPythonRunnerTransportError(runnerResult) || pythonRunnerRequired({
+    pythonRunnerUrl: env.PYTHON_RUNNER_URL,
+    pythonRunnerToken: env.PYTHON_RUNNER_TOKEN,
+    pythonRunnerRequired: env.PYTHON_RUNNER_REQUIRED,
+  }))) {
+    if (!runnerResult.ok) {
+      const error = new Error(runnerResult.message || runnerResult.stderr || `Python runner ${mode} failed.`);
+      error.stdout = runnerResult.stdout;
+      error.stderr = runnerResult.stderr;
+      error.statusCode = runnerResult.statusCode || 500;
+      throw error;
+    }
+    return runnerResult;
+  }
+  return await execFileP(pythonBin, args, { cwd, timeout });
 }
 
 export function parseJsonObject(text, label = "JSON") {

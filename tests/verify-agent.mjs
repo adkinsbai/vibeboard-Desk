@@ -157,6 +157,14 @@ print(json.dumps(payload))
   };
 }
 
+function generatedFilesForBuildId(buildId) {
+  const files = validGeneratedFiles();
+  for (const name of ["app.js", "hardware_app.py", "manifest.json"]) {
+    files[name] = String(files[name]).replaceAll("vb-test-valid", buildId);
+  }
+  return files;
+}
+
 function templateFilesForPrompt(prompt, id = "vb-template-test") {
   const spec = createAppSpec(prompt, id);
   const specialized = advancedTemplateFilesV2(prompt, id, spec);
@@ -625,7 +633,7 @@ async function withMockPythonRunner(fn) {
     }
 
     const hardwareResult = {
-      build_id: "vb-runner-test",
+      build_id: extractMockRunnerBuildId(body),
       prompt: "runner executed",
       runtime: { mode: "python_runner", executed_on_board: false },
       available_apis: ["/api/status", "./hardware-result.json"],
@@ -659,6 +667,25 @@ async function withMockPythonRunner(fn) {
   } finally {
     await new Promise(resolve => server.close(resolve));
   }
+}
+
+function extractMockRunnerBuildId(body = {}) {
+  const hardwareSource = mockRunnerFileText(body.files, "hardware_app.py");
+  const matches = [
+    hardwareSource.match(/\bBUILD_ID\s*=\s*["']([^"']+)["']/),
+    hardwareSource.match(/["']build_id["']\s*:\s*["']([^"']+)["']/),
+    hardwareSource.match(/expectedBuildId\s*=\s*["']([^"']+)["']/),
+  ];
+  return matches.find(match => match)?.[1] || "vb-runner-test";
+}
+
+function mockRunnerFileText(files = {}, name) {
+  const value = files?.[name];
+  if (typeof value === "string") return value;
+  if (value?.encoding === "base64" && value?.data) {
+    return Buffer.from(String(value.data), "base64").toString("utf8");
+  }
+  return "";
 }
 
 function createFileToolCall(id, pathName, content) {
@@ -1405,6 +1432,58 @@ await test("build runtime runs local hardware build and records evidence", async
     assert(manifest.target === "/tmp/vibeboard-static", "manifest should keep board target");
     assert(logs.some(item => item.event === "build.start"), "build runtime should log build.start");
     assert(logs.some(item => item.event === "build.done"), "build runtime should log build.done");
+  });
+});
+
+await test("build runtime uses Python runner when local Python is unavailable", async () => {
+  const { createBuildRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "buildRuntime.mjs")).href);
+  await withTempDir("vibeboard-build-runtime-runner-", async dir => {
+    await withMockPythonRunner(async runner => {
+      const files = generatedFilesForBuildId("vb-build-runner");
+      await writeFiles(dir, files);
+      const currentBuild = {
+        id: "vb-build-runner",
+        prompt: "runner-backed build runtime",
+        files: { ...files },
+        dir,
+        built: false,
+        deployed: false,
+        manifest: JSON.parse(files["manifest.json"]),
+        agentRun: { phase: "code", evidence: [], failures: [] },
+      };
+      const runtime = createBuildRuntime({
+        appendServerLog: async () => {},
+        execFileP: async (file, args, options) => {
+          if (String(file).includes("python-vibeboard-missing")) {
+            const error = new Error("spawn python-vibeboard-missing ENOENT");
+            error.code = "ENOENT";
+            throw error;
+          }
+          return await execFileP(file, args, options);
+        },
+        verifyAllLocal: async (verificationFiles, options) => {
+          assert(options.pythonRunnerUrl === runner.url, "verifyAllLocal should receive runner URL");
+          assert(verificationFiles[HARDWARE_RESULT_FILE]?.includes('"build_id": "vb-build-runner"'), "verification should receive runner hardware result");
+          return { ok: true, issues: [], evidence: { runner: true }, summary: "runner verify ok" };
+        },
+        createAppSpec: (prompt, id) => ({ prompt, id, target: "480x360 RK3566 Linux kiosk" }),
+        generatedManifest: (prompt, id) => ({ id, prompt, files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+        getCurrentBuild: () => currentBuild,
+        getBoard: () => ({ targetStatic: "/tmp/vibeboard-static" }),
+        pythonBin: "python-vibeboard-missing",
+        nodeBin: NODE_BIN,
+        env: {
+          PYTHON_RUNNER_URL: runner.url,
+          PYTHON_RUNNER_REQUIRED: "true",
+        },
+      });
+
+      await runtime.buildCurrent();
+      assert(currentBuild.built === true, "runner-backed build should mark current build as built");
+      assert(currentBuild.buildEvidence.evidence.pythonCompile === "passed", "runner-backed build should keep compile evidence");
+      const hardwareResult = JSON.parse(await fs.readFile(path.join(dir, HARDWARE_RESULT_FILE), "utf8"));
+      assert(hardwareResult.build_id === "vb-build-runner", "runner should produce matching hardware result");
+    });
   });
 });
 
