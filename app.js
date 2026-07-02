@@ -128,6 +128,7 @@ let conversationLoadToken = 0;
 let jobsPollTimer = null;
 let activeJobWaiters = new Set();
 let assetManagerSelectedConversationId = "";
+const GENERATION_START_TIMEOUT_MS = 300000;
 let assetManagerCurrentFolderId = "";
 let assetManagerSelection = null;
 let assetManagerCache = { folders: [], assets: [], projectFiles: [] };
@@ -2388,7 +2389,7 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
       history: chatHistory,
       background: true,
       ...overrides,
-    }, { timeout: 30000 });
+    }, { timeout: GENERATION_START_TIMEOUT_MS });
     const jobId = started.job?.id;
     if (!jobId) throw new Error("Background generation job was not created.");
     progress.log(`Background job queued: ${jobId}`);

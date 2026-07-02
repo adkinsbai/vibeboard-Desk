@@ -1617,6 +1617,26 @@ await test("job runtime queues work and turns failures into choices", async () =
   assert(failed.choices.some(choice => choice.action === "open_model_settings"), "missing model config should offer model settings");
 });
 
+await test("job runtime times out stuck work with retry choices", async () => {
+  const db = new SQL.Database();
+  const store = createJobStore(db, () => {});
+  store.initSchema();
+  const runtime = createJobRuntime({ jobStore: store, classifyError, timeoutMs: 1 });
+  runtime.register("agent", async () => {
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    return { ok: true };
+  });
+
+  const job = runtime.enqueue("agent", { prompt: "slow" }, { title: "slow" });
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  const timedOut = store.getJob(job.id);
+  assert(timedOut.status === "failed", `expected timeout failure, got ${timedOut.status}`);
+  assert(timedOut.error.errorType === "llm_timeout" || timedOut.error.errorType === "job_timeout", `expected timeout classification, got ${JSON.stringify(timedOut.error)}`);
+  assert(timedOut.completed_at, "timeout should finish the job instead of leaving it running");
+  assert(timedOut.choices.some(choice => choice.action === "retry_job"), "timeout should expose retry");
+  assert(timedOut.choices.some(choice => choice.action === "view_logs"), "timeout should expose logs");
+});
+
 await test("build runtime rejects hardware result build id mismatch before verification", async () => {
   const { createBuildRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "buildRuntime.mjs")).href);
   await withTempDir("vibeboard-build-runtime-mismatch-", async dir => {

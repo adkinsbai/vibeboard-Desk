@@ -79,7 +79,9 @@ function choicesFromOutput(type, output = {}, job = {}) {
   return [{ label: "View logs", action: "view_logs", value: { job_id: job.id } }];
 }
 
-export function createJobRuntime({ jobStore, classifyError, appendServerLog = async () => {} } = {}) {
+const DEFAULT_JOB_TIMEOUT_MS = 180000;
+
+export function createJobRuntime({ jobStore, classifyError, appendServerLog = async () => {}, timeoutMs = DEFAULT_JOB_TIMEOUT_MS } = {}) {
   if (!jobStore) throw new Error("jobStore is required");
   const handlers = new Map();
   let queue = Promise.resolve();
@@ -137,7 +139,11 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
     try {
       const ctx = contextFor(jobId);
       ctx.checkCanceled();
-      const output = await handler(job.input || {}, ctx, job);
+      const output = await withTimeout(
+        handler(job.input || {}, ctx, job),
+        Number(job.input?.job_timeout_ms || job.input?.timeout_ms || timeoutMs || DEFAULT_JOB_TIMEOUT_MS),
+        job
+      );
       const latest = jobStore.getJob(jobId);
       if (latest?.cancel_requested) {
         jobStore.transition(jobId, {
@@ -196,10 +202,36 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
       return jobStore.getJob(job.id);
     },
 
+    async runNow(type, input = {}, { conversationId = "", title = "" } = {}) {
+      const job = jobStore.createJob({
+        type,
+        conversationId,
+        title: title || type,
+        input,
+        phase: "queued",
+      });
+      return await runExisting(job.id);
+    },
+
     resumeQueuedJobs() {
       for (const job of jobStore.listJobs({ status: JOB_STATUS.QUEUED, limit: 200 }).reverse()) {
         schedule(job.id);
       }
     },
   };
+}
+
+function withTimeout(promise, timeoutMs, job = {}) {
+  const ms = Math.max(1000, Math.min(Number(timeoutMs) || DEFAULT_JOB_TIMEOUT_MS, 15 * 60 * 1000));
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`Job timed out after ${ms}ms.`);
+      error.errorType = "job_timeout";
+      error.statusCode = 504;
+      error.jobId = job.id || "";
+      reject(error);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }

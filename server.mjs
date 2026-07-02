@@ -140,6 +140,7 @@ const DEFAULT_GENERATE_AGENT_MAX_ITERATIONS = 18;
 const DEFAULT_GENERATE_AGENT_MAX_VERIFICATION_ATTEMPTS = 1;
 const DEFAULT_GENERATE_AGENT_TIMEOUT_MS = 120000;
 const DEFAULT_GENERATE_AGENT_LLM_TIMEOUT_MS = 60000;
+const DEFAULT_JOB_TIMEOUT_MS = Math.max(1000, Number(process.env.VIBEBOARD_JOB_TIMEOUT_MS || (process.env.VERCEL === "1" ? 240000 : 600000)));
 const PUBLIC_DEPLOYMENT = process.env.VERCEL === "1" || process.env.VIBEBOARD_PUBLIC_DEPLOYMENT === "1";
 
 async function loadLocalEnv() {
@@ -2733,10 +2734,19 @@ function enqueueBackgroundJob(type, body = {}) {
   });
 }
 
+async function runRequestBoundJob(type, body = {}) {
+  const input = withoutBackgroundFlags(body || {});
+  return await jobRuntime.runNow(type, input, {
+    conversationId: String(input.conversation_id || ""),
+    title: jobTitle(type, input),
+  });
+}
+
 const jobRuntime = createJobRuntime({
   jobStore,
   classifyError,
   appendServerLog,
+  timeoutMs: DEFAULT_JOB_TIMEOUT_MS,
 });
 
 jobRuntime.register("agent", async (body = {}, ctx) => {
@@ -3174,7 +3184,10 @@ async function route(req, res) {
         action: body?.action || "message",
       });
       if (wantsBackgroundJob(body || {})) {
-        const job = enqueueBackgroundJob("agent", { ...(body || {}), user_id: requestUser?.id || "" });
+        const jobInput = { ...(body || {}), user_id: requestUser?.id || "" };
+        const job = PUBLIC_DEPLOYMENT
+          ? await runRequestBoundJob("agent", jobInput)
+          : enqueueBackgroundJob("agent", jobInput);
         await recordProductTelemetry({
           req,
           user: requestUser,
@@ -3185,7 +3198,7 @@ async function route(req, res) {
           extra: { job_id: job.id, job_type: "agent" },
         });
         await flushMutationSaves();
-        json(res, 202, { ok: true, job });
+        json(res, PUBLIC_DEPLOYMENT ? 200 : 202, { ok: true, job });
         return;
       }
       try {
@@ -3239,7 +3252,10 @@ async function route(req, res) {
         if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
         await ensureCreditsAvailable(requestUser);
         if (wantsBackgroundJob(body || {})) {
-          const job = enqueueBackgroundJob("generate", { ...(body || {}), user_id: requestUser?.id || "" });
+          const jobInput = { ...(body || {}), user_id: requestUser?.id || "" };
+          const job = PUBLIC_DEPLOYMENT
+            ? await runRequestBoundJob("generate", jobInput)
+            : enqueueBackgroundJob("generate", jobInput);
           await recordProductTelemetry({
             req,
             user: requestUser,
@@ -3250,7 +3266,7 @@ async function route(req, res) {
             extra: { job_id: job.id, job_type: "generate" },
           });
           await flushMutationSaves();
-          json(res, 202, { ok: true, job });
+          json(res, PUBLIC_DEPLOYMENT ? 200 : 202, { ok: true, job });
           return;
         }
         const result = await runGenerateRequest(body || {});
