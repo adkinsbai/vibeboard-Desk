@@ -1,5 +1,5 @@
 const DEFAULT_TIMEOUT_MS = 15000;
-const MAX_RUNNER_FILE_BYTES = 512 * 1024;
+const MAX_RUNNER_FILE_BYTES = 2 * 1024 * 1024;
 
 export function resolvePythonRunnerConfig(options = {}) {
   const url = normalizeRunnerUrl(options.pythonRunnerUrl || process.env.PYTHON_RUNNER_URL);
@@ -76,12 +76,104 @@ export async function executePythonRunner(files = {}, options = {}) {
   }
 }
 
+export function resolveRenderRunnerConfig(options = {}) {
+  const url = normalizeRunnerUrl(
+    options.renderRunnerUrl
+      || process.env.RENDER_RUNNER_URL
+      || options.pythonRunnerUrl
+      || process.env.PYTHON_RUNNER_URL
+  );
+  if (!url) return null;
+  return {
+    url,
+    token: String(
+      options.renderRunnerToken
+        ?? process.env.RENDER_RUNNER_TOKEN
+        ?? options.pythonRunnerToken
+        ?? process.env.PYTHON_RUNNER_TOKEN
+        ?? ""
+    ),
+    timeoutMs: positiveInt(
+      options.renderRunnerTimeoutMs,
+      positiveInt(process.env.RENDER_RUNNER_TIMEOUT_MS, positiveInt(options.timeoutMs, DEFAULT_TIMEOUT_MS))
+    ),
+    required: renderRunnerRequired(options),
+  };
+}
+
+export async function executeRenderRunner(files = {}, options = {}) {
+  const config = resolveRenderRunnerConfig(options);
+  if (!config) return null;
+
+  const endpoint = runnerEndpoint(config.url, "/v1/render/verify");
+  const timeoutMs = positiveInt(options.timeoutMs, config.timeoutMs);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs + 1000);
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(config.token ? { authorization: `Bearer ${config.token}` } : {}),
+      },
+      body: JSON.stringify({
+        timeoutMs,
+        files: serializeRunnerFiles(files),
+      }),
+      signal: controller.signal,
+    });
+
+    const text = await response.text();
+    const payload = parseJson(text);
+    if (!response.ok) {
+      return renderRunnerResult({
+        ok: false,
+        transportError: true,
+        statusCode: response.status,
+        message: payload?.error || payload?.message || payload?.detail || text || `Render runner returned HTTP ${response.status}.`,
+      });
+    }
+
+    return renderRunnerResult({
+      ok: Boolean(payload?.ok),
+      phase: payload?.phase || "render",
+      summary: payload?.summary,
+      issues: Array.isArray(payload?.issues) ? payload.issues : [],
+      evidence: payload?.evidence && typeof payload.evidence === "object" ? payload.evidence : {},
+      data: payload?.data ?? null,
+      degraded: Boolean(payload?.degraded),
+      statusCode: response.status,
+      message: payload?.error || payload?.message,
+    });
+  } catch (error) {
+    return renderRunnerResult({
+      ok: false,
+      transportError: true,
+      message: error?.name === "AbortError"
+        ? `Render runner timed out after ${timeoutMs}ms.`
+        : error?.message || "Render runner request failed.",
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function isPythonRunnerTransportError(result) {
   return Boolean(result?.transportError);
 }
 
 export function pythonRunnerRequired(options = {}) {
   return Boolean(resolvePythonRunnerConfig(options)?.required);
+}
+
+export function renderRunnerRequired(options = {}) {
+  const explicit = options.renderRunnerRequired ?? process.env.RENDER_RUNNER_REQUIRED;
+  if (explicit !== undefined && explicit !== null && String(explicit).trim() !== "") {
+    return boolish(explicit);
+  }
+  const env = options.env || process.env;
+  return boolish(env?.VERCEL) || boolish(env?.VIBEBOARD_PUBLIC_DEPLOYMENT);
 }
 
 function runnerResult({
@@ -108,6 +200,33 @@ function runnerResult({
     runner: true,
     transportError: Boolean(transportError),
     statusCode,
+  };
+}
+
+function renderRunnerResult({
+  ok,
+  phase = "render",
+  summary = "",
+  issues = [],
+  evidence = {},
+  data = null,
+  degraded = false,
+  message = "",
+  transportError = false,
+  statusCode = null,
+} = {}) {
+  return {
+    ok: Boolean(ok),
+    phase,
+    summary: String(summary || (ok ? "Remote render verification passed." : "Remote render verification failed.")),
+    issues: Array.isArray(issues) ? issues : [],
+    evidence: evidence && typeof evidence === "object" ? evidence : {},
+    data,
+    degraded: Boolean(degraded),
+    runner: true,
+    transportError: Boolean(transportError),
+    statusCode,
+    message: String(message || ""),
   };
 }
 

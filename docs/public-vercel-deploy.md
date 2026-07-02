@@ -22,9 +22,10 @@ VIBEBOARD_LLM_BASE_URL=https://api.deepseek.com
 VIBEBOARD_LLM_MODEL=deepseek-v4-flash
 VIBEBOARD_LLM_API_KEY=...
 
-PYTHON_RUNNER_URL=http://150.158.146.192:7108
+PYTHON_RUNNER_URL=http://47.103.127.145/vibeboard-runner
 PYTHON_RUNNER_TOKEN=...
 PYTHON_RUNNER_REQUIRED=false
+RENDER_RUNNER_REQUIRED=true
 ```
 
 Do not set `VIBEBOARD_ALLOW_DEV_SMS_CODES=1` in production. It is only for local tests, where the API returns `dev_code` instead of sending SMS.
@@ -88,16 +89,16 @@ This snapshot bridge is a production bootstrap. For higher concurrency, migrate 
 
 ## Python Runner
 
-Vercel does not provide a durable Python execution environment for the hardware app verification path. The production web app therefore calls the separate FastAPI runner in `runner/`:
+Vercel does not provide a durable Python or Playwright browser environment for the hardware app verification path. The production web app therefore calls the separate FastAPI runner in `runner/`:
 
-- Local runner port on the 4060Ti server: `127.0.0.1:8091`.
-- Public FRP tunnel name: `4060ti-vibeboard-runner`.
-- Preferred public route: `http://150.158.146.192:7108`.
-- Fixed fallback route if `7108` is occupied: `http://150.158.146.192:10080`.
-- API: `POST /v1/python/execute`.
+- Local runner port on the server: `127.0.0.1:8091`.
+- Public route: `http://47.103.127.145/vibeboard-runner`.
+- APIs: `POST /v1/python/execute` and `POST /v1/render/verify`.
 - Auth: `Authorization: Bearer $PYTHON_RUNNER_TOKEN`.
 
-The Vercel app will use the runner for Python compile/run checks when `PYTHON_RUNNER_URL` is set. With `PYTHON_RUNNER_REQUIRED=false`, an unavailable runner downgrades to web preview instead of blocking the whole user flow. Set `PYTHON_RUNNER_REQUIRED=true` only after the FRP route and service health are monitored.
+The Vercel app will use the runner for Python compile/run checks when `PYTHON_RUNNER_URL` is set. With `PYTHON_RUNNER_REQUIRED=false`, an unavailable Python runner downgrades to web preview instead of blocking the whole user flow.
+
+Render verification is stricter in public deployment. `RENDER_RUNNER_REQUIRED` defaults to true on Vercel/public deployments, and production generation fails if the render runner is missing or unreachable. This keeps the cloud user experience aligned with local Playwright screenshot verification instead of silently skipping the 480x360 render check.
 
 Deployment notes live in [runner/README.md](../runner/README.md).
 
@@ -125,6 +126,6 @@ POST /api/admin/credits
 
 ## Known Vercel Boundary
 
-The public web app can handle accounts, credits, chat/generation requests, project records, market preview, and Python compile/run checks through the runner. In public deployment, hardware deployment, hardware status, logs, audio control, global preferences, and experience/playbook APIs are admin-only.
+The public web app can handle accounts, credits, chat/generation requests, project records, market preview, Python compile/run checks, and 480x360 Playwright render checks through the runner. In public deployment, hardware deployment, hardware status, logs, audio control, global preferences, and experience/playbook APIs are admin-only.
 
-Playwright screenshot capture and true board deployment still need a worker/hardware service before exposing production hardware deployment to all users.
+True board deployment still needs a worker/hardware service before exposing production hardware deployment to all users.

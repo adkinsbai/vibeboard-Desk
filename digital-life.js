@@ -697,7 +697,9 @@ async function sendMessage(content) {
   optimisticMessages = [...optimisticMessages, pendingUser];
   renderMessages(lastServerMessages, { forceScroll: true });
   setLifeState("thinking");
-  await syncPresence("thinking");
+  syncPresence("thinking").catch(error => {
+    modelStatus.textContent = `presence sync delayed: ${error.message.slice(0, 80)}`;
+  });
   let result = null;
   try {
     result = await jsonFetch("/api/digital-life/message", {

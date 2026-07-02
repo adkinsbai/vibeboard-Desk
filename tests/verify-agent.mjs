@@ -669,6 +669,61 @@ async function withMockPythonRunner(fn) {
   }
 }
 
+async function withMockRenderRunner(fn, { response } = {}) {
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    if (req.method !== "POST" || req.url !== "/v1/render/verify") {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "not found" }));
+      return;
+    }
+
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    const body = JSON.parse(raw || "{}");
+    requests.push(body);
+    const payload = response || {
+      ok: true,
+      phase: "render",
+      summary: "Remote 480x360 HTTP render passed.",
+      issues: [],
+      degraded: false,
+      evidence: {
+        runner: "mock-render-runner",
+        pageState: { viewportWidth: 480, viewportHeight: 360, scrollWidth: 480, scrollHeight: 360 },
+        screenshot: { mimeType: "image/png", bytes: 8 },
+      },
+      data: {
+        screenshot: {
+          encoding: "base64",
+          content: "iVBORw0K",
+          mimeType: "image/png",
+          bytes: 8,
+        },
+      },
+    };
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(payload));
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  try {
+    return await fn({
+      url: `http://127.0.0.1:${server.address().port}`,
+      requests: () => requests,
+    });
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+
 function extractMockRunnerBuildId(body = {}) {
   const hardwareSource = mockRunnerFileText(body.files, "hardware_app.py");
   const matches = [
@@ -1463,6 +1518,10 @@ await test("build runtime uses Python runner when local Python is unavailable", 
         },
         verifyAllLocal: async (verificationFiles, options) => {
           assert(options.pythonRunnerUrl === runner.url, "verifyAllLocal should receive runner URL");
+          assert(options.renderRunnerUrl === "http://render-runner.example/vibeboard-runner", "verifyAllLocal should receive render runner URL");
+          assert(options.renderRunnerToken === "render-token-for-test", "verifyAllLocal should receive render runner token");
+          assert(options.renderRunnerRequired === "true", "verifyAllLocal should receive render runner required flag");
+          assert(options.renderRunnerTimeoutMs === "22000", "verifyAllLocal should receive render runner timeout");
           assert(verificationFiles[HARDWARE_RESULT_FILE]?.includes('"build_id": "vb-build-runner"'), "verification should receive runner hardware result");
           return { ok: true, issues: [], evidence: { runner: true }, summary: "runner verify ok" };
         },
@@ -1475,6 +1534,10 @@ await test("build runtime uses Python runner when local Python is unavailable", 
         env: {
           PYTHON_RUNNER_URL: runner.url,
           PYTHON_RUNNER_REQUIRED: "true",
+          RENDER_RUNNER_URL: "http://render-runner.example/vibeboard-runner",
+          RENDER_RUNNER_TOKEN: "render-token-for-test",
+          RENDER_RUNNER_REQUIRED: "true",
+          RENDER_RUNNER_TIMEOUT_MS: "22000",
         },
       });
 
@@ -3848,19 +3911,58 @@ if (!verifier) {
     assert(result.issues.some(issue => issue.code === "HARDWARE_JSON_INVALID"), `expected HARDWARE_JSON_INVALID, got ${JSON.stringify(result.issues)}`);
   });
 
-  await test("verifyRender degrades when cloud Playwright browser is unavailable", async () => {
+  await test("verifyRender uses remote runner in cloud deployment", async () => {
+    const mod = await importVerifiers();
+    await withMockRenderRunner(async runner => {
+      const result = await mod.verifyRender(validGeneratedFiles(), {
+        env: { VERCEL: "1" },
+        renderRunnerUrl: runner.url,
+        renderRunnerRequired: "true",
+        chromium: {
+          launch: async () => {
+            throw new Error("local Playwright should not be used when render runner is configured");
+          },
+        },
+      });
+      assert(result.ok === true, `runner-backed render verification should pass: ${JSON.stringify(result)}`);
+      assert(result.degraded === false, "runner-backed render verification should not be degraded");
+      assert(result.evidence.runner === true, `render evidence should mark runner path: ${JSON.stringify(result.evidence)}`);
+      assert(result.data?.screenshot?.bytes === 8, `render runner should preserve screenshot data: ${JSON.stringify(result.data)}`);
+      assert(runner.requests().length === 1, "render runner should receive exactly one request");
+      assert(runner.requests()[0].files["index.html"], "render runner should receive index.html");
+      assert(runner.requests()[0].files["hardware-result.json"], "render runner should receive hardware-result.json");
+    });
+  });
+
+  await test("verifyRender fails cloud deployment when render runner is unavailable", async () => {
     const mod = await importVerifiers();
     const result = await mod.verifyRender(validGeneratedFiles(), {
       env: { VERCEL: "1" },
+      renderRunnerUrl: "http://127.0.0.1:1",
+      renderRunnerRequired: "true",
       chromium: {
         launch: async () => {
-          throw new Error("browserType.launch: Executable doesn't exist at /home/sbx/.cache/ms-playwright/chromium_headless_shell/chrome-headless-shell");
+          throw new Error("local Playwright should not mask missing remote runner");
         },
       },
     });
-    assert(result.ok === true, `cloud browser runtime absence should not block generation: ${JSON.stringify(result)}`);
-    assert(result.degraded === true, "cloud browser runtime absence should mark render verification degraded");
-    assert(result.issues.some(issue => issue.code === "RENDER_RUNTIME_UNAVAILABLE" && issue.severity === SEVERITY.WARNING), `expected RENDER_RUNTIME_UNAVAILABLE warning, got ${JSON.stringify(result.issues)}`);
+    assert(result.ok === false, `missing cloud render runner should fail: ${JSON.stringify(result)}`);
+    assert(result.issues.some(issue => issue.code === "RENDER_RUNNER_UNAVAILABLE" && issue.severity === SEVERITY.BLOCKING), `expected RENDER_RUNNER_UNAVAILABLE blocking issue, got ${JSON.stringify(result.issues)}`);
+  });
+
+  await test("verifyRender fails cloud deployment when no render runner URL is configured", async () => {
+    const mod = await importVerifiers();
+    const result = await mod.verifyRender(validGeneratedFiles(), {
+      env: { VERCEL: "1" },
+      renderRunnerRequired: "true",
+      chromium: {
+        launch: async () => {
+          throw new Error("local Playwright should not mask missing remote runner config");
+        },
+      },
+    });
+    assert(result.ok === false, `unconfigured cloud render runner should fail: ${JSON.stringify(result)}`);
+    assert(result.issues.some(issue => issue.code === "RENDER_RUNNER_UNAVAILABLE" && issue.severity === SEVERITY.BLOCKING), `expected RENDER_RUNNER_UNAVAILABLE blocking issue, got ${JSON.stringify(result.issues)}`);
   });
 
   await test("verifyRender rejects 480x360 overflow", async () => {

@@ -7,11 +7,43 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1366, height: 820 } });
     try {
       await page.goto(`${baseUrl}/digital-life.html`, { waitUntil: "networkidle" });
+      await page.evaluate(() => {
+        localStorage.setItem("vibeboard-digital-life-model-settings", JSON.stringify({ enabled: false, apiKey: "", baseUrl: "", model: "" }));
+        window.__vibeboardSubmitCount = 0;
+        document.getElementById("lifeComposer")?.addEventListener("submit", () => {
+          window.__vibeboardSubmitCount = (window.__vibeboardSubmitCount || 0) + 1;
+        }, { capture: true });
+      });
       await page.locator("#lifeInput").fill("测试 Enter 发送，记住我喜欢安静一点的回答");
+      const messageResponse = page.waitForResponse(
+        response => response.url().includes("/api/digital-life/message") && response.request().method() === "POST",
+        { timeout: 20000 },
+      );
       await page.keyboard.press("Enter");
+      const submitCount = await page.waitForFunction(() => window.__vibeboardSubmitCount > 0, null, { timeout: 3000 })
+        .then(() => page.evaluate(() => window.__vibeboardSubmitCount || 0))
+        .catch(() => 0);
+      if (submitCount === 0) {
+        await page.locator("#lifeComposer button[type='submit']").click();
+      }
 
       await page.locator(".msg.user", { hasText: "测试 Enter 发送" }).waitFor({ timeout: 6000 });
-      await page.locator(".msg.assistant").last().waitFor({ timeout: 10000 });
+      const response = await messageResponse;
+      assert(response.ok(), `/api/digital-life/message should succeed, got HTTP ${response.status()}`);
+      await page.waitForFunction(
+        () => Array.from(document.querySelectorAll(".msg.assistant"))
+          .some(node => node.textContent && !/local-first digital life companion/i.test(node.textContent)),
+        null,
+        { timeout: 20000 },
+      ).catch(async error => {
+        const diagnostics = await page.evaluate(() => ({
+          assistants: Array.from(document.querySelectorAll(".msg.assistant")).map(node => node.textContent?.slice(0, 160) || ""),
+          users: Array.from(document.querySelectorAll(".msg.user")).map(node => node.textContent?.slice(0, 160) || ""),
+          status: document.getElementById("modelStatus")?.textContent || "",
+          messageLog: document.getElementById("messageLog")?.textContent?.slice(0, 1000) || "",
+        }));
+        throw new Error(`${error.message}; diagnostics=${JSON.stringify(diagnostics)}`);
+      });
 
       const userMessage = await page.locator(".msg.user", { hasText: "测试 Enter 发送" }).count();
       assert(userMessage >= 1, "Enter should submit and render the user message immediately");
@@ -65,7 +97,15 @@ async function main() {
     } finally {
       await browser.close();
     }
-  }, { dbPrefix: "vibeboard-ui-test" });
+  }, {
+    dbPrefix: "vibeboard-ui-test",
+    env: {
+      VIBEBOARD_LLM_API_KEY: "",
+      VIBEBOARD_MODEL_API_KEY: "",
+      DEEPSEEK_API_KEY: "",
+      OPENAI_API_KEY: "",
+    },
+  });
 }
 
 try {

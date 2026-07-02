@@ -170,6 +170,10 @@ export function createBuildRuntime(deps = {}) {
       pythonRunnerToken: env.PYTHON_RUNNER_TOKEN,
       pythonRunnerRequired: env.PYTHON_RUNNER_REQUIRED,
       pythonRunnerTimeoutMs: env.PYTHON_RUNNER_TIMEOUT_MS,
+      renderRunnerUrl: env.RENDER_RUNNER_URL,
+      renderRunnerToken: env.RENDER_RUNNER_TOKEN,
+      renderRunnerRequired: env.RENDER_RUNNER_REQUIRED,
+      renderRunnerTimeoutMs: env.RENDER_RUNNER_TIMEOUT_MS,
     });
     if (!verification.ok) {
       await appendServerLog("build.failed", {

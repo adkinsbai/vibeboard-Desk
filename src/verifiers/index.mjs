@@ -20,9 +20,11 @@ import {
   warnResult,
 } from "../toolResult.mjs";
 import {
+  executeRenderRunner,
   executePythonRunner,
   isPythonRunnerTransportError,
   pythonRunnerRequired,
+  renderRunnerRequired,
 } from "../pythonRunnerClient.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -290,6 +292,50 @@ export async function verifyRender(input = {}, options = {}) {
     if (!files["hardware-result.json"]) {
       const hardwareData = await bestEffortHardwareResult(files);
       await fs.writeFile(path.join(tmpDir, "hardware-result.json"), JSON.stringify(hardwareData, null, 2), "utf8");
+    }
+    const filesForRender = await readFilesFromTempDir(tmpDir);
+    const remoteRender = await executeRenderRunner(filesForRender, {
+      ...options,
+      timeoutMs,
+    });
+    if (remoteRender && (!remoteRender.transportError || renderRunnerRequired(options))) {
+      if (remoteRender.transportError) {
+        return failResult(phase, "Render runner is unavailable.", [
+          renderRunnerUnavailableIssue(phase, remoteRender, renderRunnerRequired(options)),
+        ], { evidence: { tmpDir } });
+      }
+      const issues = remoteRender.issues?.length
+        ? remoteRender.issues
+        : remoteRender.ok
+          ? []
+          : [{
+              code: "RENDER_RUNNER_FAILED",
+              message: remoteRender.message || remoteRender.summary || "Remote render verification failed.",
+              phase,
+              evidence: { statusCode: remoteRender.statusCode },
+              suggestedFixes: ["Inspect the remote render runner logs and generated app files."],
+            }];
+      return toolResult({
+        ok: remoteRender.ok,
+        phase,
+        summary: remoteRender.summary,
+        issues,
+        degraded: remoteRender.degraded,
+        data: remoteRender.data,
+        evidence: {
+          ...remoteRender.evidence,
+          runner: true,
+          statusCode: remoteRender.statusCode,
+        },
+      });
+    }
+    if (!remoteRender && renderRunnerRequired(options)) {
+      return failResult(phase, "Render runner is required for cloud rendering.", [
+        renderRunnerUnavailableIssue(phase, {
+          message: "No render runner URL is configured.",
+          transportError: true,
+        }, true),
+      ], { evidence: { tmpDir } });
     }
 
     server = await startMockHttpServer(tmpDir);
@@ -803,6 +849,25 @@ async function writeFilesToTempDir(files, prefix) {
   return tmpDir;
 }
 
+async function readFilesFromTempDir(rootDir) {
+  const output = {};
+  async function visit(dir) {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await visit(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const relative = path.relative(rootDir, fullPath).replace(/\\/g, "/");
+      output[relative] = await fs.readFile(fullPath);
+    }
+  }
+  await visit(rootDir);
+  return output;
+}
+
 function safeResolve(rootDir, fileName) {
   const root = path.resolve(rootDir);
   const target = path.resolve(root, String(fileName).replace(/^[/\\]+/, ""));
@@ -908,6 +973,23 @@ function pythonRunnerUnavailableIssue(phase, result, checkName, required = false
     evidence: commandEvidence(result),
     suggestedFixes: [
       "Check PYTHON_RUNNER_URL, PYTHON_RUNNER_TOKEN, and the FRP tunnel or runner service health.",
+    ],
+  };
+}
+
+function renderRunnerUnavailableIssue(phase, result, required = true) {
+  return {
+    code: "RENDER_RUNNER_UNAVAILABLE",
+    severity: required ? SEVERITY.BLOCKING : SEVERITY.WARNING,
+    message: "Render runner is unavailable, so 480x360 screenshot verification could not run remotely.",
+    phase,
+    evidence: {
+      statusCode: result?.statusCode ?? null,
+      message: result?.message || "",
+      transportError: Boolean(result?.transportError),
+    },
+    suggestedFixes: [
+      "Check RENDER_RUNNER_URL or PYTHON_RUNNER_URL, runner service health, and the reverse proxy route.",
     ],
   };
 }
