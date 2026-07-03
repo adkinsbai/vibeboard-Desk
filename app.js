@@ -2378,10 +2378,8 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
     deployState.textContent = labels.generating;
     generatePoller = createGenerateLogPoller(progress);
     generatePoller.start();
-    const started = await postJson(api.agent, {
-      action: "confirm_build",
+    const started = await postJson(api.generate, {
       prompt,
-      build_prompt: prompt,
       modelSettings: getModelPayload(),
       agent_mode: getAgentMode(),
       conversation_id: conversationId,

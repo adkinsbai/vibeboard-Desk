@@ -546,25 +546,37 @@ function parseUsageMetadata(value) {
 
 function publicSafeModelSettings(input = {}) {
   if (!PUBLIC_DEPLOYMENT) return input || {};
+  if (input.enabled === false || input.forceTemplate === true) {
+    return {
+      provider: input.provider || process.env.VIBEBOARD_LLM_PROVIDER || process.env.VIBEBOARD_MODEL_PROVIDER || "deepseek",
+      baseUrl: input.baseUrl || process.env.VIBEBOARD_LLM_BASE_URL || process.env.VIBEBOARD_MODEL_BASE_URL || "",
+      model: input.model || process.env.VIBEBOARD_LLM_MODEL || process.env.VIBEBOARD_MODEL || "",
+      enabled: false,
+    };
+  }
   return {
     provider: process.env.VIBEBOARD_LLM_PROVIDER || process.env.VIBEBOARD_MODEL_PROVIDER || input.provider || "deepseek",
     baseUrl: process.env.VIBEBOARD_LLM_BASE_URL || process.env.VIBEBOARD_MODEL_BASE_URL || input.baseUrl || "",
     model: process.env.VIBEBOARD_LLM_MODEL || process.env.VIBEBOARD_MODEL || input.model || "",
-    enabled: input.enabled === false ? false : true,
+    enabled: true,
   };
 }
 
-function withServerModelSettings(body = {}) {
+function withServerModelSettings(body = {}, options = {}) {
+  const forceTemplate = options.forceTemplate === true;
+  const modelInput = forceTemplate
+    ? { ...(body?.modelSettings || {}), enabled: false, forceTemplate: true }
+    : (body?.modelSettings || {});
   const cloudAgentLimits = PUBLIC_DEPLOYMENT
     ? {
-        max_iterations: Math.min(8, Number(body?.max_iterations || body?.maxIterations || 8)),
+        max_iterations: Math.min(6, Number(body?.max_iterations || body?.maxIterations || 6)),
         max_verification_attempts: 0,
         repair_attempts: 0,
       }
     : {};
   return {
     ...(body || {}),
-    modelSettings: publicSafeModelSettings(body?.modelSettings || {}),
+    modelSettings: publicSafeModelSettings(modelInput),
     ...cloudAgentLimits,
   };
 }
@@ -3156,7 +3168,13 @@ async function route(req, res) {
       const payload = body?.payload && typeof body.payload === "object" ? body.payload : body;
       if (payload?.conversation_id) ensureConversationAccess(payload.conversation_id, requestUser);
       if (type === "agent" || type === "generate") await ensureCreditsAvailable(requestUser);
-      const job = enqueueBackgroundJob(type, { ...(payload || {}), user_id: requestUser?.id || "" });
+      const normalizedPayload = type === "generate"
+        ? withServerModelSettings(payload || {}, { forceTemplate: PUBLIC_DEPLOYMENT && payload?.agent_full !== true && payload?.agentFull !== true })
+        : { ...(payload || {}) };
+      const jobInput = { ...normalizedPayload, user_id: requestUser?.id || "" };
+      const job = PUBLIC_DEPLOYMENT
+        ? await runRequestBoundJob(type, jobInput)
+        : enqueueBackgroundJob(type, jobInput);
       await recordProductTelemetry({
         req,
         user: requestUser,
@@ -3167,7 +3185,7 @@ async function route(req, res) {
         extra: { job_id: job.id, job_type: type },
       });
       await flushMutationSaves();
-      json(res, 202, { ok: true, job });
+      json(res, PUBLIC_DEPLOYMENT ? 200 : 202, { ok: true, job });
       return;
     }
 
@@ -3248,7 +3266,10 @@ async function route(req, res) {
     if (req.method === "POST" && url.pathname === "/api/generate") {
       let body = {};
       try {
-        body = withServerModelSettings(await readBody(req));
+        const rawBody = await readBody(req);
+        body = withServerModelSettings(rawBody, {
+          forceTemplate: PUBLIC_DEPLOYMENT && rawBody?.agent_full !== true && rawBody?.agentFull !== true,
+        });
         if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
         await ensureCreditsAvailable(requestUser);
         if (wantsBackgroundJob(body || {})) {

@@ -3257,6 +3257,28 @@ await test("generate runtime allows disabling auto repair with zero attempts", a
   assert(settings.repairAttempts === 0, `expected zero repair attempts, got ${settings.repairAttempts}`);
 });
 
+await test("generate runtime honors request-bound cloud agent limits", async () => {
+  const { buildGenerateAgentSettings } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  const settings = buildGenerateAgentSettings({
+    max_iterations: 3,
+    max_verification_attempts: 0,
+    repair_attempts: 0,
+    timeout_ms: 45000,
+    llm_timeout_ms: 12000,
+  }, {
+    VIBEBOARD_AGENT_MAX_ITERATIONS: "18",
+    VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS: "2",
+    VIBEBOARD_AGENT_REPAIR_ATTEMPTS: "2",
+    VIBEBOARD_AGENT_TIMEOUT_MS: "120000",
+    VIBEBOARD_AGENT_LLM_TIMEOUT_MS: "60000",
+  });
+  assert(settings.maxIterations === 3, `request max_iterations should override env default, got ${settings.maxIterations}`);
+  assert(settings.maxVerificationAttempts === 0, `request max_verification_attempts=0 should be preserved, got ${settings.maxVerificationAttempts}`);
+  assert(settings.repairAttempts === 0, `request repair_attempts=0 should be preserved, got ${settings.repairAttempts}`);
+  assert(settings.timeoutMs === 45000, `request timeout_ms should override env default, got ${settings.timeoutMs}`);
+  assert(settings.llmTimeoutMs === 12000, `request llm_timeout_ms should override env default, got ${settings.llmTimeoutMs}`);
+});
+
 await test("agent graph keeps chat behind confirmation gate", async () => {
   const { runAgentGraph } = await import(pathToFileURL(path.join(ROOT, "src", "agentGraph.mjs")).href);
   let buildCalled = false;
@@ -3630,6 +3652,37 @@ await test("agent accepts complete text-only final answer after local verificati
     assert(result.actions.some(action => action.tool === "verify_render"), "expected verify_render action");
     assert(result.actions.some(action => action.tool === "run_hardware"), "expected run_hardware action");
     assert(mock.calls() === 2, `expected 2 mock model calls, got ${mock.calls()}`);
+  });
+});
+
+await test("agent accepts complete files when iteration budget ends before done", async () => {
+  const { runAgent } = await import(pathToFileURL(path.join(ROOT, "src", "agent.mjs")).href);
+  const files = validGeneratedFiles();
+  await withMockChatServer([
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        createFileToolCall("call-budget-index", "index.html", files["index.html"]),
+        createFileToolCall("call-budget-style", "style.css", files["style.css"]),
+        createFileToolCall("call-budget-app", "app.js", files["app.js"]),
+        createFileToolCall("call-budget-hardware", "hardware_app.py", files["hardware_app.py"]),
+      ],
+    },
+  ], async mock => {
+    const result = await runAgent({
+      baseUrl: mock.baseUrl,
+      apiKey: "test-key",
+      model: "mock-tools",
+      maxIterations: 1,
+      maxVerificationAttempts: 0,
+      llmTimeoutMs: 10000,
+    }, "make a compact hardware status screen", {}, []);
+
+    assert(result.success === true, `complete files should be accepted at iteration budget: ${JSON.stringify(result)}`);
+    assert(result.summary.includes("complete files"), `summary should explain fallback completion, got ${result.summary}`);
+    assert(result.files["index.html"] && result.files["style.css"] && result.files["app.js"] && result.files["hardware_app.py"], "expected all runtime files");
+    assert(mock.calls() === 1, `expected 1 mock model call, got ${mock.calls()}`);
   });
 });
 

@@ -89,13 +89,19 @@ try {
     method: "POST",
     headers: { "content-type": "application/json", cookie },
     body: JSON.stringify({
-      type: "deploy",
-      payload: { conversation_id: conversationId, background: true },
+      type: "generate",
+      payload: {
+        prompt: "persisted request-bound job",
+        conversation_id: conversationId,
+        background: true,
+        modelSettings: { enabled: false },
+      },
     }),
   });
-  assert(job.status === 202, `job create should succeed, got ${job.status}: ${JSON.stringify(job.data)}`);
+  assert(job.status === 200, `public request-bound job should finish before response, got ${job.status}: ${JSON.stringify(job.data)}`);
   jobId = job.data.job?.id || "";
   assert(jobId, "job create should return a job id");
+  assert(job.data.job?.status === "succeeded", `request-bound job should succeed, got ${JSON.stringify(job.data.job)}`);
   const jobs = await getJson(baseUrl, "/api/jobs", cookie);
   assert(jobs.jobs.some(item => item.id === jobId), "created job should be listed before restart");
 
@@ -183,6 +189,7 @@ async function startServer(port, envOverrides = {}) {
       VIBEBOARD_LLM_BASE_URL: "https://api.deepseek.com",
       VIBEBOARD_LLM_MODEL: "deepseek-v4-flash",
       VIBEBOARD_LLM_API_KEY: "test-key",
+      RENDER_RUNNER_REQUIRED: "false",
       ...envOverrides,
     }),
     stdio: "ignore",

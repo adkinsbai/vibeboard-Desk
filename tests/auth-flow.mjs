@@ -72,10 +72,15 @@ await withServer(async ({ baseUrl }) => {
       payload: {
         prompt: "should not start",
         conversation_id: conversation.id,
+        modelSettings: { enabled: false },
       },
     }),
   });
-  assert(acceptedJob.status === 202, "free public beta should allow AI jobs even with zero credits");
+  assert(acceptedJob.status === 200, `public /api/jobs should run request-bound jobs, got ${acceptedJob.status}`);
+  assert(acceptedJob.data.job?.status === "succeeded", `public /api/jobs should return a final job, got ${JSON.stringify(acceptedJob.data.job)}`);
+  assert(acceptedJob.data.job?.output?.ok === true, "free public beta should allow AI jobs even with zero credits");
+  const persistedJob = await getJson(baseUrl, `/api/jobs/${encodeURIComponent(acceptedJob.data.job.id)}`, cookie);
+  assert(persistedJob.job?.status === "succeeded", "request-bound public job should persist its final status");
 }, {
   dbPrefix: "auth-flow",
   env: {
@@ -87,6 +92,7 @@ await withServer(async ({ baseUrl }) => {
     VIBEBOARD_LLM_BASE_URL: "https://api.deepseek.com",
     VIBEBOARD_LLM_MODEL: "deepseek-v4-flash",
     VIBEBOARD_LLM_API_KEY: "test-key",
+    RENDER_RUNNER_REQUIRED: "false",
   },
   wait: { path: "/api/health" },
 });

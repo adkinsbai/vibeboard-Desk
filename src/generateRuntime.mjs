@@ -925,14 +925,26 @@ export function buildGenerateAgentSettings(
 ) {
   return {
     ...settings,
-    maxIterations: positiveInt(env.VIBEBOARD_AGENT_MAX_ITERATIONS, defaults.maxIterations),
-    maxVerificationAttempts: positiveInt(
-      env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS,
+    maxIterations: positiveInt(
+      settings.max_iterations ?? settings.maxIterations ?? env.VIBEBOARD_AGENT_MAX_ITERATIONS,
+      defaults.maxIterations,
+    ),
+    maxVerificationAttempts: nonNegativeInt(
+      settings.max_verification_attempts ?? settings.maxVerificationAttempts ?? env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS,
       defaults.maxVerificationAttempts,
     ),
-    repairAttempts: nonNegativeInt(env.VIBEBOARD_AGENT_REPAIR_ATTEMPTS, defaults.repairAttempts),
-    timeoutMs: positiveInt(env.VIBEBOARD_AGENT_TIMEOUT_MS, defaults.timeoutMs),
-    llmTimeoutMs: positiveInt(env.VIBEBOARD_AGENT_LLM_TIMEOUT_MS, defaults.llmTimeoutMs),
+    repairAttempts: nonNegativeInt(
+      settings.repair_attempts ?? settings.repairAttempts ?? env.VIBEBOARD_AGENT_REPAIR_ATTEMPTS,
+      defaults.repairAttempts,
+    ),
+    timeoutMs: positiveInt(
+      settings.timeout_ms ?? settings.timeoutMs ?? env.VIBEBOARD_AGENT_TIMEOUT_MS,
+      defaults.timeoutMs,
+    ),
+    llmTimeoutMs: positiveInt(
+      settings.llm_timeout_ms ?? settings.llmTimeoutMs ?? env.VIBEBOARD_AGENT_LLM_TIMEOUT_MS,
+      defaults.llmTimeoutMs,
+    ),
   };
 }
 

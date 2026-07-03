@@ -1152,6 +1152,22 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
     }
   }
 
+  const finalFiles = getFileStore();
+  const finalIssues = getCompletionIssues(finalFiles);
+  if (finalIssues.length === 0) {
+    const fallbackSummary = `Accepted complete files after reaching max iterations (${maxIterations}) before explicit done.`;
+    whatWorked.push("All required files were generated before the iteration budget ended.");
+    return {
+      success: true,
+      summary: summary || fallbackSummary,
+      actions,
+      files: finalFiles,
+      whatWorked,
+      whatFailed,
+      lessons: sessionLessons,
+    };
+  }
+
   return {
     success: false,
     summary: summary || `达到最大迭代次数（${maxIterations}），未确认完成`,
