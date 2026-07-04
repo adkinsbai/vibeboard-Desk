@@ -136,17 +136,25 @@ await test("postgres ProjectPersistence initializes first-class project tables",
   assert(schema.includes("idx_jobs_conversation_created"), "schema should index jobs by conversation");
 });
 
-function createRecordingPg() {
+function createRecordingPg(options = {}) {
+  const conversationsById = options.conversationsById || {};
+  const projectMemoryByConversationId = options.projectMemoryByConversationId || {};
   const calls = [];
   const pg = async (strings, ...values) => {
     const text = strings.join("?");
     calls.push({ text, values });
-    if (/SELECT \* FROM conversations WHERE id/.test(text)) return [];
+    if (/SELECT \* FROM conversations WHERE id/.test(text)) {
+      const row = conversationsById[String(values[0] || "")];
+      return row ? [row] : [];
+    }
     if (/SELECT \* FROM conversations/.test(text)) return [];
     if (/SELECT filename, content, build_id FROM conversation_files/.test(text)) return [];
     if (/SELECT \* FROM jobs WHERE id/.test(text)) return [];
     if (/SELECT \* FROM jobs/.test(text)) return [];
-    if (/SELECT memory_json FROM project_memory/.test(text)) return [];
+    if (/SELECT memory_json FROM project_memory/.test(text)) {
+      const row = projectMemoryByConversationId[String(values[0] || "")];
+      return row ? [row] : [];
+    }
     return [];
   };
   pg.calls = calls;
@@ -292,6 +300,39 @@ await test("postgres ProjectPersistence legacy migration uses conflict-safe chil
   assert(text.includes("ON CONFLICT DO NOTHING"), "migration child inserts should be conflict-safe");
   assert(text.includes("INSERT INTO messages"), "migration should insert messages directly");
   assert(text.includes("INSERT INTO conversation_files"), "migration should insert files directly");
+});
+
+await test("postgres ProjectPersistence legacy migration imports missing project memory without touching conversation timestamps", async () => {
+  const legacyDb = new SQL.Database();
+  const legacy = createSqliteProjectPersistence({ sqliteDb: legacyDb, saveSqlite: () => {} });
+  await legacy.initSchema();
+  await legacy.createConversation("conv-pg-existing-memory", "Legacy PG", { userId: "user-pg" });
+  await legacy.setProjectMemory("conv-pg-existing-memory", {
+    summary: "legacy summary",
+    goal: "legacy goal",
+    requirements: ["legacy requirement"],
+  });
+
+  const pg = createRecordingPg({
+    conversationsById: {
+      "conv-pg-existing-memory": {
+        id: "conv-pg-existing-memory",
+        title: "Current PG",
+        user_id: "user-pg",
+        project_dir: "",
+        created_at: "2026-07-04T01:00:00.000Z",
+        updated_at: "2026-07-04T02:00:00.000Z",
+      },
+    },
+  });
+  const persistence = createPostgresProjectPersistence({ pg });
+  await persistence.initSchema();
+  await persistence.migrateLegacySqliteSnapshot(Buffer.from(legacyDb.export()));
+
+  const conversationUpdates = pg.calls.filter(call => /UPDATE conversations SET/.test(call.text));
+  const memoryInserts = pg.calls.filter(call => /INSERT INTO project_memory/.test(call.text));
+  assert(memoryInserts.length === 1, "migration should insert missing project memory");
+  assert(conversationUpdates.length === 0, "legacy memory import must not update conversations.updated_at");
 });
 
 await test("ProjectPersistence legacy migration imports missing rows without overwriting newer rows", async () => {

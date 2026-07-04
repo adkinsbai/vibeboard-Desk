@@ -95,7 +95,11 @@ async function migrateLegacySqliteSnapshotInto(target, buffer) {
       if (isDefaultProjectMemory(targetMemory)) {
         const legacyMemory = parseProjectMemoryRow(memoryRow);
         if (!isDefaultProjectMemory(legacyMemory)) {
-          await target.setProjectMemory(conversationId, legacyMemory);
+          if (typeof target.importLegacyProjectMemory === "function") {
+            await target.importLegacyProjectMemory(conversationId, legacyMemory);
+          } else {
+            await target.setProjectMemory(conversationId, legacyMemory);
+          }
         }
       }
     }
@@ -603,6 +607,16 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         SET memory_json = ${serialized}, updated_at = now()
       `;
       await pg`UPDATE conversations SET updated_at = now() WHERE id = ${conversationId}`;
+      return normalized;
+    },
+    async importLegacyProjectMemory(conversationId, memory = {}) {
+      const normalized = normalizeProjectMemory(memory);
+      const serialized = jsonString(normalized, defaultProjectMemory());
+      await pg`
+        INSERT INTO project_memory (conversation_id, memory_json, updated_at)
+        VALUES (${conversationId}, ${serialized}, now())
+        ON CONFLICT DO NOTHING
+      `;
       return normalized;
     },
 
