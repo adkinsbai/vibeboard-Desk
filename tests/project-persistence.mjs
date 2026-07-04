@@ -69,6 +69,54 @@ await test("sqlite ProjectPersistence preserves conversations, files, memory, an
   assert(done.completed_at, "final job should have completed_at");
 });
 
+await test("file ProjectPersistence keeps writes from two independent instances", async () => {
+  const filePath = fileURLToPath(new URL(`runtime/project-persistence-${Date.now()}-${Math.random()}.json`, new URL("..", import.meta.url)));
+  const a = createFileProjectPersistence({ filePath });
+  const b = createFileProjectPersistence({ filePath });
+  await a.initSchema();
+  await b.initSchema();
+
+  await a.createConversation("conv-a", "A", { userId: "user-a" });
+  await a.saveConversationFiles("conv-a", "build-a", {
+    "index.html": "<!doctype html>",
+    "style.css": "body{}",
+    "app.js": "console.log('a')",
+    "hardware_app.py": "print('a')",
+    "manifest.json": JSON.stringify({ id: "build-a", files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+  });
+  const job = await b.createJob({
+    type: "generate",
+    conversationId: "conv-a",
+    title: "Generate A",
+    input: { user_id: "user-a", prompt: "A" },
+  });
+  await b.transition(job.id, { status: "succeeded", phase: "done", output: { ok: true, id: "build-a" } });
+
+  const filesFromB = await b.loadConversationFiles("conv-a");
+  const jobsFromA = await a.listJobs({ conversationId: "conv-a" });
+  const conversationsFromB = await b.listConversations({ userId: "user-a" });
+
+  assert(filesFromB.files["app.js"] === "console.log('a')", "instance B should read files from instance A");
+  assert(jobsFromA.some(item => item.id === job.id), "instance A should read job from instance B");
+  assert(conversationsFromB.some(item => item.id === "conv-a"), "conversation should survive both writers");
+});
+
+await test("file ProjectPersistence does not overwrite newer rows with stale writers", async () => {
+  const filePath = fileURLToPath(new URL(`runtime/project-persistence-stale-${Date.now()}-${Math.random()}.json`, new URL("..", import.meta.url)));
+  const stale = createFileProjectPersistence({ filePath });
+  const fresh = createFileProjectPersistence({ filePath });
+  await stale.initSchema();
+  await fresh.initSchema();
+
+  await fresh.createConversation("conv-fresh", "Fresh", { userId: "user-a" });
+  await stale.createConversation("conv-stale", "Stale", { userId: "user-a" });
+
+  const listed = await fresh.listConversations({ userId: "user-a" });
+  const ids = listed.map(item => item.id).sort();
+  assert(ids.includes("conv-fresh"), "fresh conversation should remain after stale writer saves");
+  assert(ids.includes("conv-stale"), "stale writer conversation should also be saved");
+});
+
 async function test(name, fn) {
   try {
     await fn();
