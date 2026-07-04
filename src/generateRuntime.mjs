@@ -660,6 +660,16 @@ export function createGenerateRuntime(deps = {}) {
         conversationId,
         error: saveErr.message,
       });
+      const error = createStructuredError(
+        "Generated files were created, but project data could not be saved. Please retry.",
+        "storage_failed",
+        {
+          statusCode: saveErr.statusCode || 503,
+          cause: saveErr,
+          technicalDetail: saveErr.message || "conversation snapshot save failed",
+        },
+      );
+      throw error;
     }
   }
 
