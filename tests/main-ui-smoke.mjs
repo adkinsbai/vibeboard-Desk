@@ -30,6 +30,48 @@ await withServer(async ({ baseUrl, json }) => {
             headers: { "content-type": "application/json" }
           }));
         }
+        if (url.includes("/api/generate") && method === "POST") {
+          window.__vibeboardTestEvents.push({ type: "generate-post" });
+          return Promise.resolve(new Response(JSON.stringify({
+            ok: true,
+            job: {
+              id: "job-final-immediate",
+              type: "generate",
+              status: "succeeded",
+              phase: "done",
+              input: { prompt: "Immediate final job" },
+              output: {
+                ok: true,
+                id: "vb-ui-final",
+                agentSummary: "Immediate final job restored without polling",
+                files: {
+                  "index.html": "<!doctype html><html><head><link rel=\"stylesheet\" href=\"style.css\"></head><body><main id=\"app\">Immediate final job</main><script src=\"app.js\"></script></body></html>",
+                  "style.css": "body{margin:0;background:#000;color:#fff;font:24px sans-serif}",
+                  "app.js": "document.getElementById('app').dataset.ready='true';",
+                  "hardware_app.py": "print('{\"build_id\":\"vb-ui-final\",\"runtime\":\"executed_on_board\",\"available_apis\":[\"/api/status\",\"./hardware-result.json\"]}')",
+                  "manifest.json": "{\"id\":\"vb-ui-final\",\"files\":[\"index.html\",\"style.css\",\"app.js\",\"hardware_app.py\",\"manifest.json\"]}"
+                },
+                buildEvidence: { ok: true, summary: "stubbed verification", evidence: {} },
+                evidence: [],
+                verification: { ok: true }
+              },
+              choices: [{ label: "Open result", action: "open_result" }]
+            }
+          }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }));
+        }
+        if (url.includes("/api/jobs/job-final-immediate") && method === "GET") {
+          window.__vibeboardTestEvents.push({ type: "job-detail-get" });
+          return Promise.resolve(new Response(JSON.stringify({
+            ok: false,
+            error: "Job not found"
+          }), {
+            status: 404,
+            headers: { "content-type": "application/json" }
+          }));
+        }
         if (url.includes("/api/jobs") && method === "GET") {
           return Promise.resolve(new Response(JSON.stringify({
             ok: true,
@@ -237,6 +279,18 @@ await withServer(async ({ baseUrl, json }) => {
     assert(propertiesText.includes("ui-smoke.png") && propertiesText.includes("image/png"), "asset properties should show file name and MIME type");
     await page.locator("#closeAssetPropertiesModal").click();
     await page.waitForFunction(() => !document.querySelector("#assetPropertiesModal")?.classList.contains("open"));
+
+    await page.evaluate(async () => {
+      window.__vibeboardTestEvents = [];
+      await window.runFlow("Immediate final job", [], "");
+    });
+    const finalJobEvents = await page.evaluate(() => window.__vibeboardTestEvents || []);
+    const lastBuildState = await page.locator("#lastBuildState").textContent();
+    const codePreviewText = await page.locator("#codePreview").textContent();
+    assert(finalJobEvents.some(item => item.type === "generate-post"), "runFlow should start generation through /api/generate");
+    assert(!finalJobEvents.some(item => item.type === "job-detail-get"), "runFlow should not poll a request-bound final job after /api/generate already returned it");
+    assert(lastBuildState === "vb-ui-final", `request-bound final job should restore the generated build, got ${lastBuildState}`);
+    assert(codePreviewText.includes("Immediate final job"), "request-bound final job should render generated files");
 
     await page.evaluate(() => window.setBusy(false));
     await page.locator("#promptInput").fill("Enter should submit from the main composer");

@@ -2388,18 +2388,21 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
       background: true,
       ...overrides,
     }, { timeout: GENERATION_START_TIMEOUT_MS });
-    const jobId = started.job?.id;
+    const initialJob = started.job;
+    const jobId = initialJob?.id;
     if (!jobId) throw new Error("Background generation job was not created.");
-    progress.log(`Background job queued: ${jobId}`);
+    progress.log(isFinalJob(initialJob) ? `Background job completed: ${jobId}` : `Background job queued: ${jobId}`);
     setJobDrawer(true);
-    const finishedJob = await waitForJob(jobId, {
-      onUpdate(job) {
-        if (!job) return;
-        const phase = job.phase || job.status || "running";
-        progress.set("generate", job.status === "queued" ? "active" : "active", phase, { silent: true });
-      },
-      timeout: 900000,
-    });
+    const finishedJob = isFinalJob(initialJob)
+      ? initialJob
+      : await waitForJob(jobId, {
+        onUpdate(job) {
+          if (!job) return;
+          const phase = job.phase || job.status || "running";
+          progress.set("generate", job.status === "queued" ? "active" : "active", phase, { silent: true });
+        },
+        timeout: 900000,
+      });
     if (finishedJob.status !== "succeeded") {
       const error = new Error(finishedJob.error?.error || finishedJob.error?.errorLabel || "Generation job failed.");
       error.data = finishedJob.error || { errorType: "unknown" };
