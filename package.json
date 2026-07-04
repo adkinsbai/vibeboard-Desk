@@ -14,6 +14,7 @@
     "smoke:generation": "node scripts/smoke-generation-flows.mjs",
     "verify:ui": "node tests/portal-smoke.mjs && node tests/admin-telemetry-ui.mjs && node tests/main-ui-smoke.mjs && node tests/digital-life-ui-smoke.mjs",
     "verify:public": "node scripts/verify-public-e2e.mjs",
+    "verify:persistence": "node tests/project-persistence.mjs",
     "verify:all": "npm run check && npm run verify:auth && npm run verify:agent && npm run verify:offline && npm run verify:digital-life && npm run verify:ui"
   },
   "dependencies": {
