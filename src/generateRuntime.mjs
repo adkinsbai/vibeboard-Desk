@@ -98,7 +98,7 @@ export function createGenerateRuntime(deps = {}) {
       const agentMode = normalizeAgentMode(body.agent_mode || body.agentMode);
       const conversationId = String(body.conversation_id || "").trim();
       const projectMemory = conversationId
-        ? conversationStore.getProjectMemory(conversationId)
+        ? await conversationStore.getProjectMemory(conversationId)
         : normalizeProjectMemory();
       const assetContext = conversationId && assetLibraryStore?.promptContext
         ? assetLibraryStore.promptContext(conversationId)
@@ -108,7 +108,7 @@ export function createGenerateRuntime(deps = {}) {
         ? assetLibraryStore.generatedAssets(conversationId)
         : emptyEmbeddedAssets();
       const conversationFiles = conversationId
-        ? conversationStore.loadConversationFiles(conversationId).files
+        ? (await conversationStore.loadConversationFiles(conversationId)).files
         : {};
 
       const settings = normalizeModelSettings(modelSettings);
@@ -637,7 +637,7 @@ export function createGenerateRuntime(deps = {}) {
     if (!conversationId) return;
     try {
       const files = await filesWithHardwareResult(state.result.files);
-      conversationStore.saveConversationFiles(
+      await conversationStore.saveConversationFiles(
         conversationId,
         state.result.id,
         files,

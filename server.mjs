@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import initSqlJs from "sql.js";
 import { neon } from "@neondatabase/serverless";
@@ -28,7 +28,8 @@ import {
   mergeMarketApps,
   readStaticMarketCode as readStaticMarketCodeFromDir
 } from "./src/marketCatalog.mjs";
-import { createConversationStore, normalizeProjectMemory } from "./src/conversationStore.mjs";
+import { normalizeProjectMemory } from "./src/conversationStore.mjs";
+import { createProjectPersistence } from "./src/projectPersistence.mjs";
 import { runAgent } from "./src/agent.mjs";
 import { chatCompletionsUrl, normalizeModelSettings } from "./src/modelSettings.mjs";
 import { createMemoryStore } from "./src/memoryStore.mjs";
@@ -39,7 +40,6 @@ import { createDigitalLifeStore } from "./src/digitalLife.mjs";
 import { createDigitalLifeRoutes } from "./src/digitalLifeRoutes.mjs";
 import { createExperienceStore, makePlaybookCandidate } from "./src/experienceStore.mjs";
 import { createPlaybookStore } from "./src/playbookStore.mjs";
-import { createJobStore } from "./src/jobStore.mjs";
 import { createJobRuntime } from "./src/jobRuntime.mjs";
 import { verifyAllLocal } from "./src/verifiers/index.mjs";
 import { classifyError } from "./src/errorClassifier.mjs";
@@ -299,8 +299,14 @@ function run(sql, params = []) {
   saveDb();
 }
 
-const conversationStore = createConversationStore(sqliteDb, saveDb);
-conversationStore.initSchema();
+const projectPersistence = createProjectPersistence({
+  pg,
+  sqliteDb,
+  saveSqlite: saveDb,
+  env: process.env,
+});
+await projectPersistence.initSchema();
+const conversationStore = projectPersistence;
 
 const memoryStore = createMemoryStore(sqliteDb, saveDb);
 memoryStore.initSchema();
@@ -315,9 +321,8 @@ const playbookStore = createPlaybookStore(sqliteDb, saveDb);
 playbookStore.initSchema();
 experienceStore.setPlaybookStore?.(playbookStore);
 
-const jobStore = createJobStore(sqliteDb, saveDb);
-jobStore.initSchema();
-jobStore.markInterruptedRunningJobs();
+const jobStore = projectPersistence;
+await jobStore.markInterruptedRunningJobs();
 
 const assetLibraryStore = createAssetLibraryStore(sqliteDb, saveDb);
 assetLibraryStore.initSchema();
@@ -492,6 +497,7 @@ function isPublicApi(pathname) {
 
 function shouldSyncSqliteSnapshot(pathname) {
   if (!cloudSqliteSnapshot) return false;
+  if (PUBLIC_DEPLOYMENT && !TEST_CLOUD_SQLITE_FILE) return false;
   if (!isPublicApi(pathname)) return true;
   return TEST_CLOUD_SQLITE_FILE && /^\/api\/auth\//.test(pathname);
 }
@@ -581,8 +587,8 @@ function withServerModelSettings(body = {}, options = {}) {
   };
 }
 
-function ensureConversationAccess(conversationId, user) {
-  const conversation = conversationStore.getConversation(conversationId);
+async function ensureConversationAccess(conversationId, user) {
+  const conversation = await conversationStore.getConversation(conversationId);
   if (!conversation) throw httpError(404, "Conversation not found.");
   if (PUBLIC_DEPLOYMENT && user?.role !== "admin" && (!conversation.user_id || conversation.user_id !== user?.id)) {
     throw httpError(403, "Conversation access denied.");
@@ -599,7 +605,7 @@ async function ensureCreditsAvailable(user) {
   return credits;
 }
 
-function ensureJobAccess(job, user) {
+async function ensureJobAccess(job, user) {
   if (!job) throw httpError(404, "Job not found");
   if (PUBLIC_DEPLOYMENT && user?.role !== "admin" && String(job.input?.user_id || "") !== user?.id) {
     throw httpError(403, "Job access denied.");
@@ -662,8 +668,8 @@ function responseContentType(filename) {
 
 const CONVERSATION_PREVIEW_FILE_NAMES = [...HARDWARE_APP_CONTRACT.snapshotFiles];
 
-function previewFilesForConversation(conversationId) {
-  const { buildId, files } = conversationStore.loadConversationFiles(conversationId);
+async function previewFilesForConversation(conversationId) {
+  const { buildId, files } = await conversationStore.loadConversationFiles(conversationId);
   const allowedFiles = new Set([
     ...CONVERSATION_PREVIEW_FILE_NAMES,
     ...declaredAssetPathsFromFiles(files),
@@ -2663,11 +2669,11 @@ const marketRuntime = createMarketRuntime({
 async function createMarketPreviewProject({ title, files = {}, appId = "", source = "", body = {} } = {}) {
   const requestUser = body.requestUser || null;
   const projectTitle = String(title || "Market Preview").trim() || "Market Preview";
-  const conversation = conversationStore.createConversation(undefined, projectTitle, { userId: requestUser?.id || "" });
+  const conversation = await conversationStore.createConversation(randomUUID(), projectTitle, { userId: requestUser?.id || "" });
   const project = await projectWorkspace.ensureProject(conversation.id, projectTitle);
   const buildId = `market-preview-${String(appId || conversation.id).slice(0, 24)}-${Date.now().toString(36)}`;
-  conversationStore.saveConversationFiles(conversation.id, buildId, files);
-  conversationStore.appendMessage(conversation.id, {
+  await conversationStore.saveConversationFiles(conversation.id, buildId, files);
+  await conversationStore.appendMessage(conversation.id, {
     role: "agent",
     content: `已从应用市场载入「${projectTitle}」。你可以先在右侧小屏预览，也可以继续和 Agent 对话修改。`,
     build_id: buildId,
@@ -2738,9 +2744,9 @@ function jobTitle(type, body = {}) {
   return `Agent${prompt ? `: ${prompt.slice(0, 80)}` : ""}`;
 }
 
-function enqueueBackgroundJob(type, body = {}) {
+async function enqueueBackgroundJob(type, body = {}) {
   const input = withoutBackgroundFlags(body || {});
-  return jobRuntime.enqueue(type, input, {
+  return await jobRuntime.enqueue(type, input, {
     conversationId: String(input.conversation_id || ""),
     title: jobTitle(type, input),
   });
@@ -2762,7 +2768,7 @@ const jobRuntime = createJobRuntime({
 });
 
 jobRuntime.register("agent", async (body = {}, ctx) => {
-  ctx.phase("agent", "Agent request is running.");
+  await ctx.phase("agent", "Agent request is running.");
   const result = await runAgentRequest(withServerModelSettings(body || {}));
   const user = body.user_id ? await authStore.userCreditSummary(body.user_id).catch(() => null) : null;
   await chargeAiUsage({ user, body, result, reason: body.action === "confirm_build" ? "agent_build" : "agent" });
@@ -2771,12 +2777,12 @@ jobRuntime.register("agent", async (body = {}, ctx) => {
     buildId: result?.id || result?.build_id || "",
     prompt: body.prompt || body.build_prompt || body.message || "",
   });
-  ctx.phase("done", "Agent request finished.");
+  await ctx.phase("done", "Agent request finished.");
   return result;
 });
 
 jobRuntime.register("generate", async (body = {}, ctx) => {
-  ctx.phase("generate", "Code generation is running.");
+  await ctx.phase("generate", "Code generation is running.");
   const result = await runGenerateRequest(withServerModelSettings(body || {}));
   const user = body.user_id ? await authStore.userCreditSummary(body.user_id).catch(() => null) : null;
   await chargeAiUsage({ user, body, result, reason: "generate" });
@@ -2785,12 +2791,12 @@ jobRuntime.register("generate", async (body = {}, ctx) => {
     buildId: result?.id || "",
     prompt: body.prompt || body.build_prompt || "",
   });
-  ctx.phase("done", "Generation finished.");
+  await ctx.phase("done", "Generation finished.");
   return result;
 });
 
 jobRuntime.register("deploy", async (body = {}, ctx) => {
-  ctx.phase("deploy", "Deploy is running.");
+  await ctx.phase("deploy", "Deploy is running.");
   const result = await runDeployRequest(body || {});
   await writeProjectMemorySafe(body.conversation_id, {
     trigger: "deploy-confirmed",
@@ -2798,11 +2804,11 @@ jobRuntime.register("deploy", async (body = {}, ctx) => {
     prompt: currentBuild?.prompt || "",
     deploy: result,
   });
-  ctx.phase("done", "Deploy finished.");
+  await ctx.phase("done", "Deploy finished.");
   return result;
 });
 
-jobRuntime.resumeQueuedJobs();
+await jobRuntime.resumeQueuedJobs();
 
 async function route(req, res) {
   let url = null;
@@ -3041,7 +3047,7 @@ async function route(req, res) {
     if (req.method === "POST" && url.pathname === "/api/chat") {
       const body = withServerModelSettings(await readBody(req));
       try {
-        if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
+        if (body?.conversation_id) await ensureConversationAccess(body.conversation_id, requestUser);
         await ensureCreditsAvailable(requestUser);
         const result = await runAgentRequest({ ...(body || {}), action: "message" });
         await chargeAiUsage({ user: requestUser, body, result, reason: "chat" });
@@ -3065,7 +3071,7 @@ async function route(req, res) {
 
       const modelSettings = normalizeModelSettings(body.modelSettings || {});
       if (!modelSettings.enabled) { json(res, 200, { ok: true, questions: null, source: "skip" }); return; }
-      if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
+      if (body?.conversation_id) await ensureConversationAccess(body.conversation_id, requestUser);
       await ensureCreditsAvailable(requestUser);
 
       const rawHistory = Array.isArray(body.history) ? body.history : [];
@@ -3131,7 +3137,7 @@ async function route(req, res) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/jobs") {
-      let jobs = jobStore.listJobs({
+      let jobs = await jobStore.listJobs({
         limit: Number(url.searchParams.get("limit") || 50),
         conversationId: url.searchParams.get("conversation_id") || "",
         status: url.searchParams.get("status") || "",
@@ -3142,15 +3148,15 @@ async function route(req, res) {
     }
     if (req.method === "GET" && /^\/api\/jobs\/[^/]+$/.test(url.pathname)) {
       const jobId = decodeURIComponent(url.pathname.split("/")[3] || "");
-      const job = ensureJobAccess(jobStore.getJob(jobId), requestUser);
+      const job = await ensureJobAccess(await jobStore.getJob(jobId), requestUser);
       json(res, 200, { ok: true, job });
       return;
     }
     if (req.method === "POST" && /^\/api\/jobs\/[^/]+\/cancel$/.test(url.pathname)) {
       const jobId = decodeURIComponent(url.pathname.split("/")[3] || "");
       try {
-        ensureJobAccess(jobStore.getJob(jobId), requestUser);
-        const job = jobStore.requestCancel(jobId);
+        await ensureJobAccess(await jobStore.getJob(jobId), requestUser);
+        const job = await jobStore.requestCancel(jobId);
         await flushMutationSaves();
         json(res, 200, { ok: true, job });
       } catch (cancelErr) {
@@ -3166,7 +3172,7 @@ async function route(req, res) {
         return;
       }
       const payload = body?.payload && typeof body.payload === "object" ? body.payload : body;
-      if (payload?.conversation_id) ensureConversationAccess(payload.conversation_id, requestUser);
+      if (payload?.conversation_id) await ensureConversationAccess(payload.conversation_id, requestUser);
       if (type === "agent" || type === "generate") await ensureCreditsAvailable(requestUser);
       const normalizedPayload = type === "generate"
         ? withServerModelSettings(payload || {}, { forceTemplate: PUBLIC_DEPLOYMENT && payload?.agent_full !== true && payload?.agentFull !== true })
@@ -3174,7 +3180,7 @@ async function route(req, res) {
       const jobInput = { ...normalizedPayload, user_id: requestUser?.id || "" };
       const job = PUBLIC_DEPLOYMENT
         ? await runRequestBoundJob(type, jobInput)
-        : enqueueBackgroundJob(type, jobInput);
+        : await enqueueBackgroundJob(type, jobInput);
       await recordProductTelemetry({
         req,
         user: requestUser,
@@ -3191,7 +3197,7 @@ async function route(req, res) {
 
     if (req.method === "POST" && url.pathname === "/api/agent") {
       const body = withServerModelSettings(await readBody(req));
-      if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
+      if (body?.conversation_id) await ensureConversationAccess(body.conversation_id, requestUser);
       await ensureCreditsAvailable(requestUser);
       await recordProductTelemetry({
         req,
@@ -3205,7 +3211,7 @@ async function route(req, res) {
         const jobInput = { ...(body || {}), user_id: requestUser?.id || "" };
         const job = PUBLIC_DEPLOYMENT
           ? await runRequestBoundJob("agent", jobInput)
-          : enqueueBackgroundJob("agent", jobInput);
+          : await enqueueBackgroundJob("agent", jobInput);
         await recordProductTelemetry({
           req,
           user: requestUser,
@@ -3270,13 +3276,13 @@ async function route(req, res) {
         body = withServerModelSettings(rawBody, {
           forceTemplate: PUBLIC_DEPLOYMENT && rawBody?.agent_full !== true && rawBody?.agentFull !== true,
         });
-        if (body?.conversation_id) ensureConversationAccess(body.conversation_id, requestUser);
+        if (body?.conversation_id) await ensureConversationAccess(body.conversation_id, requestUser);
         await ensureCreditsAvailable(requestUser);
         if (wantsBackgroundJob(body || {})) {
           const jobInput = { ...(body || {}), user_id: requestUser?.id || "" };
           const job = PUBLIC_DEPLOYMENT
             ? await runRequestBoundJob("generate", jobInput)
-            : enqueueBackgroundJob("generate", jobInput);
+            : await enqueueBackgroundJob("generate", jobInput);
           await recordProductTelemetry({
             req,
             user: requestUser,
@@ -3357,7 +3363,7 @@ async function route(req, res) {
       try {
         const body = await readBody(req);
         if (wantsBackgroundJob(body || {})) {
-          const job = enqueueBackgroundJob("deploy", body || {});
+          const job = await enqueueBackgroundJob("deploy", body || {});
           await flushMutationSaves();
           json(res, 202, { ok: true, job });
           return;
@@ -3390,14 +3396,14 @@ async function route(req, res) {
 
     // Conversation APIs
     if (req.method === "GET" && url.pathname === "/api/conversations") {
-      const conversations = conversationStore.listConversations({ userId: requestUser?.id || "" });
+      const conversations = await conversationStore.listConversations({ userId: requestUser?.id || "" });
       json(res, 200, { ok: true, conversations });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/conversations") {
       const body = await readBody(req).catch(() => ({}));
       const title = String(body?.title || "New Project").trim() || "New Project";
-      const conversation = conversationStore.createConversation(undefined, title, { userId: requestUser?.id || "" });
+      const conversation = await conversationStore.createConversation(randomUUID(), title, { userId: requestUser?.id || "" });
       const project = await projectWorkspace.ensureProject(conversation.id, title);
       await writeProjectMemorySafe(conversation.id, { trigger: "project-created" });
       await recordProductTelemetry({
@@ -3429,9 +3435,9 @@ async function route(req, res) {
       const parts = url.pathname.split("/");
       const convId = parts[3];
       if (convId && !parts[4]) {
-        ensureConversationAccess(convId, requestUser);
+        await ensureConversationAccess(convId, requestUser);
         assetLibraryStore.deleteConversationAssets(convId);
-        conversationStore.deleteConversation(convId);
+        await conversationStore.deleteConversation(convId);
         await flushMutationSaves();
         json(res, 200, { ok: true });
       } else {
@@ -3441,16 +3447,16 @@ async function route(req, res) {
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/messages")) {
       const convId = url.pathname.split("/")[3];
-      ensureConversationAccess(convId, requestUser);
-      const messages = conversationStore.listMessages(convId);
+      await ensureConversationAccess(convId, requestUser);
+      const messages = await conversationStore.listMessages(convId);
       json(res, 200, { ok: true, messages });
       return;
     }
     // Load saved files for a conversation (for state restoration)
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/files")) {
       const convId = url.pathname.split("/")[3];
-      ensureConversationAccess(convId, requestUser);
-      const { buildId, files } = conversationStore.loadConversationFiles(convId);
+      await ensureConversationAccess(convId, requestUser);
+      const { buildId, files } = await conversationStore.loadConversationFiles(convId);
       json(res, 200, { ok: true, buildId, files });
       return;
     }
@@ -3460,8 +3466,8 @@ async function route(req, res) {
         json(res, 400, { ok: false, error: resolved?.error || "Invalid preview path" });
         return;
       }
-      ensureConversationAccess(resolved.conversationId, requestUser);
-      const { buildId, files } = previewFilesForConversation(resolved.conversationId);
+      await ensureConversationAccess(resolved.conversationId, requestUser);
+      const { buildId, files } = await previewFilesForConversation(resolved.conversationId);
       if (!Object.keys(files).length || !(resolved.filename in files)) {
         res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
         res.end("Conversation preview not found");
@@ -3483,26 +3489,26 @@ async function route(req, res) {
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/memory")) {
       const convId = url.pathname.split("/")[3];
-      ensureConversationAccess(convId, requestUser);
-      json(res, 200, { ok: true, project_memory: conversationStore.getProjectMemory(convId) });
+      await ensureConversationAccess(convId, requestUser);
+      json(res, 200, { ok: true, project_memory: await conversationStore.getProjectMemory(convId) });
       return;
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/project-files")) {
       const convId = url.pathname.split("/")[3];
-      ensureConversationAccess(convId, requestUser);
-      const existingConversation = conversationStore.getConversation(convId);
+      await ensureConversationAccess(convId, requestUser);
+      const existingConversation = await conversationStore.getConversation(convId);
       if (existingConversation) {
         await projectWorkspace.ensureProject(convId, existingConversation.title || "New Project");
         await flushMutationSaves();
       }
       const files = await projectWorkspace.listProjectFiles(convId);
-      const conversation = conversationStore.getConversation(convId);
+      const conversation = await conversationStore.getConversation(convId);
       json(res, 200, { ok: true, project_dir: conversation?.project_dir || "", files });
       return;
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/project-file")) {
       const convId = url.pathname.split("/")[3];
-      ensureConversationAccess(convId, requestUser);
+      await ensureConversationAccess(convId, requestUser);
       const relativePath = url.searchParams.get("path") || "";
       const file = await projectWorkspace.readProjectFile(convId, relativePath);
       if (!file) {
@@ -3514,7 +3520,7 @@ async function route(req, res) {
     }
     if (url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/assets")) {
       const convId = url.pathname.split("/")[3];
-      ensureConversationAccess(convId, requestUser);
+      await ensureConversationAccess(convId, requestUser);
       if (req.method === "GET") {
         assetLibraryStore.ensureDefaultFolders(convId);
         json(res, 200, {
@@ -3528,7 +3534,7 @@ async function route(req, res) {
       if (req.method === "POST") {
         try {
           const body = await readBody(req, { limitBytes: 64 * 1024 * 1024 });
-          await projectWorkspace.ensureProject(convId, conversationStore.getConversation(convId)?.title || "New Project");
+          await projectWorkspace.ensureProject(convId, (await conversationStore.getConversation(convId))?.title || "New Project");
           assetLibraryStore.ensureDefaultFolders(convId);
           const result = assetLibraryStore.addAssets(convId, Array.isArray(body.assets) ? body.assets : [], {
             folderId: body.folder_id || body.folderId || "",
@@ -3555,7 +3561,7 @@ async function route(req, res) {
     }
     if (url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/asset-folders")) {
       const convId = url.pathname.split("/")[3];
-      ensureConversationAccess(convId, requestUser);
+      await ensureConversationAccess(convId, requestUser);
       if (req.method === "GET") {
         json(res, 200, { ok: true, folders: assetLibraryStore.ensureDefaultFolders(convId) });
         return;
@@ -3573,7 +3579,7 @@ async function route(req, res) {
       const parts = url.pathname.split("/");
       const convId = parts[3];
       const folderId = decodeURIComponent(parts[5] || "");
-      ensureConversationAccess(convId, requestUser);
+      await ensureConversationAccess(convId, requestUser);
       try {
         if (req.method === "PATCH") {
           const body = await readBody(req).catch(() => ({}));
@@ -3608,7 +3614,7 @@ async function route(req, res) {
       const parts = url.pathname.split("/");
       const convId = parts[3];
       const assetId = decodeURIComponent(parts[5] || "");
-      ensureConversationAccess(convId, requestUser);
+      await ensureConversationAccess(convId, requestUser);
       const body = await readBody(req).catch(() => ({}));
       let current = assetLibraryStore.getAsset(convId, assetId);
       if (!current) {
@@ -3634,7 +3640,7 @@ async function route(req, res) {
       const parts = url.pathname.split("/");
       const convId = parts[3];
       const assetId = decodeURIComponent(parts[5] || "");
-      ensureConversationAccess(convId, requestUser);
+      await ensureConversationAccess(convId, requestUser);
       assetLibraryStore.deleteAsset(convId, assetId);
       await flushMutationSaves();
       json(res, 200, { ok: true });
@@ -3642,18 +3648,18 @@ async function route(req, res) {
     }
     if (req.method === "POST" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/messages")) {
       const convId = url.pathname.split("/")[3];
-      ensureConversationAccess(convId, requestUser);
+      await ensureConversationAccess(convId, requestUser);
       const body = await readBody(req);
-      conversationStore.appendMessage(convId, body);
+      await conversationStore.appendMessage(convId, body);
       await flushMutationSaves();
       json(res, 200, { ok: true });
       return;
     }
     if (req.method === "DELETE" && url.pathname.startsWith("/api/conversations/")) {
       const convId = url.pathname.split("/")[3];
-      ensureConversationAccess(convId, requestUser);
+      await ensureConversationAccess(convId, requestUser);
       assetLibraryStore.deleteConversationAssets(convId);
-      conversationStore.deleteConversation(convId);
+      await conversationStore.deleteConversation(convId);
       await flushMutationSaves();
       json(res, 200, { ok: true });
       return;

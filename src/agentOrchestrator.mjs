@@ -25,7 +25,7 @@ export function createAgentOrchestrator({
     const conversationId = String(body.conversation_id || "").trim();
     const modelSettings = normalizeModelSettings(body.modelSettings || {});
     const projectMemory = conversationId
-      ? conversationStore.getProjectMemory(conversationId)
+      ? await conversationStore.getProjectMemory(conversationId)
       : normalizeProjectMemory();
     const assetContext = conversationId && assetLibraryStore?.promptContext
       ? assetLibraryStore.promptContext(conversationId)
@@ -56,7 +56,7 @@ export function createAgentOrchestrator({
               bridge: codexBridge,
             });
             if (conversationId && plan.project_memory) {
-              conversationStore.setProjectMemory(conversationId, plan.project_memory);
+              await conversationStore.setProjectMemory(conversationId, plan.project_memory);
             }
             return plan;
           }
@@ -109,9 +109,9 @@ export function createAgentOrchestrator({
               assetContext,
               agentMode,
               scopedFetch
-            );
+          );
           if (conversationId && plan.project_memory) {
-            conversationStore.setProjectMemory(conversationId, plan.project_memory);
+            await conversationStore.setProjectMemory(conversationId, plan.project_memory);
           }
           return plan;
         } finally {
