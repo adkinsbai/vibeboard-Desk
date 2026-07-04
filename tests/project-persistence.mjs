@@ -267,6 +267,63 @@ await test("postgres ProjectPersistence filters loaded conversation files", asyn
   assert(!loaded.files["chat pollution"], "undeclared file rows should be filtered");
 });
 
+await test("ProjectPersistence legacy migration imports missing rows without overwriting newer rows", async () => {
+  const legacyDb = new SQL.Database();
+  const legacy = createSqliteProjectPersistence({ sqliteDb: legacyDb, saveSqlite: () => {} });
+  await legacy.initSchema();
+  await legacy.createConversation("conv-legacy", "Legacy", { userId: "user-a" });
+  await legacy.saveConversationFiles("conv-legacy", "build-legacy", {
+    "index.html": "<!doctype html>",
+    "style.css": "body{}",
+    "app.js": "console.log('legacy')",
+    "hardware_app.py": "print('legacy')",
+    "manifest.json": JSON.stringify({ id: "build-legacy", files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+  });
+  const legacyBuffer = Buffer.from(legacyDb.export());
+
+  const filePath = fileURLToPath(new URL(`runtime/project-persistence-migrate-${Date.now()}-${Math.random()}.json`, new URL("..", import.meta.url)));
+  const target = createFileProjectPersistence({ filePath });
+  await target.initSchema();
+  await target.createConversation("conv-new", "New", { userId: "user-a" });
+
+  await target.migrateLegacySqliteSnapshot(legacyBuffer);
+  await target.migrateLegacySqliteSnapshot(legacyBuffer);
+
+  const listed = await target.listConversations({ userId: "user-a" });
+  const files = await target.loadConversationFiles("conv-legacy");
+  const ids = listed.map(item => item.id);
+  assert(ids.includes("conv-legacy"), "legacy conversation should be imported");
+  assert(ids.includes("conv-new"), "new conversation should not be overwritten");
+  assert(files.files["app.js"] === "console.log('legacy')", "legacy files should be imported");
+});
+
+await test("ProjectPersistence legacy migration imports all legacy jobs", async () => {
+  const legacyDb = new SQL.Database();
+  const legacy = createSqliteProjectPersistence({ sqliteDb: legacyDb, saveSqlite: () => {} });
+  await legacy.initSchema();
+  await legacy.createConversation("conv-jobs", "Jobs", { userId: "user-a" });
+  const expectedIds = [];
+  for (let index = 0; index < 205; index += 1) {
+    const job = await legacy.createJob({
+      type: "generate",
+      conversationId: "conv-jobs",
+      title: `Legacy job ${index}`,
+      input: { index },
+    });
+    expectedIds.push(job.id);
+  }
+  const legacyBuffer = Buffer.from(legacyDb.export());
+
+  const filePath = fileURLToPath(new URL(`runtime/project-persistence-migrate-jobs-${Date.now()}-${Math.random()}.json`, new URL("..", import.meta.url)));
+  const target = createFileProjectPersistence({ filePath });
+  await target.initSchema();
+
+  await target.migrateLegacySqliteSnapshot(legacyBuffer);
+
+  const imported = await Promise.all(expectedIds.map(id => target.getJob(id)));
+  assert(imported.every(Boolean), "migration should import jobs beyond the first listing page");
+});
+
 async function test(name, fn) {
   try {
     await fn();

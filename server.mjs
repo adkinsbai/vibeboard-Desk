@@ -306,6 +306,17 @@ const projectPersistence = createProjectPersistence({
   env: process.env,
 });
 await projectPersistence.initSchema();
+if (PUBLIC_DEPLOYMENT && !TEST_CLOUD_SQLITE_FILE && cloudSqliteSnapshot && typeof projectPersistence.migrateLegacySqliteSnapshot === "function") {
+  const legacyBuffer = await cloudSqliteSnapshot.load().catch((error) => {
+    console.warn("[db] legacy sqlite snapshot migration load failed:", error.message);
+    return null;
+  });
+  if (legacyBuffer?.length) {
+    await projectPersistence.migrateLegacySqliteSnapshot(legacyBuffer).catch((error) => {
+      console.warn("[db] legacy sqlite snapshot migration failed:", error.message);
+    });
+  }
+}
 const conversationStore = projectPersistence;
 
 const memoryStore = createMemoryStore(sqliteDb, saveDb);

@@ -83,9 +83,9 @@ Tencent Cloud SMS notes:
 
 ## Storage Model
 
-Vercel Functions have a read-only filesystem and only `/tmp` is writable scratch space. In public deployment, auth and credits use Postgres tables directly. The existing SQLite-backed project/conversation/job stores are also snapshotted into Neon through `sqlite_snapshots`, keyed by `VIBEBOARD_DB_SNAPSHOT_KEY`, so public state survives function restarts.
+Vercel Functions have a read-only filesystem and only `/tmp` is writable scratch space. In public deployment, auth, credits, telemetry, conversations, generated files, project memory, and jobs use Postgres tables through server-side adapters.
 
-This snapshot bridge is a production bootstrap. For higher concurrency, migrate the remaining stores into first-class Postgres tables or a worker service.
+The older `sqlite_snapshots` table is retained only as a legacy migration source for project state that existed before the Postgres project-persistence migration. New production project-state writes do not update the SQLite snapshot blob.
 
 ## Python Runner
 

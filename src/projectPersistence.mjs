@@ -30,7 +30,108 @@ export function createSqliteProjectPersistence({ sqliteDb, saveSqlite = () => {}
   if (!sqliteDb) throw new Error("sqlite db is required");
   const conversationStore = createConversationStore(sqliteDb, saveSqlite);
   const jobStore = createJobStore(sqliteDb, saveSqlite, jobOptions);
-  return wrapStores(conversationStore, jobStore);
+  const persistence = wrapStores(conversationStore, jobStore);
+  persistence._sqliteDb = sqliteDb;
+  return persistence;
+}
+
+export async function readLegacySqliteSnapshot(buffer) {
+  if (!buffer?.length) return null;
+  const initSqlJs = (await import("sql.js")).default;
+  const SQL = await initSqlJs();
+  const db = new SQL.Database(buffer);
+  const legacy = createSqliteProjectPersistence({ sqliteDb: db, saveSqlite: () => {} });
+  await legacy.initSchema();
+  return legacy;
+}
+
+async function migrateLegacySqliteSnapshotInto(target, buffer) {
+  const legacy = await readLegacySqliteSnapshot(buffer);
+  if (!legacy) return;
+
+  const conversations = await legacy.listConversations();
+  for (const conversation of conversations) {
+    const conversationId = conversation.id;
+    if (!conversationId) continue;
+
+    const existingConversation = await target.getConversation(conversationId);
+    const targetTitle = existingConversation?.title || conversation.title || "New App";
+    const targetProjectDir = existingConversation?.project_dir || conversation.project_dir || "";
+    if (!existingConversation) {
+      await target.createConversation(conversationId, conversation.title || "New App", {
+        userId: conversation.user_id || "",
+        projectDir: conversation.project_dir || "",
+      });
+    }
+
+    if ((await target.listMessages(conversationId)).length === 0) {
+      const messages = await legacy.listMessages(conversationId);
+      for (const message of messages) {
+        await target.appendMessage(conversationId, message);
+      }
+      if (messages.length && typeof target.updateConversation === "function") {
+        await target.updateConversation(conversationId, { title: targetTitle, projectDir: targetProjectDir });
+      }
+    }
+
+    const targetFiles = await target.loadConversationFiles(conversationId);
+    if (Object.keys(targetFiles?.files || {}).length === 0) {
+      const legacyFiles = await legacy.loadConversationFiles(conversationId);
+      if (Object.keys(legacyFiles?.files || {}).length) {
+        await target.saveConversationFiles(conversationId, legacyFiles.buildId || "", legacyFiles.files);
+      }
+    }
+
+    const targetMemory = await target.getProjectMemory(conversationId);
+    if (isDefaultProjectMemory(targetMemory)) {
+      const legacyMemory = await legacy.getProjectMemory(conversationId);
+      if (!isDefaultProjectMemory(legacyMemory)) {
+        await target.setProjectMemory(conversationId, legacyMemory);
+      }
+    }
+  }
+
+  for (const job of await listAllLegacyJobs(legacy)) {
+    if (!job?.id || await target.getJob(job.id)) continue;
+    await target.createJob({
+      id: job.id,
+      type: job.type,
+      conversationId: job.conversation_id,
+      title: job.title,
+      input: job.input,
+      phase: job.phase,
+      status: job.status,
+      output: job.output,
+      error: job.error,
+      choices: job.choices,
+      logs: job.logs,
+      cancel_requested: job.cancel_requested,
+      created_at: job.created_at,
+      updated_at: job.updated_at,
+      started_at: job.started_at,
+      completed_at: job.completed_at,
+    });
+  }
+}
+
+async function listAllLegacyJobs(legacy) {
+  if (!legacy?._sqliteDb) return legacy.listJobs({ limit: 200 });
+  const stmt = legacy._sqliteDb.prepare("SELECT id FROM jobs ORDER BY created_at DESC");
+  const jobs = [];
+  try {
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      const job = await legacy.getJob(row.id);
+      if (job) jobs.push(job);
+    }
+  } finally {
+    stmt.free();
+  }
+  return jobs;
+}
+
+function isDefaultProjectMemory(memory = {}) {
+  return JSON.stringify(normalizeProjectMemory(memory)) === JSON.stringify(defaultProjectMemory());
 }
 
 function wrapStores(conversationStore, jobStore) {
@@ -401,8 +502,24 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       return normalized;
     },
 
-    async createJob({ type, conversationId = "", title = "", input = {}, phase = "queued", status = "queued" } = {}) {
-      const id = `job_${cryptoRandom()}`;
+    async createJob({
+      id = `job_${cryptoRandom()}`,
+      type,
+      conversationId = "",
+      title = "",
+      input = {},
+      phase = "queued",
+      status = "queued",
+      output = null,
+      error = null,
+      choices = [],
+      logs = null,
+      cancel_requested = false,
+      created_at = "",
+      updated_at = "",
+      started_at = "",
+      completed_at = "",
+    } = {}) {
       const ts = now();
       const safeStatus = normalizeStatus(status);
       const row = {
@@ -413,15 +530,15 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         conversation_id: String(conversationId || ""),
         title: String(title || ""),
         input,
-        output: null,
-        error: null,
-        choices: [],
-        logs: [compactLogEntry({ ts, phase, message: "Job accepted." })],
-        cancel_requested: false,
-        created_at: ts,
-        updated_at: ts,
-        started_at: safeStatus === "running" ? ts : "",
-        completed_at: finalStatuses.has(safeStatus) ? ts : "",
+        output,
+        error,
+        choices: Array.isArray(choices) ? choices : [],
+        logs: Array.isArray(logs) ? logs : [compactLogEntry({ ts, phase, message: "Job accepted." })],
+        cancel_requested: Boolean(cancel_requested),
+        created_at: created_at || ts,
+        updated_at: updated_at || ts,
+        started_at: started_at || (safeStatus === "running" ? ts : ""),
+        completed_at: completed_at || (finalStatuses.has(safeStatus) ? ts : ""),
       };
       await pg`
         INSERT INTO jobs
@@ -429,8 +546,9 @@ export function createPostgresProjectPersistence({ pg } = {}) {
          choices_json, logs_json, cancel_requested, created_at, updated_at, started_at, completed_at)
         VALUES (${row.id}, ${row.type}, ${row.status}, ${row.phase}, ${row.conversation_id}, ${row.title},
           ${jsonString(row.input, {})}, ${jsonString(row.output, null)}, ${jsonString(row.error, null)},
-          ${jsonString(row.choices, [])}, ${jsonString(row.logs, [])}, ${0}, ${row.created_at}, ${row.updated_at},
+          ${jsonString(row.choices, [])}, ${jsonString(row.logs, [])}, ${row.cancel_requested ? 1 : 0}, ${row.created_at}, ${row.updated_at},
           ${nullableTimestamp(row.started_at)}, ${nullableTimestamp(row.completed_at)})
+        ON CONFLICT (id) DO NOTHING
       `;
       return row;
     },
@@ -517,6 +635,9 @@ export function createPostgresProjectPersistence({ pg } = {}) {
 
     async isCancelRequested(id) {
       return Boolean((await this.getJob(id))?.cancel_requested);
+    },
+    async migrateLegacySqliteSnapshot(buffer) {
+      return migrateLegacySqliteSnapshotInto(this, buffer);
     },
   };
 }
@@ -653,9 +774,44 @@ function createJsonProjectPersistence({ filePath }) {
       });
       return normalized;
     },
-    async createJob({ type, conversationId = "", title = "", input = {}, phase = "queued", status = "queued" } = {}) {
-      const id = `job_${cryptoRandom()}`;
-      const row = { id, type, status: normalizeStatus(status), phase, conversation_id: conversationId, title, input, output: null, error: null, choices: [], logs: [{ ts: now(), phase, message: "Job accepted.", data: {} }], cancel_requested: false, created_at: now(), updated_at: now(), started_at: "", completed_at: "" };
+    async createJob({
+      id = `job_${cryptoRandom()}`,
+      type,
+      conversationId = "",
+      title = "",
+      input = {},
+      phase = "queued",
+      status = "queued",
+      output = null,
+      error = null,
+      choices = [],
+      logs = null,
+      cancel_requested = false,
+      created_at = "",
+      updated_at = "",
+      started_at = "",
+      completed_at = "",
+    } = {}) {
+      const ts = now();
+      const safeStatus = normalizeStatus(status);
+      const row = {
+        id,
+        type,
+        status: safeStatus,
+        phase,
+        conversation_id: conversationId,
+        title,
+        input,
+        output,
+        error,
+        choices: Array.isArray(choices) ? choices : [],
+        logs: Array.isArray(logs) ? logs : [{ ts, phase, message: "Job accepted.", data: {} }],
+        cancel_requested: Boolean(cancel_requested),
+        created_at: created_at || ts,
+        updated_at: updated_at || ts,
+        started_at: started_at || (safeStatus === "running" ? ts : ""),
+        completed_at: completed_at || (["succeeded", "failed", "canceled"].includes(safeStatus) ? ts : ""),
+      };
       await mutate(state => { state.jobs.push(row); });
       return row;
     },
@@ -703,6 +859,9 @@ function createJsonProjectPersistence({ filePath }) {
     },
     async isCancelRequested(id) {
       return Boolean((await this.getJob(id))?.cancel_requested);
+    },
+    async migrateLegacySqliteSnapshot(buffer) {
+      return migrateLegacySqliteSnapshotInto(this, buffer);
     },
   };
 }
