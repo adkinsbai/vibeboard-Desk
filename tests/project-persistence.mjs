@@ -5,6 +5,7 @@ import initSqlJs from "sql.js";
 import { assert } from "./support/serverHarness.mjs";
 import {
   createFileProjectPersistence,
+  createPostgresProjectPersistence,
   createSqliteProjectPersistence,
 } from "../src/projectPersistence.mjs";
 
@@ -153,7 +154,7 @@ function createRecordingPg() {
 
 await test("postgres ProjectPersistence issues row-level writes instead of sqlite snapshot writes", async () => {
   const pg = createRecordingPg();
-  const persistence = (await import("../src/projectPersistence.mjs")).createPostgresProjectPersistence({ pg });
+  const persistence = createPostgresProjectPersistence({ pg });
   await persistence.createConversation("conv-pg", "PG", { userId: "user-pg" });
   await persistence.saveConversationFiles("conv-pg", "build-pg", {
     "index.html": "<!doctype html>",
@@ -169,6 +170,101 @@ await test("postgres ProjectPersistence issues row-level writes instead of sqlit
   assert(text.includes("INSERT INTO conversation_files"), "files should be inserted as rows");
   assert(text.includes("INSERT INTO jobs"), "job should be inserted into jobs table");
   assert(!text.includes("sqlite_snapshots"), "project persistence must not write sqlite_snapshots");
+});
+
+await test("postgres ProjectPersistence sends null for absent job timestamp columns", async () => {
+  const calls = [];
+  const pg = async (strings, ...values) => {
+    const text = strings.join("?");
+    calls.push({ text, values });
+    if (/SELECT \* FROM jobs WHERE id/.test(text)) {
+      return [{
+        id: "job-existing",
+        type: "generate",
+        status: "queued",
+        phase: "queued",
+        conversation_id: "conv-pg",
+        title: "PG",
+        input_json: "{}",
+        output_json: "null",
+        error_json: "null",
+        choices_json: "[]",
+        logs_json: "[]",
+        cancel_requested: 0,
+        created_at: "2026-07-04T00:00:00.000Z",
+        updated_at: "2026-07-04T00:00:00.000Z",
+        started_at: null,
+        completed_at: null,
+      }];
+    }
+    return [];
+  };
+  const persistence = createPostgresProjectPersistence({ pg });
+  const created = await persistence.createJob({ type: "generate", conversationId: "conv-pg", title: "PG" });
+  const insert = calls.find(call => call.text.includes("INSERT INTO jobs"));
+  assert(insert.values.at(-2) === null, "queued job should insert null started_at");
+  assert(insert.values.at(-1) === null, "queued job should insert null completed_at");
+  assert(created.started_at === "", "created job should keep public empty started_at shape");
+  assert(created.completed_at === "", "created job should keep public empty completed_at shape");
+
+  const transitioned = await persistence.transition("job-existing", { phase: "queued" });
+  const update = calls.find(call => call.text.includes("UPDATE jobs"));
+  assert(update.values.at(-3) === null, "non-running transition should update null started_at");
+  assert(update.values.at(-2) === null, "non-final transition should update null completed_at");
+  assert(transitioned.started_at === "", "transition result should keep public empty started_at shape");
+  assert(transitioned.completed_at === "", "transition result should keep public empty completed_at shape");
+});
+
+await test("postgres ProjectPersistence replaces conversation files in a transaction when supported", async () => {
+  const calls = [];
+  const pg = async (strings, ...values) => {
+    const text = strings.join("?");
+    calls.push({ source: "pg", text, values });
+    return [];
+  };
+  pg.transaction = async task => {
+    const tx = async (strings, ...values) => {
+      const text = strings.join("?");
+      calls.push({ source: "tx", text, values });
+      return [];
+    };
+    const queries = task(tx);
+    calls.push({ source: "transaction", queryCount: queries.length });
+    return queries;
+  };
+  const persistence = createPostgresProjectPersistence({ pg });
+  await persistence.saveConversationFiles("conv-pg", "build-pg", {
+    "index.html": "<!doctype html>",
+    "style.css": "body{}",
+    "app.js": "console.log('pg')",
+    "hardware_app.py": "print('pg')",
+    "manifest.json": JSON.stringify({ id: "build-pg", files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+  });
+
+  assert(calls.some(call => call.source === "transaction"), "file replacement should use pg.transaction");
+  assert(calls.filter(call => call.source === "tx" && call.text.includes("DELETE FROM conversation_files")).length === 1, "delete should be inside transaction");
+  assert(calls.filter(call => call.source === "tx" && call.text.includes("INSERT INTO conversation_files")).length === 5, "file inserts should be inside transaction");
+  assert(calls.every(call => call.source !== "pg" || !call.text.includes("conversation_files")), "file replacement statements should not run outside transaction");
+});
+
+await test("postgres ProjectPersistence filters loaded conversation files", async () => {
+  const pg = async (strings, ...values) => {
+    const text = strings.join("?");
+    if (/SELECT filename, content, build_id FROM conversation_files/.test(text)) {
+      return [
+        { filename: "index.html", content: "<!doctype html>", build_id: "build-pg" },
+        { filename: "manifest.json", content: JSON.stringify({ id: "build-pg", files: ["index.html", "assets/logo.json"] }), build_id: "build-pg" },
+        { filename: "assets/logo.json", content: "{\"name\":\"logo\"}", build_id: "build-pg" },
+        { filename: "chat pollution", content: "must be filtered", build_id: "build-pg" },
+      ];
+    }
+    return [];
+  };
+  const persistence = createPostgresProjectPersistence({ pg });
+  const loaded = await persistence.loadConversationFiles("conv-pg");
+  assert(loaded.files["index.html"] === "<!doctype html>", "allowed generated file should load");
+  assert(loaded.files["assets/logo.json"] === "{\"name\":\"logo\"}", "manifest-declared asset should load");
+  assert(!loaded.files["chat pollution"], "undeclared file rows should be filtered");
 });
 
 async function test(name, fn) {

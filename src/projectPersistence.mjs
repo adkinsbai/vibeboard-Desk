@@ -2,11 +2,13 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import {
+  declaredAssetPathsFromFiles,
   deserializeFileMap,
   serializeFileMap,
 } from "./assetContract.mjs";
 import { createConversationStore } from "./conversationStore.mjs";
 import {
+  CONVERSATION_FILE_NAMES,
   defaultProjectMemory,
   filterConversationFiles,
   normalizeProjectMemory,
@@ -121,6 +123,44 @@ export function createPostgresProjectPersistence({ pg } = {}) {
   };
   const rowsOf = result => Array.isArray(result) ? result : (Array.isArray(result?.rows) ? result.rows : []);
   const firstRow = async queryResult => rowsOf(await queryResult)[0] || null;
+  const nullableTimestamp = value => value ? value : null;
+  const runTransactionStatements = async builders => {
+    if (typeof pg.transaction === "function") {
+      return pg.transaction(tx => builders.map(build => build(tx)));
+    }
+    const results = [];
+    for (const build of builders) results.push(await build(pg));
+    return results;
+  };
+  const parseStoredFileContent = value => {
+    if (typeof value !== "string") return value;
+    try {
+      const parsed = JSON.parse(value);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        (parsed.__vibeboardFileEncoding === "base64" || parsed.type === "Buffer")
+      ) {
+        return parsed;
+      }
+    } catch {}
+    return value;
+  };
+  const filterStoredConversationFileRows = rows => {
+    const files = {};
+    for (const row of rows) {
+      if (CONVERSATION_FILE_NAMES.has(row.filename)) {
+        files[row.filename] = row.content;
+        continue;
+      }
+      const content = parseStoredFileContent(row.content);
+      const candidate = { ...files, [row.filename]: content };
+      if (declaredAssetPathsFromFiles(candidate).includes(row.filename)) {
+        files[row.filename] = content;
+      }
+    }
+    return files;
+  };
   const normalizeJob = row => {
     if (!row) return null;
     return {
@@ -317,13 +357,14 @@ export function createPostgresProjectPersistence({ pg } = {}) {
     async saveConversationFiles(conversationId, buildId, files = {}) {
       const safeFiles = filterConversationFiles(files);
       const serialized = serializeFileMap(safeFiles);
-      await pg`DELETE FROM conversation_files WHERE conversation_id = ${conversationId}`;
-      for (const [filename, content] of Object.entries(serialized)) {
-        await pg`
+      const statements = [
+        sql => sql`DELETE FROM conversation_files WHERE conversation_id = ${conversationId}`,
+        ...Object.entries(serialized).map(([filename, content]) => sql => sql`
           INSERT INTO conversation_files (conversation_id, build_id, filename, content)
           VALUES (${conversationId}, ${buildId}, ${filename}, ${typeof content === "string" ? content : JSON.stringify(content)})
-        `;
-      }
+        `),
+      ];
+      await runTransactionStatements(statements);
     },
 
     async loadConversationFiles(conversationId) {
@@ -333,7 +374,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         ORDER BY id ASC
       `);
       if (rows.length === 0) return { buildId: null, files: {} };
-      const files = Object.fromEntries(rows.map(row => [row.filename, row.content]));
+      const files = filterStoredConversationFileRows(rows);
       return { buildId: rows[0].build_id, files: deserializeFileMap(files) };
     },
 
@@ -389,7 +430,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         VALUES (${row.id}, ${row.type}, ${row.status}, ${row.phase}, ${row.conversation_id}, ${row.title},
           ${jsonString(row.input, {})}, ${jsonString(row.output, null)}, ${jsonString(row.error, null)},
           ${jsonString(row.choices, [])}, ${jsonString(row.logs, [])}, ${0}, ${row.created_at}, ${row.updated_at},
-          ${row.started_at}, ${row.completed_at})
+          ${nullableTimestamp(row.started_at)}, ${nullableTimestamp(row.completed_at)})
       `;
       return row;
     },
@@ -445,8 +486,8 @@ export function createPostgresProjectPersistence({ pg } = {}) {
             logs_json = ${jsonString(next.logs, [])},
             cancel_requested = ${next.cancel_requested ? 1 : 0},
             updated_at = ${next.updated_at},
-            started_at = ${next.started_at || ""},
-            completed_at = ${next.completed_at || ""}
+            started_at = ${nullableTimestamp(next.started_at)},
+            completed_at = ${nullableTimestamp(next.completed_at)}
         WHERE id = ${id}
       `;
       return next;
