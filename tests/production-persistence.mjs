@@ -19,6 +19,16 @@ const KEEP_SNAPSHOT = process.env.VIBEBOARD_KEEP_PROD_PERSIST_SNAPSHOT === "1";
 await fs.rm(snapshotPath, { force: true }).catch(() => {});
 await fs.rm(projectPersistencePath, { force: true }).catch(() => {});
 
+const serverSource = await fs.readFile(path.join(ROOT, "server.mjs"), "utf8");
+assert(
+  /function shouldSaveSqliteSnapshot\(\)\s*{[\s\S]*?PUBLIC_DEPLOYMENT\s*&&\s*!TEST_CLOUD_SQLITE_FILE[\s\S]*?return false[\s\S]*?}/.test(serverSource),
+  "server should disable legacy sqlite_snapshots writes in public production without VIBEBOARD_TEST_CLOUD_SQLITE_FILE"
+);
+assert(
+  /if\s*\(\s*shouldSaveSqliteSnapshot\(\)\s*\)\s*{[\s\S]*?cloudSqliteSnapshot\.save\(buffer\)/.test(serverSource),
+  "saveDb should guard cloudSqliteSnapshot.save(buffer) with shouldSaveSqliteSnapshot()"
+);
+
 const defaultVercel = await startServer(await findFreePort(), {
   VIBEBOARD_GENERATED_DIR: undefined,
   VIBEBOARD_RUNTIME_DIR: undefined,

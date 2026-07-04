@@ -224,6 +224,13 @@ let dbSaveQueue = Promise.resolve();
 let dbSaveError = null;
 let dbSnapshotHash = hashBuffer(db.export());
 let dbSyncQueue = Promise.resolve();
+
+function shouldSaveSqliteSnapshot() {
+  if (!cloudSqliteSnapshot) return false;
+  if (PUBLIC_DEPLOYMENT && !TEST_CLOUD_SQLITE_FILE) return false;
+  return true;
+}
+
 async function saveDb() {
   dbSaveQueue = dbSaveQueue
     .catch(() => {})
@@ -236,7 +243,7 @@ async function saveDb() {
       await fs.writeFile(DB_PATH, buffer).catch((error) => {
         console.warn("[db] local sqlite save failed:", error.message);
       });
-      if (cloudSqliteSnapshot) {
+      if (shouldSaveSqliteSnapshot()) {
         await cloudSqliteSnapshot.save(buffer);
       }
     })
