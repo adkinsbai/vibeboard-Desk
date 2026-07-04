@@ -1,3 +1,4 @@
+import { promises as fs } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import initSqlJs from "sql.js";
@@ -267,6 +268,32 @@ await test("postgres ProjectPersistence filters loaded conversation files", asyn
   assert(!loaded.files["chat pollution"], "undeclared file rows should be filtered");
 });
 
+await test("postgres ProjectPersistence legacy migration uses conflict-safe child inserts", async () => {
+  const legacyDb = new SQL.Database();
+  const legacy = createSqliteProjectPersistence({ sqliteDb: legacyDb, saveSqlite: () => {} });
+  await legacy.initSchema();
+  await legacy.createConversation("conv-pg-migrate", "Legacy PG", { userId: "user-pg" });
+  await legacy.appendMessage("conv-pg-migrate", { role: "user", content: "legacy pg prompt" });
+  await legacy.saveConversationFiles("conv-pg-migrate", "build-pg-migrate", {
+    "index.html": "<!doctype html>",
+    "style.css": "body{}",
+    "app.js": "console.log('pg migrate')",
+    "hardware_app.py": "print('pg migrate')",
+    "manifest.json": JSON.stringify({ id: "build-pg-migrate", files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+  });
+
+  const pg = createRecordingPg();
+  const persistence = createPostgresProjectPersistence({ pg });
+  await persistence.initSchema();
+  await persistence.migrateLegacySqliteSnapshot(Buffer.from(legacyDb.export()));
+
+  const text = pg.calls.map(call => call.text).join("\n");
+  assert(text.includes("legacy_id"), "migration schema and inserts should use legacy_id keys");
+  assert(text.includes("ON CONFLICT DO NOTHING"), "migration child inserts should be conflict-safe");
+  assert(text.includes("INSERT INTO messages"), "migration should insert messages directly");
+  assert(text.includes("INSERT INTO conversation_files"), "migration should insert files directly");
+});
+
 await test("ProjectPersistence legacy migration imports missing rows without overwriting newer rows", async () => {
   const legacyDb = new SQL.Database();
   const legacy = createSqliteProjectPersistence({ sqliteDb: legacyDb, saveSqlite: () => {} });
@@ -295,6 +322,177 @@ await test("ProjectPersistence legacy migration imports missing rows without ove
   assert(ids.includes("conv-legacy"), "legacy conversation should be imported");
   assert(ids.includes("conv-new"), "new conversation should not be overwritten");
   assert(files.files["app.js"] === "console.log('legacy')", "legacy files should be imported");
+});
+
+await test("ProjectPersistence legacy migration does not overwrite same-key target rows", async () => {
+  const legacyDb = new SQL.Database();
+  const legacy = createSqliteProjectPersistence({ sqliteDb: legacyDb, saveSqlite: () => {} });
+  await legacy.initSchema();
+  await legacy.createConversation("conv-shared", "Legacy title", { userId: "legacy-user", projectDir: "legacy-dir" });
+  await legacy.appendMessage("conv-shared", { role: "user", content: "legacy prompt", build_id: "legacy-build" });
+  await legacy.appendMessage("conv-shared", { role: "assistant", content: "legacy answer", build_id: "legacy-build" });
+  await legacy.saveConversationFiles("conv-shared", "legacy-build", {
+    "index.html": "<!doctype html><p>legacy</p>",
+    "style.css": "body{color:red}",
+    "app.js": "console.log('legacy')",
+    "hardware_app.py": "print('legacy')",
+    "manifest.json": JSON.stringify({ id: "legacy-build", files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+  });
+  await legacy.setProjectMemory("conv-shared", { goal: "legacy goal", requirements: ["legacy"] });
+  const legacyJob = await legacy.createJob({ type: "generate", conversationId: "conv-shared", title: "Legacy job", input: { source: "legacy" } });
+
+  const filePath = fileURLToPath(new URL(`runtime/project-persistence-migrate-existing-${Date.now()}-${Math.random()}.json`, new URL("..", import.meta.url)));
+  const targetState = {
+    conversations: [{
+      id: "conv-shared",
+      title: "Current title",
+      user_id: "current-user",
+      project_dir: "current-dir",
+      created_at: "2026-07-04T01:00:00.000Z",
+      updated_at: "2026-07-04T02:00:00.000Z",
+    }],
+    messages: [{
+      id: "legacy:1",
+      legacy_id: "1",
+      conversation_id: "conv-shared",
+      role: "user",
+      content: "current prompt",
+      build_id: "current-build",
+      created_at: "2026-07-04T02:01:00.000Z",
+    }],
+    conversation_files: [
+      { id: "current-file-1", conversation_id: "conv-shared", build_id: "current-build", filename: "index.html", content: "<!doctype html><p>current</p>", created_at: "2026-07-04T02:02:00.000Z" },
+      { id: "current-file-2", conversation_id: "conv-shared", build_id: "current-build", filename: "style.css", content: "body{color:green}", created_at: "2026-07-04T02:02:00.000Z" },
+    ],
+    project_memory: [{
+      conversation_id: "conv-shared",
+      memory: { goal: "current goal", requirements: ["current"] },
+      updated_at: "2026-07-04T02:03:00.000Z",
+    }],
+    jobs: [{
+      id: legacyJob.id,
+      type: "generate",
+      status: "succeeded",
+      phase: "done",
+      conversation_id: "conv-shared",
+      title: "Current job",
+      input: { source: "current" },
+      output: { ok: true },
+      error: null,
+      choices: [],
+      logs: [],
+      cancel_requested: false,
+      created_at: "2026-07-04T02:04:00.000Z",
+      updated_at: "2026-07-04T02:05:00.000Z",
+      started_at: "2026-07-04T02:04:00.000Z",
+      completed_at: "2026-07-04T02:05:00.000Z",
+    }, {
+      id: "job-current-only",
+      type: "generate",
+      status: "queued",
+      phase: "queued",
+      conversation_id: "conv-shared",
+      title: "Current only",
+      input: { source: "current-only" },
+      output: null,
+      error: null,
+      choices: [],
+      logs: [],
+      cancel_requested: false,
+      created_at: "2026-07-04T02:06:00.000Z",
+      updated_at: "2026-07-04T02:06:00.000Z",
+      started_at: "",
+      completed_at: "",
+    }],
+  };
+  await fs.mkdir(new URL("runtime/", new URL("..", import.meta.url)), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(targetState, null, 2));
+
+  const target = createFileProjectPersistence({ filePath });
+  await target.initSchema();
+  await target.migrateLegacySqliteSnapshot(Buffer.from(legacyDb.export()));
+
+  const conversation = await target.getConversation("conv-shared");
+  const messages = await target.listMessages("conv-shared");
+  const files = await target.loadConversationFiles("conv-shared");
+  const memory = await target.getProjectMemory("conv-shared");
+  const job = await target.getJob(legacyJob.id);
+
+  assert(conversation.title === "Current title", "current conversation title should not be overwritten");
+  assert(conversation.project_dir === "current-dir", "current conversation project_dir should not be overwritten");
+  assert(conversation.updated_at === "2026-07-04T02:00:00.000Z", "current conversation ordering timestamp should not change");
+  assert(messages.length === 2, "missing legacy message should be imported by stable key");
+  assert(messages.find(row => row.id === "legacy:1")?.content === "current prompt", "current same-key message should not be overwritten");
+  assert(messages.some(row => row.content === "legacy answer"), "missing legacy message should be imported");
+  assert(files.files["index.html"] === "<!doctype html><p>current</p>", "current same-key file should not be overwritten");
+  assert(files.files["app.js"] === "console.log('legacy')", "missing legacy file should be imported");
+  assert(memory.goal === "current goal", "current project memory should not be overwritten");
+  assert(job.title === "Current job" && job.input.source === "current", "current same-id job should not be overwritten");
+  assert(await target.getJob("job-current-only"), "current-only job should remain after migration");
+});
+
+await test("ProjectPersistence legacy migration imports missing children without reordering existing conversation metadata", async () => {
+  const legacyDb = new SQL.Database();
+  const legacy = createSqliteProjectPersistence({ sqliteDb: legacyDb, saveSqlite: () => {} });
+  await legacy.initSchema();
+  await legacy.createConversation("conv-existing", "Legacy title", { userId: "legacy-user", projectDir: "legacy-dir" });
+  await legacy.appendMessage("conv-existing", { role: "user", content: "legacy prompt" });
+  const legacyBuffer = Buffer.from(legacyDb.export());
+
+  const filePath = fileURLToPath(new URL(`runtime/project-persistence-migrate-metadata-${Date.now()}-${Math.random()}.json`, new URL("..", import.meta.url)));
+  const target = createFileProjectPersistence({ filePath });
+  await target.initSchema();
+  await target.createConversation("conv-existing", "Current title", { userId: "current-user", projectDir: "current-dir" });
+  const before = JSON.parse(await fs.readFile(filePath, "utf8"));
+  before.conversations[0].updated_at = "2026-07-04T03:00:00.000Z";
+  await fs.writeFile(filePath, JSON.stringify(before, null, 2));
+
+  await target.migrateLegacySqliteSnapshot(legacyBuffer);
+
+  const conversation = await target.getConversation("conv-existing");
+  const messages = await target.listMessages("conv-existing");
+  assert(messages.length === 1 && messages[0].content === "legacy prompt", "missing legacy message should be imported");
+  assert(conversation.title === "Current title", "existing conversation title should stay current");
+  assert(conversation.project_dir === "current-dir", "existing project_dir should stay current");
+  assert(conversation.updated_at === "2026-07-04T03:00:00.000Z", "importing children should not reorder existing conversation");
+});
+
+await test("ProjectPersistence legacy migration is repeated and concurrent idempotent for child rows", async () => {
+  const legacyDb = new SQL.Database();
+  const legacy = createSqliteProjectPersistence({ sqliteDb: legacyDb, saveSqlite: () => {} });
+  await legacy.initSchema();
+  await legacy.createConversation("conv-race", "Race", { userId: "user-a" });
+  await legacy.appendMessage("conv-race", { role: "user", content: "make it durable" });
+  await legacy.appendMessage("conv-race", { role: "assistant", content: "working" });
+  await legacy.saveConversationFiles("conv-race", "build-race", {
+    "index.html": "<!doctype html>",
+    "style.css": "body{}",
+    "app.js": "console.log('race')",
+    "hardware_app.py": "print('race')",
+    "manifest.json": JSON.stringify({ id: "build-race", files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+  });
+  const job = await legacy.createJob({ id: "job-race", type: "generate", conversationId: "conv-race", title: "Race", input: { prompt: "race" } });
+  const legacyBuffer = Buffer.from(legacyDb.export());
+
+  const filePath = fileURLToPath(new URL(`runtime/project-persistence-migrate-race-${Date.now()}-${Math.random()}.json`, new URL("..", import.meta.url)));
+  const a = createFileProjectPersistence({ filePath });
+  const b = createFileProjectPersistence({ filePath });
+  await a.initSchema();
+  await b.initSchema();
+
+  await Promise.all([
+    a.migrateLegacySqliteSnapshot(legacyBuffer),
+    b.migrateLegacySqliteSnapshot(legacyBuffer),
+  ]);
+  await a.migrateLegacySqliteSnapshot(legacyBuffer);
+
+  const state = JSON.parse(await fs.readFile(filePath, "utf8"));
+  const messageRows = state.messages.filter(row => row.conversation_id === "conv-race");
+  const fileRows = state.conversation_files.filter(row => row.conversation_id === "conv-race");
+  const jobRows = state.jobs.filter(row => row.id === job.id);
+  assert(messageRows.length === 2, "repeated/concurrent migration should not duplicate messages");
+  assert(fileRows.length === 5, "repeated/concurrent migration should not duplicate files");
+  assert(jobRows.length === 1, "repeated/concurrent migration should not duplicate jobs");
 });
 
 await test("ProjectPersistence legacy migration imports all legacy jobs", async () => {

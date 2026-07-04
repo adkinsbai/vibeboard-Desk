@@ -15,6 +15,8 @@ import {
 } from "./conversationStore.mjs";
 import { createJobStore } from "./jobStore.mjs";
 
+const fileMutationLocks = new Map();
+
 export function createProjectPersistence(options = {}) {
   const { pg = null, sqliteDb = null, saveSqlite = () => {}, env = process.env } = options;
   if (env.VIBEBOARD_TEST_PROJECT_PERSISTENCE_FILE) {
@@ -49,14 +51,13 @@ async function migrateLegacySqliteSnapshotInto(target, buffer) {
   const legacy = await readLegacySqliteSnapshot(buffer);
   if (!legacy) return;
 
-  const conversations = await legacy.listConversations();
+  const legacyRows = readLegacySqliteRows(legacy);
+  const conversations = legacyRows.conversations.length ? legacyRows.conversations : await legacy.listConversations();
   for (const conversation of conversations) {
     const conversationId = conversation.id;
     if (!conversationId) continue;
 
     const existingConversation = await target.getConversation(conversationId);
-    const targetTitle = existingConversation?.title || conversation.title || "New App";
-    const targetProjectDir = existingConversation?.project_dir || conversation.project_dir || "";
     if (!existingConversation) {
       await target.createConversation(conversationId, conversation.title || "New App", {
         userId: conversation.user_id || "",
@@ -64,34 +65,44 @@ async function migrateLegacySqliteSnapshotInto(target, buffer) {
       });
     }
 
-    if ((await target.listMessages(conversationId)).length === 0) {
-      const messages = await legacy.listMessages(conversationId);
-      for (const message of messages) {
-        await target.appendMessage(conversationId, message);
-      }
-      if (messages.length && typeof target.updateConversation === "function") {
-        await target.updateConversation(conversationId, { title: targetTitle, projectDir: targetProjectDir });
-      }
-    }
-
-    const targetFiles = await target.loadConversationFiles(conversationId);
-    if (Object.keys(targetFiles?.files || {}).length === 0) {
-      const legacyFiles = await legacy.loadConversationFiles(conversationId);
-      if (Object.keys(legacyFiles?.files || {}).length) {
-        await target.saveConversationFiles(conversationId, legacyFiles.buildId || "", legacyFiles.files);
+    const messages = legacyRows.messages.filter(row => row.conversation_id === conversationId);
+    if (messages.length) {
+      if (typeof target.importLegacyMessages === "function") {
+        await target.importLegacyMessages(conversationId, messages);
+      } else if ((await target.listMessages(conversationId)).length === 0) {
+        for (const message of messages) await target.appendMessage(conversationId, message);
       }
     }
 
-    const targetMemory = await target.getProjectMemory(conversationId);
-    if (isDefaultProjectMemory(targetMemory)) {
-      const legacyMemory = await legacy.getProjectMemory(conversationId);
-      if (!isDefaultProjectMemory(legacyMemory)) {
-        await target.setProjectMemory(conversationId, legacyMemory);
+    const fileRows = legacyRows.conversation_files.filter(row => row.conversation_id === conversationId);
+    if (fileRows.length) {
+      if (typeof target.importLegacyConversationFiles === "function") {
+        await target.importLegacyConversationFiles(conversationId, fileRows);
+      } else {
+        const targetFiles = await target.loadConversationFiles(conversationId);
+        if (Object.keys(targetFiles?.files || {}).length === 0) {
+          const legacyFiles = await legacy.loadConversationFiles(conversationId);
+          if (Object.keys(legacyFiles?.files || {}).length) {
+            await target.saveConversationFiles(conversationId, legacyFiles.buildId || "", legacyFiles.files);
+          }
+        }
+      }
+    }
+
+    const memoryRow = legacyRows.project_memory.find(row => row.conversation_id === conversationId);
+    if (memoryRow) {
+      const targetMemory = await target.getProjectMemory(conversationId);
+      if (isDefaultProjectMemory(targetMemory)) {
+        const legacyMemory = parseProjectMemoryRow(memoryRow);
+        if (!isDefaultProjectMemory(legacyMemory)) {
+          await target.setProjectMemory(conversationId, legacyMemory);
+        }
       }
     }
   }
 
-  for (const job of await listAllLegacyJobs(legacy)) {
+  const jobs = legacyRows.jobs.length ? legacyRows.jobs.map(normalizeLegacyJobRow) : await listAllLegacyJobs(legacy);
+  for (const job of jobs) {
     if (!job?.id || await target.getJob(job.id)) continue;
     await target.createJob({
       id: job.id,
@@ -112,6 +123,67 @@ async function migrateLegacySqliteSnapshotInto(target, buffer) {
       completed_at: job.completed_at,
     });
   }
+}
+
+function readLegacySqliteRows(legacy) {
+  const db = legacy?._sqliteDb;
+  if (!db) return { conversations: [], messages: [], conversation_files: [], project_memory: [], jobs: [] };
+  return {
+    conversations: sqliteSelect(db, "SELECT * FROM conversations ORDER BY updated_at DESC"),
+    messages: sqliteSelect(db, "SELECT * FROM messages ORDER BY id ASC"),
+    conversation_files: sqliteSelect(db, "SELECT * FROM conversation_files ORDER BY id ASC"),
+    project_memory: sqliteSelect(db, "SELECT * FROM project_memory ORDER BY conversation_id ASC"),
+    jobs: sqliteSelect(db, "SELECT * FROM jobs ORDER BY created_at DESC"),
+  };
+}
+
+function sqliteSelect(db, sql) {
+  const stmt = db.prepare(sql);
+  const rows = [];
+  try {
+    while (stmt.step()) rows.push(stmt.getAsObject());
+  } finally {
+    stmt.free();
+  }
+  return rows;
+}
+
+function parseProjectMemoryRow(row = {}) {
+  try {
+    return normalizeProjectMemory(JSON.parse(String(row.memory_json || "{}")));
+  } catch {
+    return defaultProjectMemory();
+  }
+}
+
+function parseJsonValue(value, fallback) {
+  try {
+    return value == null || value === "" ? fallback : JSON.parse(String(value));
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeLegacyJobRow(row = {}) {
+  if (!row) return null;
+  return {
+    id: String(row.id || ""),
+    type: String(row.type || ""),
+    status: String(row.status || "queued"),
+    phase: String(row.phase || ""),
+    conversation_id: row.conversation_id || "",
+    title: String(row.title || ""),
+    input: parseJsonValue(row.input_json, {}),
+    output: parseJsonValue(row.output_json, null),
+    error: parseJsonValue(row.error_json, null),
+    choices: parseJsonValue(row.choices_json, []),
+    logs: parseJsonValue(row.logs_json, []),
+    cancel_requested: Number(row.cancel_requested || 0) === 1,
+    created_at: String(row.created_at || ""),
+    updated_at: String(row.updated_at || ""),
+    started_at: String(row.started_at || ""),
+    completed_at: String(row.completed_at || ""),
+  };
 }
 
 async function listAllLegacyJobs(legacy) {
@@ -305,6 +377,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       await pg`
         CREATE TABLE IF NOT EXISTS messages (
           id BIGSERIAL PRIMARY KEY,
+          legacy_id TEXT,
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
           role TEXT NOT NULL,
           content TEXT,
@@ -315,6 +388,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       await pg`
         CREATE TABLE IF NOT EXISTS conversation_files (
           id BIGSERIAL PRIMARY KEY,
+          legacy_id TEXT,
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
           build_id TEXT NOT NULL,
           filename TEXT NOT NULL,
@@ -349,6 +423,10 @@ export function createPostgresProjectPersistence({ pg } = {}) {
           completed_at TIMESTAMPTZ
         )
       `;
+      await pg`ALTER TABLE messages ADD COLUMN IF NOT EXISTS legacy_id TEXT`;
+      await pg`ALTER TABLE conversation_files ADD COLUMN IF NOT EXISTS legacy_id TEXT`;
+      await pg`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_legacy_id ON messages(legacy_id) WHERE legacy_id IS NOT NULL`;
+      await pg`CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_files_legacy_id ON conversation_files(legacy_id) WHERE legacy_id IS NOT NULL`;
       await pg`CREATE INDEX IF NOT EXISTS idx_conversations_user_updated ON conversations(user_id, updated_at)`;
       await pg`CREATE INDEX IF NOT EXISTS idx_messages_conversation_created ON messages(conversation_id, created_at)`;
       await pg`CREATE INDEX IF NOT EXISTS idx_conversation_files_conversation_id ON conversation_files(conversation_id, id)`;
@@ -454,6 +532,17 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         }
       }
     },
+    async importLegacyMessages(conversationId, messages = []) {
+      for (const message of messages) {
+        const legacyId = String(message.id || "");
+        if (!legacyId) continue;
+        await pg`
+          INSERT INTO messages (legacy_id, conversation_id, role, content, build_id, created_at)
+          VALUES (${legacyId}, ${conversationId}, ${message.role}, ${message.content}, ${message.build_id || null}, ${message.created_at || now()})
+          ON CONFLICT DO NOTHING
+        `;
+      }
+    },
 
     async saveConversationFiles(conversationId, buildId, files = {}) {
       const safeFiles = filterConversationFiles(files);
@@ -466,6 +555,21 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         `),
       ];
       await runTransactionStatements(statements);
+    },
+    async importLegacyConversationFiles(conversationId, rows = []) {
+      for (const row of rows) {
+        const legacyId = String(row.id || "");
+        if (!legacyId) continue;
+        await pg`
+          INSERT INTO conversation_files (legacy_id, conversation_id, build_id, filename, content, created_at)
+          SELECT ${legacyId}, ${conversationId}, ${row.build_id || ""}, ${row.filename}, ${row.content}, ${row.created_at || now()}
+          WHERE NOT EXISTS (
+            SELECT 1 FROM conversation_files
+            WHERE conversation_id = ${conversationId} AND filename = ${row.filename}
+          )
+          ON CONFLICT DO NOTHING
+        `;
+      }
     },
 
     async loadConversationFiles(conversationId) {
@@ -662,10 +766,21 @@ function createJsonProjectPersistence({ filePath }) {
     await fs.writeFile(filePath, JSON.stringify(next, null, 2));
   }
   async function mutate(task) {
-    const current = await readState();
-    const result = await task(current);
-    await writeState(current);
-    return result;
+    const previous = fileMutationLocks.get(filePath) || Promise.resolve();
+    let release;
+    const currentLock = new Promise(resolve => { release = resolve; });
+    const chainedLock = previous.then(() => currentLock, () => currentLock);
+    fileMutationLocks.set(filePath, chainedLock);
+    await previous.catch(() => {});
+    try {
+      const current = await readState();
+      const result = await task(current);
+      await writeState(current);
+      return result;
+    } finally {
+      release();
+      if (fileMutationLocks.get(filePath) === chainedLock) fileMutationLocks.delete(filePath);
+    }
   }
   const now = () => new Date().toISOString();
   const byId = (rows, id) => rows.find(row => String(row.id || "") === String(id || ""));
@@ -729,6 +844,27 @@ function createJsonProjectPersistence({ filePath }) {
       await mutate(state => { state.messages.push(row); });
       return row;
     },
+    async importLegacyMessages(conversationId, messages = []) {
+      await mutate(state => {
+        const existingKeys = new Set(state.messages
+          .filter(row => row.conversation_id === conversationId)
+          .map(row => String(row.legacy_id || row.id || "")));
+        for (const message of messages) {
+          const legacyId = String(message.id || "");
+          if (!legacyId || existingKeys.has(legacyId)) continue;
+          state.messages.push({
+            id: `legacy:${legacyId}`,
+            legacy_id: legacyId,
+            conversation_id: conversationId,
+            role: message.role,
+            content: message.content,
+            build_id: message.build_id || null,
+            created_at: message.created_at || now(),
+          });
+          existingKeys.add(legacyId);
+        }
+      });
+    },
     async listMessages(conversationId) {
       const state = await readState();
       return state.messages.filter(row => row.conversation_id === conversationId).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
@@ -740,6 +876,29 @@ function createJsonProjectPersistence({ filePath }) {
         state.conversation_files = state.conversation_files.filter(row => row.conversation_id !== conversationId);
         for (const [filename, content] of Object.entries(safeFiles)) {
           state.conversation_files.push({ id: `${Date.now()}-${Math.random()}`, conversation_id: conversationId, build_id: buildId, filename, content, created_at: now() });
+        }
+      });
+    },
+    async importLegacyConversationFiles(conversationId, rows = []) {
+      await mutate(state => {
+        const existingRows = state.conversation_files.filter(row => row.conversation_id === conversationId);
+        const existingKeys = new Set(existingRows.map(row => String(row.legacy_id || row.id || "")));
+        const existingFilenames = new Set(existingRows.map(row => String(row.filename || "")));
+        for (const row of rows) {
+          const legacyId = String(row.id || "");
+          const filename = String(row.filename || "");
+          if (!legacyId || !filename || existingKeys.has(legacyId) || existingFilenames.has(filename)) continue;
+          state.conversation_files.push({
+            id: `legacy:${legacyId}`,
+            legacy_id: legacyId,
+            conversation_id: conversationId,
+            build_id: row.build_id || "",
+            filename,
+            content: row.content,
+            created_at: row.created_at || now(),
+          });
+          existingKeys.add(legacyId);
+          existingFilenames.add(filename);
         }
       });
     },
@@ -812,7 +971,9 @@ function createJsonProjectPersistence({ filePath }) {
         started_at: started_at || (safeStatus === "running" ? ts : ""),
         completed_at: completed_at || (["succeeded", "failed", "canceled"].includes(safeStatus) ? ts : ""),
       };
-      await mutate(state => { state.jobs.push(row); });
+      await mutate(state => {
+        if (!byId(state.jobs, id)) state.jobs.push(row);
+      });
       return row;
     },
     async getJob(id) {
