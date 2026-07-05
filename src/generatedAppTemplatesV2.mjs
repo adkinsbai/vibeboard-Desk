@@ -897,6 +897,7 @@ footer span {
 
   const app = `const SPEC = ${specJson};
 const BUILD_ID = ${idJson};
+const PROMPT = SPEC.prompt;
 const HOURLY_RATE = Number(SPEC.hourlyRate || 150);
 const RATE_PER_SECOND = HOURLY_RATE / 3600;
 const el = id => document.getElementById(id);

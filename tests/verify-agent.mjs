@@ -192,6 +192,7 @@ await test("template routes paid fishing salary calculators away from hardware c
   assert(joined.includes("150元/小时"), "wage template should display the hourly wage");
   assert(joined.includes("开始摸鱼"), "wage template should include a start button label");
   assert(joined.includes("暂停摸鱼"), "wage template should include a pause button label");
+  assert(files["app.js"].includes("const PROMPT = SPEC.prompt;"), "wage template app.js should preserve the generated-file PROMPT contract");
   assert(/setInterval|requestAnimationFrame/.test(files["app.js"]), "wage template should update live over time");
   assert(/HOURLY_RATE\s*\/\s*3600/.test(files["app.js"]), "wage template should calculate salary per second from the hourly rate");
   assert(!/Relay Command|Hardware Control|Toggle A|GPIO/.test(joined), "wage template must not fall back to the hardware control panel");
