@@ -224,6 +224,43 @@ await test("postgres ProjectPersistence sends null for absent job timestamp colu
   assert(transitioned.completed_at === "", "transition result should keep public empty completed_at shape");
 });
 
+await test("postgres ProjectPersistence writes Date-backed job timestamps as ISO strings", async () => {
+  const calls = [];
+  const date = new Date("2026-07-05T12:57:00.000Z");
+  const pg = async (strings, ...values) => {
+    const text = strings.join("?");
+    calls.push({ text, values });
+    if (/SELECT \* FROM jobs WHERE id/.test(text)) {
+      return [{
+        id: "job-date",
+        type: "generate",
+        status: "running",
+        phase: "starting",
+        conversation_id: "conv-date",
+        title: "Date job",
+        input_json: "{}",
+        output_json: "null",
+        error_json: "null",
+        choices_json: "[]",
+        logs_json: "[]",
+        cancel_requested: 0,
+        created_at: date,
+        updated_at: date,
+        started_at: date,
+        completed_at: null,
+      }];
+    }
+    return [];
+  };
+  const persistence = createPostgresProjectPersistence({ pg });
+  await persistence.transition("job-date", { status: "succeeded", phase: "done", output: { ok: true } });
+
+  const update = calls.find(call => call.text.includes("UPDATE jobs"));
+  assert(update, "transition should update job row");
+  assert(update.values.includes("2026-07-05T12:57:00.000Z"), "Date-backed started_at should be written as ISO");
+  assert(!update.values.some(value => typeof value === "string" && value.includes("GMT+")), "Postgres timestamp writes must not use JS Date.toString()");
+});
+
 await test("postgres ProjectPersistence replaces conversation files in a transaction when supported", async () => {
   const calls = [];
   const pg = async (strings, ...values) => {
