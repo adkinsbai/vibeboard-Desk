@@ -26,7 +26,7 @@ export function createProjectWorkspace({
 
   async function ensureProject(conversationId, title = "New Project") {
     await ensureBaseDir();
-    const existing = conversationStore.getConversation?.(conversationId);
+    const existing = await conversationStore.getConversation?.(conversationId);
     if (existing?.project_dir) {
       await fs.mkdir(existing.project_dir, { recursive: true });
       await ensureProjectSubdirs(existing.project_dir);
@@ -36,7 +36,7 @@ export function createProjectWorkspace({
     await fs.mkdir(projectDir, { recursive: true });
     await ensureProjectSubdirs(projectDir);
     await writeProjectReadme(projectDir, title, conversationId);
-    const updated = conversationStore.updateConversation?.(conversationId, { projectDir });
+    const updated = await conversationStore.updateConversation?.(conversationId, { projectDir });
     return { id: conversationId, title: updated?.title || title, project_dir: projectDir };
   }
 
@@ -50,11 +50,11 @@ export function createProjectWorkspace({
   }
 
   async function writeMemory(conversationId, { trigger = "manual", buildId = "", prompt = "", deploy = null } = {}) {
-    const conversation = conversationStore.getConversation?.(conversationId);
+    const conversation = await conversationStore.getConversation?.(conversationId);
     if (!conversation) return null;
     const project = await ensureProject(conversationId, conversation.title || "New Project");
-    const memory = normalizeProjectMemory(conversationStore.getProjectMemory(conversationId));
-    const messages = conversationStore.listMessages(conversationId).slice(-20);
+    const memory = normalizeProjectMemory(await conversationStore.getProjectMemory(conversationId));
+    const messages = (await conversationStore.listMessages(conversationId)).slice(-20);
     const assets = assetLibraryStore?.listAssets ? assetLibraryStore.listAssets(conversationId) : [];
     const lines = [
       `# ${conversation.title || "VibeBoard Project"} Memory`,
@@ -91,7 +91,7 @@ export function createProjectWorkspace({
   }
 
   async function persistAssetFile(conversationId, asset = {}) {
-    const conversation = conversationStore.getConversation?.(conversationId);
+    const conversation = await conversationStore.getConversation?.(conversationId);
     if (!conversation) return null;
     const project = await ensureProject(conversationId, conversation.title || "New Project");
     const assetDir = path.join(project.project_dir, "assets", asset.kind || "misc");
@@ -105,7 +105,7 @@ export function createProjectWorkspace({
 
   async function writeBuildSnapshot(conversationId, buildId, files = {}, assets = []) {
     if (!conversationId || !buildId) return null;
-    const conversation = conversationStore.getConversation?.(conversationId);
+    const conversation = await conversationStore.getConversation?.(conversationId);
     if (!conversation) return null;
     const project = await ensureProject(conversationId, conversation.title || "New Project");
     const buildDir = path.join(project.project_dir, "builds", safeFileName(buildId));
@@ -135,13 +135,13 @@ export function createProjectWorkspace({
   }
 
   async function listProjectFiles(conversationId) {
-    const conversation = conversationStore.getConversation?.(conversationId);
+    const conversation = await conversationStore.getConversation?.(conversationId);
     if (!conversation?.project_dir) return [];
     return listFiles(conversation.project_dir, conversation.project_dir);
   }
 
   async function readProjectFile(conversationId, relativePath) {
-    const conversation = conversationStore.getConversation?.(conversationId);
+    const conversation = await conversationStore.getConversation?.(conversationId);
     if (!conversation?.project_dir) return null;
     const target = safeJoin(conversation.project_dir, relativePath);
     const stat = await fs.stat(target).catch(() => null);
@@ -157,7 +157,7 @@ export function createProjectWorkspace({
   }
 
   async function renameAssetFile(conversationId, currentProjectPath, nextName) {
-    const conversation = conversationStore.getConversation?.(conversationId);
+    const conversation = await conversationStore.getConversation?.(conversationId);
     if (!conversation?.project_dir || !currentProjectPath) return "";
     const current = safeJoin(conversation.project_dir, currentProjectPath);
     const stat = await fs.stat(current).catch(() => null);

@@ -2929,43 +2929,57 @@ await test("generate runtime embeds uploaded passive assets into template builds
   assert(savedSnapshot?.files?.["assets/uploaded/hero.png"], "conversation snapshot should save embedded asset");
 });
 
-await test("generate runtime downgrades snapshot save failures", async () => {
+await test("generate runtime fails when conversation snapshot save fails", async () => {
   const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
   const logs = [];
   const runtime = createGenerateRuntime({
     conversationStore: {
-      getProjectMemory: () => ({}),
-      loadConversationFiles: () => ({ files: {} }),
-      saveConversationFiles: () => {
-        throw new Error("database busy");
+      getProjectMemory: async () => ({}),
+      loadConversationFiles: async () => ({ files: {} }),
+      saveConversationFiles: async () => {
+        const error = new Error("durable project save failed");
+        error.errorType = "storage_failed";
+        throw error;
       },
     },
-    memoryStore: {
-      getAll: () => ({}),
-      set: () => {},
+    memoryStore: { getAll: () => ({}) },
+    assetLibraryStore: {
+      promptContext: () => "",
+      generatedAssets: () => ({ items: [], files: {}, rejected: [] }),
+      recordBuildSnapshot: () => {},
     },
-    appendServerLog: async (event, detail) => {
-      logs.push({ event, detail });
-    },
+    appendServerLog: async (event, data) => logs.push({ event, data }),
+    normalizeGenerateHistory: history => history,
+    compressHistory: async history => history,
+    buildId: () => "build-save-fails",
     writeGenerated: async () => ({
-      id: "vb-runtime-save-fail",
-      files: { "index.html": "<html></html>" },
-      manifest: null,
-      agentRun: { evidence: [] },
+      id: "build-save-fails",
+      files: validGeneratedFiles(),
+      manifest: JSON.parse(validGeneratedFiles()["manifest.json"]),
       buildEvidence: { ok: true, issues: [] },
-      intelligenceSummary: { confidence: "local_verified" },
+      agentRun: {},
     }),
     filesWithHardwareResult: async files => files,
+    projectWorkspace: {
+      writeBuildSnapshot: async () => {},
+      writeMemory: async () => {},
+      listProjectFiles: async () => [],
+    },
   });
 
-  const result = await runtime.runGenerateRequest({
-    prompt: "Build a resilient snapshot test.",
-    conversation_id: "conv-runtime-save-fail",
-    modelSettings: { enabled: false },
-  });
+  let failed = false;
+  try {
+    await runtime.runGenerateRequest({
+      prompt: "Build a clock",
+      conversation_id: "conv-save-fails",
+      modelSettings: { enabled: false },
+    });
+  } catch (error) {
+    failed = error.errorType === "storage_failed" || /save failed/i.test(error.message);
+  }
 
-  assert(result.ok === true, `snapshot save failure must not fail generation, got ${JSON.stringify(result)}`);
-  assert(logs.some(item => item.event === "generate.template.conversation_save_failed"), "runtime should log downgraded snapshot failure");
+  assert(failed, "generation should fail when durable conversation file save fails");
+  assert(logs.some(item => /conversation_save_failed/.test(item.event)), "runtime should log conversation save failure");
 });
 
 await test("generate runtime passes conversation files into agent path", async () => {

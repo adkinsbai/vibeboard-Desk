@@ -14,8 +14,20 @@ const PHONE = `+1555${String(Math.floor(Math.random() * 1000000)).padStart(6, "0
 const PASSWORD = "correct-horse-42";
 const TITLE = `Production Persistence ${randomUUID().slice(0, 8)}`;
 const snapshotPath = fileURLToPath(new URL(`../runtime/prod-persist-${randomUUID()}.db`, import.meta.url));
+const projectPersistencePath = fileURLToPath(new URL(`../runtime/prod-project-persistence-${randomUUID()}.json`, import.meta.url));
 const KEEP_SNAPSHOT = process.env.VIBEBOARD_KEEP_PROD_PERSIST_SNAPSHOT === "1";
 await fs.rm(snapshotPath, { force: true }).catch(() => {});
+await fs.rm(projectPersistencePath, { force: true }).catch(() => {});
+
+const serverSource = await fs.readFile(path.join(ROOT, "server.mjs"), "utf8");
+assert(
+  /function shouldSaveSqliteSnapshot\(\)\s*{[\s\S]*?PUBLIC_DEPLOYMENT\s*&&\s*!TEST_CLOUD_SQLITE_FILE[\s\S]*?return false[\s\S]*?}/.test(serverSource),
+  "server should disable legacy sqlite_snapshots writes in public production without VIBEBOARD_TEST_CLOUD_SQLITE_FILE"
+);
+assert(
+  /if\s*\(\s*shouldSaveSqliteSnapshot\(\)\s*\)\s*{[\s\S]*?cloudSqliteSnapshot\.save\(buffer\)/.test(serverSource),
+  "saveDb should guard cloudSqliteSnapshot.save(buffer) with shouldSaveSqliteSnapshot()"
+);
 
 const defaultVercel = await startServer(await findFreePort(), {
   VIBEBOARD_GENERATED_DIR: undefined,
@@ -102,6 +114,14 @@ try {
   jobId = job.data.job?.id || "";
   assert(jobId, "job create should return a job id");
   assert(job.data.job?.status === "succeeded", `request-bound job should succeed, got ${JSON.stringify(job.data.job)}`);
+  const files = await getJson(baseUrl, `/api/conversations/${conversationId}/files`, cookie);
+  assert(files.buildId === job.data.job.output.id, `conversation files should persist after public job: ${JSON.stringify(files)}`);
+  assert(files.files?.["index.html"], "conversation files should include index.html after public job");
+  const projectPersistenceState = JSON.parse(await fs.readFile(projectPersistencePath, "utf8"));
+  assert(
+    projectPersistenceState.conversation_files?.some(item => item.conversation_id === conversationId && item.filename === "index.html"),
+    `conversation files should persist through ProjectPersistence file adapter: ${JSON.stringify(projectPersistenceState.conversation_files)}`
+  );
   const jobs = await getJson(baseUrl, "/api/jobs", cookie);
   assert(jobs.jobs.some(item => item.id === jobId), "created job should be listed before restart");
 
@@ -162,6 +182,7 @@ try {
   if (!KEEP_SNAPSHOT) {
     await fs.rm(snapshotPath, { force: true }).catch(() => {});
   }
+  await fs.rm(projectPersistencePath, { force: true }).catch(() => {});
 }
 
 console.log(JSON.stringify({ ok: true, conversationId, jobId, title: TITLE, snapshotPath: KEEP_SNAPSHOT ? snapshotPath : undefined }, null, 2));
@@ -185,6 +206,7 @@ async function startServer(port, envOverrides = {}) {
       VIBEBOARD_PORT: String(port),
       DATABASE_URL: "postgresql://user:pass@example.test/db",
       VIBEBOARD_TEST_CLOUD_SQLITE_FILE: snapshotPath,
+      VIBEBOARD_TEST_PROJECT_PERSISTENCE_FILE: projectPersistencePath,
       VIBEBOARD_LLM_PROVIDER: "deepseek",
       VIBEBOARD_LLM_BASE_URL: "https://api.deepseek.com",
       VIBEBOARD_LLM_MODEL: "deepseek-v4-flash",

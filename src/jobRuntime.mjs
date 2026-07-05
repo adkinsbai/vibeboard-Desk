@@ -89,18 +89,18 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
   function contextFor(jobId) {
     return {
       jobId,
-      phase(phase, message = "") {
-        const job = jobStore.getJob(jobId);
+      async phase(phase, message = "") {
+        const job = await jobStore.getJob(jobId);
         if (!job || isFinal(job.status)) return job;
-        const next = jobStore.transition(jobId, { phase: String(phase || job.phase || "") });
-        if (message) jobStore.appendLog(jobId, message, {}, phase);
+        const next = await jobStore.transition(jobId, { phase: String(phase || job.phase || "") });
+        if (message) await jobStore.appendLog(jobId, message, {}, phase);
         return next;
       },
-      log(message, data = {}) {
-        return jobStore.appendLog(jobId, message, data);
+      async log(message, data = {}) {
+        return await jobStore.appendLog(jobId, message, data);
       },
-      checkCanceled() {
-        const job = jobStore.getJob(jobId);
+      async checkCanceled() {
+        const job = await jobStore.getJob(jobId);
         if (job?.cancel_requested) {
           const error = new Error("Job was canceled.");
           error.errorType = "job_canceled";
@@ -112,47 +112,47 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
   }
 
   async function runExisting(jobId) {
-    const job = jobStore.getJob(jobId);
+    const job = await jobStore.getJob(jobId);
     if (!job || isFinal(job.status)) return job;
     const handler = handlers.get(job.type);
     if (!handler) {
-      jobStore.transition(jobId, {
+      await jobStore.transition(jobId, {
         status: JOB_STATUS.FAILED,
         phase: "missing_handler",
         error: { errorType: "job_handler_missing", error: `No handler registered for ${job.type}` },
         choices: [{ label: "View logs", action: "view_logs", value: { job_id: jobId } }],
       });
-      return jobStore.getJob(jobId);
+      return await jobStore.getJob(jobId);
     }
     if (job.cancel_requested) {
-      return jobStore.transition(jobId, {
+      return await jobStore.transition(jobId, {
         status: JOB_STATUS.CANCELED,
         phase: "canceled",
         error: { errorType: "job_canceled", error: "Job canceled before it started." },
       });
     }
 
-    jobStore.transition(jobId, { status: JOB_STATUS.RUNNING, phase: "starting" });
-    jobStore.appendLog(jobId, "Job started.");
+    await jobStore.transition(jobId, { status: JOB_STATUS.RUNNING, phase: "starting" });
+    await jobStore.appendLog(jobId, "Job started.");
     await appendServerLog("job.start", { id: jobId, type: job.type, conversationId: job.conversation_id });
 
     try {
       const ctx = contextFor(jobId);
-      ctx.checkCanceled();
+      await ctx.checkCanceled();
       const output = await withTimeout(
         handler(job.input || {}, ctx, job),
         Number(job.input?.job_timeout_ms || job.input?.timeout_ms || timeoutMs || DEFAULT_JOB_TIMEOUT_MS),
         job
       );
-      const latest = jobStore.getJob(jobId);
+      const latest = await jobStore.getJob(jobId);
       if (latest?.cancel_requested) {
-        jobStore.transition(jobId, {
+        await jobStore.transition(jobId, {
           status: JOB_STATUS.CANCELED,
           phase: "canceled",
           error: { errorType: "job_canceled", error: "Job was canceled." },
         });
       } else {
-        jobStore.transition(jobId, {
+        await jobStore.transition(jobId, {
           status: JOB_STATUS.SUCCEEDED,
           phase: "done",
           output: compactOutput(output),
@@ -165,19 +165,19 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
       const classified = classifyError
         ? classifyError(error, { stage: job.type })
         : { errorType: error?.errorType || "unknown", retryable: true, nextActions: ["Retry job"] };
-      jobStore.transition(jobId, {
+      await jobStore.transition(jobId, {
         status: error?.errorType === "job_canceled" ? JOB_STATUS.CANCELED : JOB_STATUS.FAILED,
         phase: classified.errorStage || job.type || "failed",
         error: serializeError(error, classified),
         choices: choicesFromError(classified, job),
       });
-      jobStore.appendLog(jobId, error?.message || "Job failed.", {
+      await jobStore.appendLog(jobId, error?.message || "Job failed.", {
         errorType: classified.errorType,
         technicalDetail: classified.technicalDetail,
       });
       await appendServerLog("job.failed", { id: jobId, type: job.type, errorType: classified.errorType, error: error?.message });
     }
-    return jobStore.getJob(jobId);
+    return await jobStore.getJob(jobId);
   }
 
   function schedule(jobId) {
@@ -191,19 +191,26 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
     },
 
     enqueue(type, input = {}, { conversationId = "", title = "" } = {}) {
-      const job = jobStore.createJob({
+      const created = jobStore.createJob({
         type,
         conversationId,
         title: title || type,
         input,
         phase: "queued",
       });
+      if (isPromiseLike(created)) {
+        return created.then(async job => {
+          schedule(job.id);
+          return await jobStore.getJob(job.id);
+        });
+      }
+      const job = created;
       schedule(job.id);
       return jobStore.getJob(job.id);
     },
 
     async runNow(type, input = {}, { conversationId = "", title = "" } = {}) {
-      const job = jobStore.createJob({
+      const job = await jobStore.createJob({
         type,
         conversationId,
         title: title || type,
@@ -214,11 +221,21 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
     },
 
     resumeQueuedJobs() {
-      for (const job of jobStore.listJobs({ status: JOB_STATUS.QUEUED, limit: 200 }).reverse()) {
+      const jobs = jobStore.listJobs({ status: JOB_STATUS.QUEUED, limit: 200 });
+      if (isPromiseLike(jobs)) {
+        return jobs.then(items => {
+          for (const job of items.reverse()) schedule(job.id);
+        });
+      }
+      for (const job of jobs.reverse()) {
         schedule(job.id);
       }
     },
   };
+}
+
+function isPromiseLike(value) {
+  return value && typeof value.then === "function";
 }
 
 function withTimeout(promise, timeoutMs, job = {}) {
