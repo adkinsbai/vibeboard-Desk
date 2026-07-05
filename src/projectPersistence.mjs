@@ -300,7 +300,14 @@ export function createPostgresProjectPersistence({ pg } = {}) {
   };
   const rowsOf = result => Array.isArray(result) ? result : (Array.isArray(result?.rows) ? result.rows : []);
   const firstRow = async queryResult => rowsOf(await queryResult)[0] || null;
-  const nullableTimestamp = value => value ? value : null;
+  const timestampValue = value => {
+    if (!value) return null;
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+    const text = String(value || "").trim();
+    if (!text) return null;
+    const parsed = new Date(text);
+    return Number.isNaN(parsed.getTime()) ? text : parsed.toISOString();
+  };
   const runTransactionStatements = async builders => {
     if (typeof pg.transaction === "function") {
       return pg.transaction(tx => builders.map(build => build(tx)));
@@ -542,7 +549,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         if (!legacyId) continue;
         await pg`
           INSERT INTO messages (legacy_id, conversation_id, role, content, build_id, created_at)
-          VALUES (${legacyId}, ${conversationId}, ${message.role}, ${message.content}, ${message.build_id || null}, ${message.created_at || now()})
+          VALUES (${legacyId}, ${conversationId}, ${message.role}, ${message.content}, ${message.build_id || null}, ${timestampValue(message.created_at) || now()})
           ON CONFLICT DO NOTHING
         `;
       }
@@ -566,7 +573,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         if (!legacyId) continue;
         await pg`
           INSERT INTO conversation_files (legacy_id, conversation_id, build_id, filename, content, created_at)
-          SELECT ${legacyId}, ${conversationId}, ${row.build_id || ""}, ${row.filename}, ${row.content}, ${row.created_at || now()}
+          SELECT ${legacyId}, ${conversationId}, ${row.build_id || ""}, ${row.filename}, ${row.content}, ${timestampValue(row.created_at) || now()}
           WHERE NOT EXISTS (
             SELECT 1 FROM conversation_files
             WHERE conversation_id = ${conversationId} AND filename = ${row.filename}
@@ -664,8 +671,8 @@ export function createPostgresProjectPersistence({ pg } = {}) {
          choices_json, logs_json, cancel_requested, created_at, updated_at, started_at, completed_at)
         VALUES (${row.id}, ${row.type}, ${row.status}, ${row.phase}, ${row.conversation_id}, ${row.title},
           ${jsonString(row.input, {})}, ${jsonString(row.output, null)}, ${jsonString(row.error, null)},
-          ${jsonString(row.choices, [])}, ${jsonString(row.logs, [])}, ${row.cancel_requested ? 1 : 0}, ${row.created_at}, ${row.updated_at},
-          ${nullableTimestamp(row.started_at)}, ${nullableTimestamp(row.completed_at)})
+          ${jsonString(row.choices, [])}, ${jsonString(row.logs, [])}, ${row.cancel_requested ? 1 : 0}, ${timestampValue(row.created_at)}, ${timestampValue(row.updated_at)},
+          ${timestampValue(row.started_at)}, ${timestampValue(row.completed_at)})
         ON CONFLICT (id) DO NOTHING
       `;
       return row;
@@ -721,9 +728,9 @@ export function createPostgresProjectPersistence({ pg } = {}) {
             choices_json = ${jsonString(next.choices, [])},
             logs_json = ${jsonString(next.logs, [])},
             cancel_requested = ${next.cancel_requested ? 1 : 0},
-            updated_at = ${next.updated_at},
-            started_at = ${nullableTimestamp(next.started_at)},
-            completed_at = ${nullableTimestamp(next.completed_at)}
+            updated_at = ${timestampValue(next.updated_at)},
+            started_at = ${timestampValue(next.started_at)},
+            completed_at = ${timestampValue(next.completed_at)}
         WHERE id = ${id}
       `;
       return next;
