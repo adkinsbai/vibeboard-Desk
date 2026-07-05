@@ -9,6 +9,24 @@ function promptHas(prompt, words) {
   return words.some((word) => lower.includes(word.toLowerCase()));
 }
 
+function resolveHourlyRate(prompt) {
+  const text = String(prompt || "");
+  const patterns = [
+    /(?:时薪|hourly\s*(?:rate|wage)?|wage|salary)\D{0,12}(\d+(?:\.\d+)?)/i,
+    /(\d+(?:\.\d+)?)\s*(?:元\s*\/\s*小时|rmb\s*\/\s*hour|yuan\s*\/\s*hour|\/\s*h|per\s*hour)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const value = Number(match?.[1]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 150;
+}
+
+function isWagePrompt(prompt) {
+  return promptHas(prompt, ["paid fishing", "salary calculator", "wage calculator", "hourly wage", "带薪", "摸鱼", "薪资", "工资", "时薪", "薪水"]);
+}
+
 export function createAppSpec(prompt, id) {
   const text = String(prompt || "").trim() || "Build a VibeBoard hardware app";
   let mode = "assistant";
@@ -16,8 +34,10 @@ export function createAppSpec(prompt, id) {
   if (promptHas(text, ["fullscreen clock", "full screen clock", "clock", "全屏时钟", "时钟", "大时钟"])) mode = "clock";
   if (promptHas(text, ["voice", "audio", "record", "speech", "语音", "录音", "麦克风"])) mode = "voice";
   if (mode === "assistant" && promptHas(text, ["server", "dashboard", "status", "监控", "状态", "面板", "服务器"])) mode = "dashboard";
+  if (isWagePrompt(text)) mode = "wage";
   if (promptHas(text, ["timer", "focus", "countdown", "倒计时", "番茄"])) mode = "timer";
   if (promptHas(text, ["control", "switch", "gpio", "relay", "button", "控制", "开关", "继电器"])) mode = "control";
+  if (isWagePrompt(text)) mode = "wage";
   if (promptHas(text, ["weather", "天气", "气温", "白底蓝字", "白色", "蓝色", "小屏助手"])) mode = "weather";
 
   const titles = {
@@ -26,6 +46,7 @@ export function createAppSpec(prompt, id) {
     dashboard: "Device Dashboard",
     timer: "Focus Clock",
     control: "Hardware Control",
+    wage: "带薪摸鱼计算器",
     weather: "小屏助手",
     clock: "全屏时钟",
     carousel: "图片轮播",
@@ -36,6 +57,7 @@ export function createAppSpec(prompt, id) {
     dashboard: "#f59e0b",
     timer: "#a78bfa",
     control: "#fb7185",
+    wage: "#14b8a6",
     weather: "#0b63ce",
     clock: "#f8fafc",
     carousel: "#fb7185",
@@ -71,6 +93,12 @@ export function createAppSpec(prompt, id) {
       ["serviceState", "Service", "--", "systemd"],
       ["temp", "Temp", "--", "board thermal"],
     ],
+    wage: [
+      ["earned", "已赚金额", "￥0.00", "实时累计"],
+      ["elapsed", "摸鱼时长", "00:00:00", "本轮合计"],
+      ["rate", "时薪", `${resolveHourlyRate(text)}元/小时`, "固定薪资"],
+      ["sessions", "今日次数", "0", "开始次数"],
+    ],
     weather: [
       ["weather", "天气", "--", "Shenzhen weather"],
       ["temp", "板端温度", "--", "thermal zone"],
@@ -98,6 +126,11 @@ export function createAppSpec(prompt, id) {
       { id: "next", label: "Next" },
       { id: "refresh", label: "Sync" },
     ],
+    wage: [
+      { id: "primary", label: "开始摸鱼" },
+      { id: "reset", label: "清零" },
+      { id: "mark", label: "记一笔" },
+    ],
   };
 
   return {
@@ -107,6 +140,7 @@ export function createAppSpec(prompt, id) {
     title: titles[mode],
     subtitle: text.slice(0, 120),
     accent: accents[mode],
+    hourlyRate: mode === "wage" ? resolveHourlyRate(text) : undefined,
     target: "480x360 RK3566 Linux kiosk",
     hardwareApi: [...HARDWARE_APP_CONTRACT.requiredRuntimeApis],
     widgets: widgetsByMode[mode].map(([widgetId, label, value, hint]) => ({ id: widgetId, label, value, hint })),

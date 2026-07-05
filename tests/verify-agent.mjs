@@ -177,6 +177,32 @@ function templateFilesForPrompt(prompt, id = "vb-template-test") {
   };
 }
 
+await test("template routes paid fishing salary calculators away from hardware control", () => {
+  const prompt = [
+    "做一个带薪摸鱼计算器",
+    "点击开始就计算薪资，点击暂停停止",
+    "我的时薪是150",
+    "要有一个大按钮",
+  ].join("，");
+  const spec = createAppSpec(prompt, "vb-wage-template");
+  assert(spec.mode === "wage", `expected wage mode, got ${spec.mode}`);
+  const files = templateFilesForPrompt(prompt, "vb-wage-template");
+  const joined = Object.values(files).join("\n");
+  assert(joined.includes("带薪摸鱼计算器"), "wage template should keep the calculator title");
+  assert(joined.includes("150元/小时"), "wage template should display the hourly wage");
+  assert(joined.includes("开始摸鱼"), "wage template should include a start button label");
+  assert(joined.includes("暂停摸鱼"), "wage template should include a pause button label");
+  assert(/setInterval|requestAnimationFrame/.test(files["app.js"]), "wage template should update live over time");
+  assert(/HOURLY_RATE\s*\/\s*3600/.test(files["app.js"]), "wage template should calculate salary per second from the hourly rate");
+  assert(!/Relay Command|Hardware Control|Toggle A|GPIO/.test(joined), "wage template must not fall back to the hardware control panel");
+
+  const englishSpec = createAppSpec("salary timer with start button, hourly wage 150 RMB/hour", "vb-wage-english");
+  assert(englishSpec.mode === "wage", `expected English salary timer prompt to stay wage mode, got ${englishSpec.mode}`);
+
+  const salaryTimerSpec = createAppSpec("salary timer, hourly wage 150 RMB/hour", "vb-wage-timer");
+  assert(salaryTimerSpec.mode === "wage", `expected salary timer prompt to stay wage mode, got ${salaryTimerSpec.mode}`);
+});
+
 function makeZip(entries = []) {
   const chunks = [];
   for (const entry of entries) {
@@ -4107,6 +4133,7 @@ if (!verifier) {
       "server dashboard status panel",
       "voice audio console",
       "focus timer countdown",
+      "paid fishing wage calculator hourly wage 150 start pause button",
       "gpio relay control panel",
       "weather panel",
       "fullscreen clock",

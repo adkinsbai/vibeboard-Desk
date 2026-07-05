@@ -658,7 +658,345 @@ console.log("VibeBoard advanced preview ready", BUILD_ID, PROMPT);
     "app.js": app,
   };
 }
+
+function wageTemplateFiles(prompt, id, spec) {
+  const hourlyRate = Number.isFinite(Number(spec.hourlyRate)) && Number(spec.hourlyRate) > 0
+    ? Number(spec.hourlyRate)
+    : 150;
+  const hourlyRateText = `${hourlyRate}元/小时`;
+  const specJson = JSON.stringify({ ...spec, hourlyRate });
+  const idJson = JSON.stringify(id);
+  const index = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>带薪摸鱼计算器</title>
+  <link rel="stylesheet" href="./style.css?v=${id}">
+</head>
+<body>
+  <main class="screen wage-screen" data-mode="wage">
+    <header class="top">
+      <div>
+        <span id="statusText">待机中</span>
+        <strong>带薪摸鱼计算器</strong>
+      </div>
+      <b id="rate">${htmlEscape(hourlyRateText)}</b>
+    </header>
+
+    <section class="money" aria-label="earned salary">
+      <span>本次已赚</span>
+      <strong id="earned">￥0.00</strong>
+      <small id="perSecond">每秒 ￥0.00</small>
+    </section>
+
+    <section class="stats" aria-label="calculator stats">
+      <article><span>摸鱼时长</span><strong id="elapsed">00:00:00</strong></article>
+      <article><span>今日次数</span><strong id="sessions">0</strong></article>
+      <article><span>状态</span><strong id="state">未开始</strong></article>
+    </section>
+
+    <section class="controls">
+      <button class="primary action" id="toggleBtn" type="button" data-action="primary">开始摸鱼</button>
+      <button class="action" id="resetBtn" type="button" data-action="reset">清零</button>
+    </section>
+
+    <footer>
+      <span id="eventLog">点击开始，工资就开始悄悄增长</span>
+      <span>${id}</span>
+    </footer>
+  </main>
+  <script src="./app.js?v=${id}"></script>
+</body>
+</html>
+`;
+
+  const style = `:root {
+  color-scheme: dark;
+  --bg: #07110f;
+  --panel: rgba(255, 255, 255, .08);
+  --line: rgba(156, 255, 217, .22);
+  --text: #f8fffb;
+  --muted: #a9c8bc;
+  --accent: #20e3b2;
+  --accent-2: #ffd166;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  width: 480px;
+  height: 360px;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
+}
+
+button { font: inherit; }
+
+.screen {
+  width: 480px;
+  height: 360px;
+  display: grid;
+  grid-template-rows: 54px 126px 74px 54px 22px;
+  gap: 8px;
+  padding: 12px;
+  overflow: hidden;
+  background:
+    linear-gradient(rgba(32,227,178,.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,209,102,.06) 1px, transparent 1px),
+    radial-gradient(circle at 18% 18%, rgba(32,227,178,.28), transparent 26%),
+    radial-gradient(circle at 86% 18%, rgba(255,209,102,.18), transparent 25%),
+    linear-gradient(135deg, #07110f 0%, #0d1c1a 54%, #11110a 100%);
+  background-size: 24px 24px, 24px 24px, auto, auto, auto;
+}
+
+.top,
+footer {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.top span,
+.money span,
+.money small,
+.stats span,
+footer {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.15;
+}
+
+.top strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--accent);
+  font-size: 25px;
+  line-height: 1;
+}
+
+.top b {
+  min-width: 112px;
+  max-width: 152px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--accent-2);
+  background: rgba(0, 0, 0, .22);
+  font-size: 14px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.money,
+.stats article {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 14px 28px rgba(0,0,0,.18);
+}
+
+.money {
+  display: grid;
+  grid-template-rows: 22px 64px 24px;
+  align-content: center;
+  padding: 12px 14px;
+}
+
+.money strong {
+  overflow: hidden;
+  color: var(--accent-2);
+  font-family: Consolas, "Segoe UI", monospace;
+  font-size: 52px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.money small {
+  color: var(--accent);
+  font-family: Consolas, monospace;
+  font-size: 16px;
+}
+
+.stats {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1.35fr .8fr .85fr;
+  gap: 8px;
+}
+
+.stats article {
+  padding: 9px 10px;
+}
+
+.stats strong {
+  display: block;
+  margin-top: 8px;
+  overflow: hidden;
+  color: var(--text);
+  font-family: Consolas, "Segoe UI", monospace;
+  font-size: 22px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.controls {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 1fr 94px;
+  gap: 8px;
+}
+
+.action {
+  min-width: 0;
+  height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: rgba(255,255,255,.08);
+  font-size: 15px;
+  font-weight: 900;
+}
+
+.primary {
+  color: #06231b;
+  background: linear-gradient(135deg, var(--accent), #9cffd9);
+  border-color: rgba(156,255,217,.72);
+  font-size: 20px;
+}
+
+.primary.running {
+  color: #1f1600;
+  background: linear-gradient(135deg, var(--accent-2), #ffe6a3);
+}
+
+footer {
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+footer span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+`;
+
+  const app = `const SPEC = ${specJson};
+const BUILD_ID = ${idJson};
+const HOURLY_RATE = Number(SPEC.hourlyRate || 150);
+const RATE_PER_SECOND = HOURLY_RATE / 3600;
+const el = id => document.getElementById(id);
+
+let running = false;
+let totalSeconds = 0;
+let sessions = 0;
+let lastTick = Date.now();
+let timer = null;
+
+function setText(id, value) {
+  const node = el(id);
+  if (node) node.textContent = String(value);
+}
+
+function formatTime(seconds) {
+  const total = Math.max(0, Math.floor(seconds));
+  const h = String(Math.floor(total / 3600)).padStart(2, "0");
+  const m = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+  const s = String(total % 60).padStart(2, "0");
+  return h + ":" + m + ":" + s;
+}
+
+function formatMoney(value) {
+  return "￥" + Number(value || 0).toFixed(2);
+}
+
+function render() {
+  const earned = totalSeconds * RATE_PER_SECOND;
+  setText("earned", formatMoney(earned));
+  setText("elapsed", formatTime(totalSeconds));
+  setText("sessions", sessions);
+  setText("state", running ? "摸鱼中" : (totalSeconds > 0 ? "已暂停" : "未开始"));
+  setText("statusText", running ? "正在计薪" : "待机中");
+  setText("rate", HOURLY_RATE + "元/小时");
+  setText("perSecond", "每秒 " + formatMoney(RATE_PER_SECOND));
+}
+
+function tick() {
+  const now = Date.now();
+  if (running) {
+    totalSeconds += Math.max(0, (now - lastTick) / 1000);
+  }
+  lastTick = now;
+  render();
+}
+
+function start() {
+  running = true;
+  sessions += 1;
+  lastTick = Date.now();
+  el("toggleBtn").textContent = "暂停摸鱼";
+  el("toggleBtn").classList.add("running");
+  setText("eventLog", "摸鱼开始：收入每秒增加 " + formatMoney(RATE_PER_SECOND));
+  if (!timer) timer = setInterval(tick, 1000);
+  render();
+}
+
+function pause() {
+  tick();
+  running = false;
+  el("toggleBtn").textContent = "开始摸鱼";
+  el("toggleBtn").classList.remove("running");
+  setText("eventLog", "已暂停，累计 " + formatMoney(totalSeconds * RATE_PER_SECOND));
+  render();
+}
+
+function reset() {
+  running = false;
+  totalSeconds = 0;
+  sessions = 0;
+  lastTick = Date.now();
+  el("toggleBtn").textContent = "开始摸鱼";
+  el("toggleBtn").classList.remove("running");
+  setText("eventLog", "已清零，随时重新开始摸鱼");
+  render();
+}
+
+el("toggleBtn").addEventListener("click", () => {
+  if (running) pause();
+  else start();
+});
+el("resetBtn").addEventListener("click", reset);
+
+render();
+timer = setInterval(tick, 1000);
+console.log("VibeBoard wage calculator ready", BUILD_ID, HOURLY_RATE);
+`;
+
+  return {
+    "index.html": index,
+    "style.css": style,
+    "app.js": app,
+  };
+}
 export function advancedTemplateFilesV2(prompt, id, spec) {
+  if (spec.mode === "wage") {
+    return wageTemplateFiles(prompt, id, spec);
+  }
+
   const specialized = advancedTemplateFiles(prompt, id, spec);
   if (specialized) {
     if (spec.mode === "clock") {
