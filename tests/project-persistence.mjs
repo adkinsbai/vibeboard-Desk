@@ -60,6 +60,11 @@ await test("sqlite ProjectPersistence preserves conversations, files, memory, an
   const messages = await persistence.listMessages("conv-a");
   const memory = await persistence.getProjectMemory("conv-a");
   const jobs = await persistence.listJobs({ conversationId: "conv-a" });
+  const idempotentJob = await persistence.findIdempotentJob({
+    type: "generate",
+    conversationId: "conv-a",
+    input: { prompt: "clock", user_id: "user-a", client_run_id: "missing" },
+  });
 
   assert(listed.some(item => item.id === "conv-a"), "conversation should be listable by user");
   assert(files.buildId === "build-a", "saved files should keep the build id");
@@ -68,6 +73,7 @@ await test("sqlite ProjectPersistence preserves conversations, files, memory, an
   assert(messages.some(item => item.content === "make a clock"), "message should be saved");
   assert(memory.goal === "show current time", "project memory should be saved");
   assert(jobs.some(item => item.id === job.id), "job should be listable by conversation");
+  assert(idempotentJob === null, "sqlite idempotency lookup should ignore jobs without client_run_id");
   assert(done.completed_at, "final job should have completed_at");
 });
 
@@ -101,6 +107,52 @@ await test("file ProjectPersistence keeps writes from two independent instances"
   assert(filesFromB.files["app.js"] === "console.log('a')", "instance B should read files from instance A");
   assert(jobsFromA.some(item => item.id === job.id), "instance A should read job from instance B");
   assert(conversationsFromB.some(item => item.id === "conv-a"), "conversation should survive both writers");
+});
+
+await test("ProjectPersistence can find idempotent jobs by client_run_id", async () => {
+  const db = new SQL.Database();
+  const sqlite = createSqliteProjectPersistence({
+    sqliteDb: db,
+    saveSqlite: () => {},
+    jobOptions: { idFactory: () => "job-idem-sqlite" },
+  });
+  await sqlite.initSchema();
+  const created = await sqlite.createJob({
+    type: "generate",
+    conversationId: "conv-idem",
+    title: "Generate once",
+    input: { prompt: "one", action: "confirm_build", client_run_id: "run-idem", user_id: "user-a" },
+  });
+  const found = await sqlite.findIdempotentJob({
+    type: "generate",
+    conversationId: "conv-idem",
+    input: { prompt: "one", action: "confirm_build", client_run_id: "run-idem", user_id: "user-a" },
+  });
+  const differentAction = await sqlite.findIdempotentJob({
+    type: "generate",
+    conversationId: "conv-idem",
+    input: { prompt: "one", action: "continue_edit", client_run_id: "run-idem", user_id: "user-a" },
+  });
+
+  assert(found?.id === created.id, "sqlite should find matching idempotent job");
+  assert(differentAction === null, "sqlite idempotency lookup should be scoped by action");
+
+  const filePath = fileURLToPath(new URL(`runtime/project-idempotency-${Date.now()}-${Math.random()}.json`, new URL("..", import.meta.url)));
+  const filePersistence = createFileProjectPersistence({ filePath });
+  await filePersistence.initSchema();
+  const fileJob = await filePersistence.createJob({
+    type: "generate",
+    conversationId: "conv-file-idem",
+    title: "Generate once",
+    input: { action: "confirm_build", client_run_id: "run-file-idem", user_id: "user-a" },
+  });
+  const fileFound = await filePersistence.findIdempotentJob({
+    type: "generate",
+    conversationId: "conv-file-idem",
+    input: { action: "confirm_build", client_run_id: "run-file-idem", user_id: "user-a" },
+  });
+
+  assert(fileFound?.id === fileJob.id, "file persistence should find matching idempotent job");
 });
 
 await test("file ProjectPersistence does not overwrite newer rows with stale writers", async () => {
@@ -179,6 +231,49 @@ await test("postgres ProjectPersistence issues row-level writes instead of sqlit
   assert(text.includes("INSERT INTO conversation_files"), "files should be inserted as rows");
   assert(text.includes("INSERT INTO jobs"), "job should be inserted into jobs table");
   assert(!text.includes("sqlite_snapshots"), "project persistence must not write sqlite_snapshots");
+});
+
+await test("postgres ProjectPersistence can find idempotent jobs by client_run_id", async () => {
+  const pg = async (strings, ...values) => {
+    const text = strings.join("?");
+    if (/SELECT \* FROM jobs/.test(text)) {
+      assert(values[0] === "generate", "postgres idempotency lookup should filter by type");
+      assert(values[1] === "conv-pg-idem", "postgres idempotency lookup should filter by conversation");
+      return [{
+        id: "job-pg-idem",
+        type: "generate",
+        status: "succeeded",
+        phase: "done",
+        conversation_id: "conv-pg-idem",
+        title: "Generate once",
+        input_json: JSON.stringify({ action: "confirm_build", client_run_id: "run-pg-idem", user_id: "user-a" }),
+        output_json: JSON.stringify({ ok: true }),
+        error_json: null,
+        choices_json: "[]",
+        logs_json: "[]",
+        cancel_requested: 0,
+        created_at: "2026-07-06T01:00:00.000Z",
+        updated_at: "2026-07-06T01:00:01.000Z",
+        started_at: null,
+        completed_at: "2026-07-06T01:00:01.000Z",
+      }];
+    }
+    return [];
+  };
+  const persistence = createPostgresProjectPersistence({ pg });
+  const found = await persistence.findIdempotentJob({
+    type: "generate",
+    conversationId: "conv-pg-idem",
+    input: { action: "confirm_build", client_run_id: "run-pg-idem", user_id: "user-a" },
+  });
+  const miss = await persistence.findIdempotentJob({
+    type: "generate",
+    conversationId: "conv-pg-idem",
+    input: { action: "confirm_build", client_run_id: "run-pg-idem", user_id: "user-b" },
+  });
+
+  assert(found?.id === "job-pg-idem", "postgres should find matching idempotent job");
+  assert(miss === null, "postgres idempotency lookup should be scoped by user");
 });
 
 await test("postgres ProjectPersistence sends null for absent job timestamp columns", async () => {

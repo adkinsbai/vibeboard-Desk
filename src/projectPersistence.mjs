@@ -190,6 +190,34 @@ function normalizeLegacyJobRow(row = {}) {
   };
 }
 
+function normalizeIdempotencyValue(value) {
+  return String(value || "").trim().slice(0, 160);
+}
+
+function jobIdempotencyScope({ type = "", conversationId = "", input = {} } = {}) {
+  const clientRunId = normalizeIdempotencyValue(input.client_run_id || input.clientRunId);
+  if (!clientRunId) return null;
+  return {
+    type: normalizeIdempotencyValue(type || "task"),
+    conversationId: normalizeIdempotencyValue(conversationId || input.conversation_id || input.conversationId),
+    action: normalizeIdempotencyValue(input.action || input.job_action || type || "task"),
+    userId: normalizeIdempotencyValue(input.user_id || input.userId),
+    clientRunId,
+  };
+}
+
+function jobMatchesIdempotencyScope(job = {}, scope = null) {
+  if (!job || !scope) return false;
+  const input = job.input || {};
+  return (
+    normalizeIdempotencyValue(job.type) === scope.type &&
+    normalizeIdempotencyValue(job.conversation_id) === scope.conversationId &&
+    normalizeIdempotencyValue(input.client_run_id || input.clientRunId) === scope.clientRunId &&
+    normalizeIdempotencyValue(input.action || input.job_action || job.type || "task") === scope.action &&
+    normalizeIdempotencyValue(input.user_id || input.userId) === scope.userId
+  );
+}
+
 async function listAllLegacyJobs(legacy) {
   if (!legacy?._sqliteDb) return legacy.listJobs({ limit: 200 });
   const stmt = legacy._sqliteDb.prepare("SELECT id FROM jobs ORDER BY created_at DESC");
@@ -260,6 +288,11 @@ function wrapStores(conversationStore, jobStore) {
     },
     async getJob(id) {
       return jobStore.getJob(id);
+    },
+    async findIdempotentJob(input = {}) {
+      return typeof jobStore.findIdempotentJob === "function"
+        ? jobStore.findIdempotentJob(input)
+        : null;
     },
     async listJobs(filters = {}) {
       return jobStore.listJobs(filters);
@@ -682,6 +715,17 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       return normalizeJob(await firstRow(pg`SELECT * FROM jobs WHERE id = ${id}`));
     },
 
+    async findIdempotentJob({ type = "", conversationId = "", input = {} } = {}) {
+      const scope = jobIdempotencyScope({ type, conversationId, input });
+      if (!scope) return null;
+      const rows = rowsOf(await pg`
+        SELECT * FROM jobs
+        WHERE type = ${scope.type} AND conversation_id = ${scope.conversationId}
+        ORDER BY created_at DESC LIMIT ${100}
+      `);
+      return rows.map(normalizeJob).find(job => jobMatchesIdempotencyScope(job, scope)) || null;
+    },
+
     async listJobs({ limit = 50, conversationId = "", status = "" } = {}) {
       const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
       const safeStatus = status ? normalizeStatus(status) : "";
@@ -1000,6 +1044,16 @@ function createJsonProjectPersistence({ filePath }) {
     async getJob(id) {
       const state = await readState();
       return byId(state.jobs, id) || null;
+    },
+    async findIdempotentJob({ type = "", conversationId = "", input = {} } = {}) {
+      const scope = jobIdempotencyScope({ type, conversationId, input });
+      if (!scope) return null;
+      const state = await readState();
+      return state.jobs
+        .filter(row => normalizeIdempotencyValue(row.type) === scope.type && normalizeIdempotencyValue(row.conversation_id) === scope.conversationId)
+        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+        .slice(0, 100)
+        .find(job => jobMatchesIdempotencyScope(job, scope)) || null;
     },
     async listJobs({ limit = 50, conversationId = "", status = "" } = {}) {
       const state = await readState();

@@ -31,7 +31,11 @@ await withServer(async ({ baseUrl, json }) => {
           }));
         }
         if (url.includes("/api/generate") && method === "POST") {
-          window.__vibeboardTestEvents.push({ type: "generate-post" });
+          let body = {};
+          try {
+            body = init?.body ? JSON.parse(String(init.body)) : {};
+          } catch {}
+          window.__vibeboardTestEvents.push({ type: "generate-post", body });
           return Promise.resolve(new Response(JSON.stringify({
             ok: true,
             job: {
@@ -291,6 +295,16 @@ await withServer(async ({ baseUrl, json }) => {
     assert(!finalJobEvents.some(item => item.type === "job-detail-get"), "runFlow should not poll a request-bound final job after /api/generate already returned it");
     assert(lastBuildState === "vb-ui-final", `request-bound final job should restore the generated build, got ${lastBuildState}`);
     assert(codePreviewText.includes("Immediate final job"), "request-bound final job should render generated files");
+
+    await page.evaluate(async () => {
+      window.__vibeboardTestEvents = [];
+      window.pendingGeneratePrompt = "Single confirm build";
+      await window.startBuild("Single confirm build");
+    });
+    const confirmBuildEvents = await page.evaluate(() => window.__vibeboardTestEvents || []);
+    const confirmGeneratePosts = confirmBuildEvents.filter(item => item.type === "generate-post");
+    assert(confirmGeneratePosts.length === 1, `startBuild should submit one generation request, got ${confirmGeneratePosts.length}`);
+    assert(confirmGeneratePosts[0]?.body?.client_run_id, "startBuild should include a client_run_id for backend idempotency");
 
     await page.evaluate(() => window.setBusy(false));
     await page.locator("#promptInput").fill("Enter should submit from the main composer");

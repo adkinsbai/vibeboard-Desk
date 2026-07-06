@@ -3107,6 +3107,7 @@ await test("generate runtime passes conversation files into agent path", async (
       conversationStore: {
         getProjectMemory: () => ({ goal: "edit existing screen" }),
         loadConversationFiles: () => ({
+          buildId: "vb-runtime-existing",
           files: {
             "index.html": "<html><script src=\"./app.js\"></script></html>",
             "style.css": "body{}",
@@ -3173,6 +3174,7 @@ await test("generate runtime passes conversation files into agent path", async (
     const result = await runtime.runGenerateRequest({
       prompt: "Change the existing screen.",
       conversation_id: "conv-runtime-agent",
+      current_build_id: "vb-runtime-existing",
       modelSettings: {
         provider: "custom",
         baseUrl: "http://mock.local",

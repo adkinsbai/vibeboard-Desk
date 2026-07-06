@@ -55,6 +55,22 @@ function normalizeStatus(status, fallback = JOB_STATUS.QUEUED) {
   return Object.values(JOB_STATUS).includes(value) ? value : fallback;
 }
 
+function normalizeIdempotencyValue(value) {
+  return String(value || "").trim().slice(0, 160);
+}
+
+function jobIdempotencyScope({ type = "", conversationId = "", input = {} } = {}) {
+  const clientRunId = normalizeIdempotencyValue(input.client_run_id || input.clientRunId);
+  if (!clientRunId) return null;
+  return {
+    type: normalizeIdempotencyValue(type || "task"),
+    conversationId: normalizeIdempotencyValue(conversationId || input.conversation_id || input.conversationId),
+    action: normalizeIdempotencyValue(input.action || input.job_action || type || "task"),
+    userId: normalizeIdempotencyValue(input.user_id || input.userId),
+    clientRunId,
+  };
+}
+
 function normalizeJob(row) {
   if (!row) return null;
   return {
@@ -154,6 +170,7 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
       `);
       db.run("CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at)");
       db.run("CREATE INDEX IF NOT EXISTS idx_jobs_conversation_created ON jobs(conversation_id, created_at)");
+      db.run("CREATE INDEX IF NOT EXISTS idx_jobs_idempotency ON jobs(type, conversation_id)");
       if (typeof saveDb === "function") saveDb();
     },
 
@@ -200,6 +217,8 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
     },
 
     createJob({ type, conversationId = "", title = "", input = {}, phase = "queued", status = JOB_STATUS.QUEUED } = {}) {
+      const existing = this.findIdempotentJob({ type, conversationId, input });
+      if (existing) return existing;
       const id = idFactory();
       const ts = isoNow(now);
       const safeStatus = normalizeStatus(status);
@@ -232,6 +251,31 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
     },
 
     getJob,
+
+    findIdempotentJob({ type = "", conversationId = "", input = {} } = {}) {
+      const scope = jobIdempotencyScope({ type, conversationId, input });
+      if (!scope) return null;
+      const rows = query(
+        db,
+        "SELECT * FROM jobs WHERE type = ? AND conversation_id = ? ORDER BY created_at DESC LIMIT 100",
+        [scope.type, scope.conversationId],
+      );
+      for (const row of rows) {
+        const job = normalizeJob(row);
+        const jobInput = job?.input || {};
+        const jobClientRunId = normalizeIdempotencyValue(jobInput.client_run_id || jobInput.clientRunId);
+        const jobAction = normalizeIdempotencyValue(jobInput.action || jobInput.job_action || job.type || "task");
+        const jobUserId = normalizeIdempotencyValue(jobInput.user_id || jobInput.userId);
+        if (
+          jobClientRunId === scope.clientRunId &&
+          jobAction === scope.action &&
+          jobUserId === scope.userId
+        ) {
+          return job;
+        }
+      }
+      return null;
+    },
 
     listJobs({ limit = 50, conversationId = "", status = "" } = {}) {
       const clauses = [];

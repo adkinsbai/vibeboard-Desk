@@ -106,9 +106,10 @@ export function createGenerateRuntime(deps = {}) {
       const embeddedAssets = conversationId && assetLibraryStore?.generatedAssets
         ? assetLibraryStore.generatedAssets(conversationId)
         : emptyEmbeddedAssets();
-      const conversationFiles = conversationId
-        ? (await conversationStore.loadConversationFiles(conversationId)).files
-        : {};
+      const conversationSnapshot = conversationId
+        ? await conversationStore.loadConversationFiles(conversationId)
+        : { buildId: null, files: {} };
+      const conversationFiles = conversationSnapshot?.files || {};
 
       const settings = normalizeModelSettings(modelSettings);
       if (!settings.enabled) {
@@ -147,6 +148,7 @@ export function createGenerateRuntime(deps = {}) {
 
       const fileStore = { ...conversationFiles };
       const isEditing = Object.keys(fileStore).some(name => name !== "manifest.json");
+      validateEditBuildBinding({ body, conversationId, isEditing, savedBuildId: conversationSnapshot?.buildId, fileStore });
       const agentStartedAt = Date.now();
       const agentSettings = buildGenerateAgentSettings({
         ...settings,
@@ -1010,6 +1012,68 @@ function shouldAskUserForRepair(errorType = "") {
     "generate_busy",
     "empty_prompt",
   ]).has(String(errorType || ""));
+}
+
+function validateEditBuildBinding({ body = {}, conversationId = "", isEditing = false, savedBuildId = "", fileStore = {} } = {}) {
+  if (!isEditing) return;
+  const currentBuildId = String(body.current_build_id || body.currentBuildId || "").trim();
+  const expectedBuildId = String(savedBuildId || "").trim();
+  if (!currentBuildId) {
+    throw createStructuredError(
+      "This edit must include current_build_id so it can be applied to the existing build instead of starting a new project.",
+      "build_context_required",
+      {
+        statusCode: 409,
+        conversationId,
+        expectedBuildId,
+        errorStage: "edit_context",
+        retryable: false,
+      },
+    );
+  }
+  if (!expectedBuildId) {
+    throw createStructuredError(
+      "The current conversation has files but no saved build id. Please reopen the latest build before editing.",
+      "build_context_missing",
+      {
+        statusCode: 409,
+        conversationId,
+        currentBuildId,
+        errorStage: "edit_context",
+        retryable: false,
+      },
+    );
+  }
+  if (currentBuildId !== expectedBuildId) {
+    throw createStructuredError(
+      "This edit is based on an older build. Reload the latest preview before continuing.",
+      "build_context_stale",
+      {
+        statusCode: 409,
+        conversationId,
+        currentBuildId,
+        expectedBuildId,
+        errorStage: "edit_context",
+        retryable: false,
+      },
+    );
+  }
+  const requiredFiles = ["index.html", "style.css", "app.js"];
+  const missing = requiredFiles.filter(name => !fileStore[name]);
+  if (missing.length) {
+    throw createStructuredError(
+      `The current build is missing required files for editing: ${missing.join(", ")}.`,
+      "build_context_incomplete",
+      {
+        statusCode: 409,
+        conversationId,
+        currentBuildId,
+        missingFiles: missing,
+        errorStage: "edit_context",
+        retryable: false,
+      },
+    );
+  }
 }
 
 function verificationResultFromError(error, phase = "generate") {

@@ -190,25 +190,39 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
     },
 
     enqueue(type, input = {}, { conversationId = "", title = "" } = {}) {
-      const created = jobStore.createJob({
-        type,
-        conversationId,
-        title: title || type,
-        input,
-        phase: "queued",
-      });
-      if (isPromiseLike(created)) {
-        return created.then(async job => {
-          schedule(job.id);
-          return await jobStore.getJob(job.id);
+      const createAndSchedule = () => {
+        const created = jobStore.createJob({
+          type,
+          conversationId,
+          title: title || type,
+          input,
+          phase: "queued",
         });
+        if (isPromiseLike(created)) {
+          return created.then(async job => {
+            schedule(job.id);
+            return await jobStore.getJob(job.id);
+          });
+        }
+        const job = created;
+        schedule(job.id);
+        return jobStore.getJob(job.id);
+      };
+      if (typeof jobStore.findIdempotentJob === "function") {
+        const existing = jobStore.findIdempotentJob({ type, conversationId, input });
+        if (isPromiseLike(existing)) {
+          return existing.then(job => job || createAndSchedule());
+        }
+        if (existing) return existing;
       }
-      const job = created;
-      schedule(job.id);
-      return jobStore.getJob(job.id);
+      return createAndSchedule();
     },
 
     async runNow(type, input = {}, { conversationId = "", title = "" } = {}) {
+      if (typeof jobStore.findIdempotentJob === "function") {
+        const existing = await jobStore.findIdempotentJob({ type, conversationId, input });
+        if (existing) return existing;
+      }
       const job = await jobStore.createJob({
         type,
         conversationId,

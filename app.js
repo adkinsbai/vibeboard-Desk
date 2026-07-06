@@ -129,6 +129,21 @@ let jobsPollTimer = null;
 let activeJobWaiters = new Set();
 let assetManagerSelectedConversationId = "";
 const GENERATION_START_TIMEOUT_MS = 300000;
+const GENERATION_FLOW_STATES = Object.freeze({
+  CLARIFYING: "clarifying",
+  GENERATING: "generating",
+  VERIFIED: "verified",
+  AWAITING_DEPLOY: "awaiting_deploy",
+  DEPLOYING: "deploying",
+  DONE: "done",
+});
+let generationFlowState = {
+  state: GENERATION_FLOW_STATES.CLARIFYING,
+  clientRunId: "",
+  conversationId: "",
+  promptKey: "",
+  currentBuildId: "",
+};
 let assetManagerCurrentFolderId = "";
 let assetManagerSelection = null;
 let assetManagerCache = { folders: [], assets: [], projectFiles: [] };
@@ -254,6 +269,51 @@ const stages = [
   { id: "build", title: "本地 L0-L3 验证", note: "contracts + syntax + hardware sim + render" },
   { id: "ready", title: "等待确认部署", note: "不会自动写入真机" },
 ];
+
+function setGenerationFlowState(state, patch = {}) {
+  generationFlowState = {
+    ...generationFlowState,
+    ...patch,
+    state,
+  };
+  const generating = state === GENERATION_FLOW_STATES.GENERATING;
+  if (generateBtn) generateBtn.disabled = busy || generating;
+  document.querySelectorAll('[data-action="confirm"]').forEach(button => {
+    button.disabled = generating;
+  });
+}
+
+function createClientRunId() {
+  if (crypto?.randomUUID) return crypto.randomUUID();
+  return `run_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function flowPromptKey(prompt = "", conversationId = "", action = "confirm_build") {
+  return [
+    String(conversationId || ""),
+    String(action || ""),
+    String(prompt || "").replace(/\s+/g, " ").trim().slice(0, 240),
+  ].join("|");
+}
+
+function clientRunIdForFlow(prompt = "", conversationId = "", action = "confirm_build") {
+  const promptKey = flowPromptKey(prompt, conversationId, action);
+  if (
+    generationFlowState.state === GENERATION_FLOW_STATES.GENERATING &&
+    generationFlowState.promptKey === promptKey &&
+    generationFlowState.clientRunId
+  ) {
+    return generationFlowState.clientRunId;
+  }
+  const clientRunId = createClientRunId();
+  setGenerationFlowState(GENERATION_FLOW_STATES.GENERATING, {
+    clientRunId,
+    conversationId: String(conversationId || ""),
+    promptKey,
+    currentBuildId: currentGeneratedBuildId() || "",
+  });
+  return clientRunId;
+}
 
 function pad(value) {
   return String(value).padStart(2, "0");
@@ -1129,7 +1189,12 @@ async function runJobChoice(job = {}, choice = {}) {
 }
 
 async function retryJob(job = {}, overrides = {}) {
-  const payload = { ...(job.input || {}), ...overrides };
+  const payload = {
+    ...(job.input || {}),
+    ...overrides,
+    client_run_id: overrides.client_run_id || overrides.clientRunId || createClientRunId(),
+    retry_of_job_id: job.id || "",
+  };
   if (job.type === "deploy") {
     await doDeploy(payload.prompt || "");
     return;
@@ -1144,6 +1209,8 @@ async function retryJob(job = {}, overrides = {}) {
 function setBusy(value) {
   foregroundTaskCount = Math.max(0, foregroundTaskCount + (value ? 1 : -1));
   busy = foregroundTaskCount > 0;
+  const generating = generationFlowState.state === GENERATION_FLOW_STATES.GENERATING;
+  if (generateBtn) generateBtn.disabled = busy || generating;
   if (runDemoBtn) runDemoBtn.disabled = busy;
   if (modelConfigBtn) modelConfigBtn.disabled = busy;
   if (agentState) agentState.textContent = busy ? `${foregroundTaskCount} running` : "idle";
@@ -2339,17 +2406,21 @@ async function startBuild(originalPrompt) {
     addMarkdownMessage("agent", "我还没有整理出可构建的需求，请先继续聊清楚方案。");
     return;
   }
+  if (generationFlowState.state === GENERATION_FLOW_STATES.GENERATING) {
+    addMarkdownMessage("agent", "当前已经有生成任务在执行，我会继续等待这个任务完成，不会重复创建第二个任务。");
+    return;
+  }
   addMarkdownMessage("agent", "🔨 **正在生成代码，请稍候...**");
 
   // 收集完整的对话上下文
   const history = buildChatMessages();
   await runFlow(originalPrompt, history, currentConversationId);
-
-  // 调用原有的代码生成流程
-  await runFlow(originalPrompt, history, currentConversationId);
 }
 
 async function runFlow(prompt, history = [], conversationId = currentConversationId, overrides = {}) {
+  const action = overrides.action || "confirm_build";
+  const clientRunId = overrides.client_run_id || overrides.clientRunId || clientRunIdForFlow(prompt, conversationId, action);
+  const currentBuildId = overrides.current_build_id || overrides.currentBuildId || currentGeneratedBuildId() || "";
   setBusy(true);
   deployState.textContent = labels.preparing;
   const progress = addStageCard();
@@ -2374,6 +2445,7 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
     generatePoller = createGenerateLogPoller(progress);
     generatePoller.start();
     const started = await postJson(api.generate, {
+      ...overrides,
       prompt,
       modelSettings: getModelPayload(),
       agent_mode: getAgentMode(),
@@ -2381,7 +2453,9 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
       clarify_answers: [],
       history: chatHistory,
       background: true,
-      ...overrides,
+      action,
+      client_run_id: clientRunId,
+      current_build_id: currentBuildId,
     }, { timeout: GENERATION_START_TIMEOUT_MS });
     const initialJob = started.job;
     const jobId = initialJob?.id;
@@ -2404,6 +2478,12 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
       throw error;
     }
     const gen = finishedJob.output;
+    setGenerationFlowState(GENERATION_FLOW_STATES.VERIFIED, {
+      clientRunId,
+      conversationId: String(conversationId || ""),
+      promptKey: flowPromptKey(prompt, conversationId, action),
+      currentBuildId: gen?.id || currentBuildId || "",
+    });
     generatePoller.stop("job completed");
     generatePoller = null;
 
@@ -2484,6 +2564,12 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
       ]);
     }
     progress.set("ready", "done", "awaiting deploy");
+    setGenerationFlowState(GENERATION_FLOW_STATES.AWAITING_DEPLOY, {
+      clientRunId,
+      conversationId: String(conversationId || ""),
+      promptKey: flowPromptKey(prompt, conversationId, action),
+      currentBuildId: gen?.id || currentBuildId || "",
+    });
     progress.log("Local verification finished. Waiting for your explicit deploy confirmation.");
   } catch (error) {
     if (generatePoller) {
@@ -2496,6 +2582,12 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
     const errorMessage = `❌ ${friendlyErrorMarkdown(error.data, error.message)}`;
     if (isActiveConversation(conversationId)) addMarkdownMessage("agent", errorMessage);
     persistMessage("agent", errorMessage, null, conversationId);
+    setGenerationFlowState(GENERATION_FLOW_STATES.CLARIFYING, {
+      clientRunId: "",
+      conversationId: String(conversationId || ""),
+      promptKey: "",
+      currentBuildId: currentGeneratedBuildId() || "",
+    });
   } finally {
     setBusy(false);
   }
@@ -2538,6 +2630,9 @@ async function runDeployJob() {
 
 async function doDeploy(prompt) {
   const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
+  setGenerationFlowState(GENERATION_FLOW_STATES.DEPLOYING, {
+    currentBuildId: currentGeneratedBuildId() || generationFlowState.currentBuildId || "",
+  });
   setBusy(true);
   deployState.textContent = labels.deploying;
 
@@ -2552,6 +2647,9 @@ async function doDeploy(prompt) {
       addMarkdownMessage("agent", `**Hardware deploy skipped**\n\nNo reachable board is configured right now. Local L0-L3 verification passed and this build is ready for L4 golden-loop after hardware is connected.`);
     } else {
       deployState.textContent = labels.done;
+      setGenerationFlowState(GENERATION_FLOW_STATES.DONE, {
+        currentBuildId: currentGeneratedBuildId() || generationFlowState.currentBuildId || "",
+      });
       renderDevicePreview("", "已写入真机");
       addMarkdownMessage("agent", `✅ **部署成功！**\n\n应用已写入 **${profile.label}**，服务已重启。\n你可以在右侧预览窗口查看效果，或直接在设备屏幕上查看。`);
     }
@@ -2565,6 +2663,9 @@ async function doDeploy(prompt) {
 
 async function runDeploy(btn) {
   const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
+  setGenerationFlowState(GENERATION_FLOW_STATES.DEPLOYING, {
+    currentBuildId: currentGeneratedBuildId() || generationFlowState.currentBuildId || "",
+  });
   setBusy(true);
   btn.disabled = true;
   btn.textContent = `部署到${profile.label}中...`;
@@ -2581,6 +2682,9 @@ async function runDeploy(btn) {
       btn.disabled = false;
     } else {
       deployState.textContent = labels.done;
+      setGenerationFlowState(GENERATION_FLOW_STATES.DONE, {
+        currentBuildId: currentGeneratedBuildId() || generationFlowState.currentBuildId || "",
+      });
       renderDevicePreview("", "已写入真机");
       addMessage("agent", `✅ 部署成功！应用已写入${profile.label}，服务已重启。\n你可以在右侧预览窗口查看效果，或直接在设备屏幕上查看。`);
       btn.textContent = "部署完成";
