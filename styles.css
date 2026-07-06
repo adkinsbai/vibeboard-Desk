@@ -2228,6 +2228,143 @@ pre {
   outline-color: rgba(30, 89, 224, .4);
 }
 
+.portal-device-section {
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid rgba(30, 89, 224, .14);
+}
+
+.portal-device-section .portal-section-head h2 {
+  margin: 0;
+}
+
+.portal-section-head-row {
+  align-items: end;
+}
+
+.device-bind-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.device-bind-submit {
+  min-height: 46px;
+  padding: 0 18px;
+}
+
+.device-bind-submit:disabled {
+  opacity: .65;
+  cursor: wait;
+}
+
+.device-bind-message {
+  min-height: 20px;
+}
+
+.my-device-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.my-device-card,
+.my-device-empty {
+  border: 1px solid rgba(30, 89, 224, .16);
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.my-device-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+}
+
+.my-device-empty {
+  padding: 14px;
+}
+
+.my-device-empty h3,
+.my-device-empty p,
+.my-device-card h3,
+.my-device-card p {
+  margin: 0;
+}
+
+.my-device-empty h3,
+.my-device-card h3 {
+  color: #08111f;
+  font-size: 15px;
+}
+
+.my-device-empty p,
+.my-device-card p {
+  color: #5a6a82;
+  font-size: 13px;
+}
+
+.device-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(8, 17, 31, .14);
+  background: linear-gradient(135deg, #e9eef6, #8d99a8);
+}
+
+.device-avatar.white {
+  background: linear-gradient(135deg, #fff, #d9e1ed);
+}
+
+.device-avatar.gray {
+  background: linear-gradient(135deg, #d9dee7, #687385);
+}
+
+.device-main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.device-title-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.device-title-row h3 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.device-status {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid rgba(31, 143, 58, .18);
+  border-radius: 999px;
+  color: #1f8f3a;
+  background: rgba(31, 143, 58, .08);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.device-serial {
+  color: #1e59e0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.device-open {
+  color: #163a7a;
+  border-color: rgba(30, 89, 224, .22);
+}
+
 @media (max-width: 920px) {
   .board-catalog {
     grid-template-columns: 1fr;
@@ -2245,6 +2382,15 @@ pre {
 
   .portal-copy h2 {
     font-size: 32px;
+  }
+
+  .device-bind-form,
+  .my-device-card {
+    grid-template-columns: 1fr;
+  }
+
+  .device-open {
+    width: 100%;
   }
 }
 

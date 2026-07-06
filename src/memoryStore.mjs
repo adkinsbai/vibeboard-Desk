@@ -21,7 +21,7 @@ const PREFERENCE_SCHEMA = {
   palette: { label: "调色板", examples: ["#0a0f1a,#111827,#38bdf8"] },
   font: { label: "字体", examples: ["system-ui", "SF Pro", "monospace"] },
   layout: { label: "布局", examples: ["卡片式", "仪表盘", "列表", "全屏"] },
-  device: { label: "设备", examples: ["泰山派灰色版", "泰山派透明版"] },
+  device: { label: "设备", examples: ["泰山派", "绑定设备"] },
   app_types: { label: "常用类型", examples: ["时钟", "天气", "监控", "轮播"] },
 };
 

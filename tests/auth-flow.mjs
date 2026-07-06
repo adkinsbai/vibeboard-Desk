@@ -49,6 +49,35 @@ await withServer(async ({ baseUrl }) => {
   const regularMe = await getJson(baseUrl, "/api/me", regularCookie);
   assert(regularMe.user?.role === "user", "non-admin phone should register as a regular user");
 
+  const boundDevice = await postJson(baseUrl, "/api/device-bindings", { serial: "WHITEBOX2026" }, regularCookie);
+  assert(boundDevice.device?.serial === "WHITEBOX2026", "regular user should bind an inventory device by serial");
+  assert(boundDevice.devices?.some(device => device.serial === "WHITEBOX2026"), "bound device should be listed after binding");
+  const boundBoardConfig = await getJson(baseUrl, "/api/board-config?device=WHITEBOX2026", regularCookie);
+  assert(boundBoardConfig.boardConfig?.label === "白色版小电脑", "bound device serial should resolve to the user's board config");
+  const boundDeploy = await raw(baseUrl, "/api/deploy", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie: regularCookie,
+    },
+    body: JSON.stringify({ device: "WHITEBOX2026" }),
+  });
+  assert(boundDeploy.response.ok, `regular user should deploy to their bound device, got ${boundDeploy.status}: ${JSON.stringify(boundDeploy.data)}`);
+  const secondCookie = await registerUser(baseUrl, "+15550001111", PASSWORD);
+  const blockedBoundBoard = await raw(baseUrl, "/api/board-config?device=WHITEBOX2026", {
+    headers: { cookie: secondCookie },
+  });
+  assert(blockedBoundBoard.status === 403, "another user should not access a device bound to someone else");
+  const duplicateBind = await raw(baseUrl, "/api/device-bindings", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie: secondCookie,
+    },
+    body: JSON.stringify({ serial: "WHITEBOX2026" }),
+  });
+  assert(duplicateBind.status === 409, "a hardware serial should only bind to one user");
+
   const blockedAdmin = await raw(baseUrl, "/api/admin/users", {
     headers: { cookie: regularCookie },
   });

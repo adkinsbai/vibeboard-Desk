@@ -1,4 +1,12 @@
-import { publicDeviceProfiles } from "./devices.mjs";
+const TAISHAN_WORKBENCH_BOARD = {
+  id: "taishan-gray",
+  label: "泰山派 RK3566 小电脑",
+  family: "Taishan Linux",
+  status: "available",
+  route: "/workbench?board=taishan-gray",
+  description: "当前线上工作台的主力 Linux 小屏设备入口。未绑定真实硬件的账号会先进入体验预览，已绑定设备可直接走自己的硬件通道。",
+  capabilities: ["Web App", "Agent Workflow", "Preview", "FRP Deploy"],
+};
 
 const WANGQI_BOARD_CATALOG = [
   {
@@ -48,19 +56,9 @@ const WANGQI_BOARD_CATALOG = [
   },
 ];
 
-export function buildBoardCatalog(env = process.env) {
-  const currentWorkbenchBoards = publicDeviceProfiles(env).map((device) => ({
-    id: device.id,
-    label: `泰山派 ${device.label}`,
-    family: "Taishan Linux",
-    status: "available",
-    route: `/workbench?board=${encodeURIComponent(device.id)}`,
-    description: "当前线上工作台支持的 Linux 小电脑体验入口，可进入现有 Agent 工作台。",
-    capabilities: ["Web App", "Agent Workflow", "Preview", "Deploy"],
-  }));
-
+export function buildBoardCatalog() {
   return [
-    ...currentWorkbenchBoards,
+    TAISHAN_WORKBENCH_BOARD,
     ...WANGQI_BOARD_CATALOG,
   ];
 }

@@ -12,6 +12,7 @@ import { createAuthStore, clearSessionCookie, httpError, sessionCookie } from ".
 import { createCloudSqliteSnapshot } from "./src/cloudSqliteSnapshot.mjs";
 import { createPhoneVerificationService } from "./src/phoneVerification.mjs";
 import { buildBoardCatalog } from "./src/boardCatalog.mjs";
+import { createDeviceBindingStore } from "./src/deviceBindingStore.mjs";
 import { createTelemetryStore } from "./src/telemetryStore.mjs";
 import { creditsForTokens, estimateTokensFromPayload, tokensFromModelResponse } from "./src/creditMeter.mjs";
 import {
@@ -346,6 +347,8 @@ assetLibraryStore.initSchema();
 
 const authStore = createAuthStore({ sqliteDb, saveSqlite: saveDb, pg, env: process.env });
 await authStore.initSchema();
+const deviceBindingStore = createDeviceBindingStore({ sqliteDb, saveSqlite: saveDb, pg, env: process.env });
+await deviceBindingStore.initSchema();
 const phoneVerification = createPhoneVerificationService({ authStore, env: process.env });
 const telemetryStore = createTelemetryStore({ sqliteDb, saveSqlite: saveDb, pg, env: process.env });
 await telemetryStore.initSchema();
@@ -650,6 +653,44 @@ function requirePublicAdmin(user, message = "Admin access required.") {
   if (PUBLIC_DEPLOYMENT && user?.role !== "admin") throw httpError(403, message);
 }
 
+async function resolveRequestBoard(input = {}, user = null) {
+  const serial = input.device || input.serial || input.deviceSerial || "";
+  if (serial) {
+    const device = await deviceBindingStore.resolveForUser({ userId: user?.id || "", serial });
+    const board = createBoardConfig(device.board_id || "taishan-gray");
+    const connection = device.connection || {};
+    return {
+      ...board,
+      id: device.board_id || board.id,
+      label: device.label || board.label,
+      host: connection.host || board.host,
+      port: connection.port || board.port,
+      frpHost: connection.host || board.frpHost,
+      frpPort: connection.port || board.frpPort,
+      user: connection.user || board.user,
+    };
+  }
+  const deviceId = deviceIdFrom(input, BOARD.id);
+  return createBoardConfig(deviceId);
+}
+
+async function withResolvedBoard(input = {}, user = null, task) {
+  const board = await resolveRequestBoard(input, user);
+  return withBoardConfig(board, task);
+}
+
+function requestParamsWithRefererDevice(req, url) {
+  const params = Object.fromEntries(url.searchParams.entries());
+  if (params.device || params.serial || params.deviceSerial) return params;
+  try {
+    const referer = new URL(String(req.headers.referer || ""), `http://${req.headers.host}`);
+    const sameOrigin = referer.host === String(req.headers.host || "");
+    const device = referer.searchParams.get("device") || "";
+    if (sameOrigin && device) return { ...params, device };
+  } catch {}
+  return params;
+}
+
 function staticCacheFor(filePath) {
   const relative = path.relative(ROOT, filePath).replaceAll(path.sep, "/");
   const ext = path.extname(filePath).toLowerCase();
@@ -804,6 +845,10 @@ function selectDevice(deviceId = "") {
 }
 
 async function withDevice(deviceId, task) {
+  return withBoardConfig(createBoardConfig(deviceIdFrom({ deviceId }, BOARD.id)), task);
+}
+
+async function withBoardConfig(board, task) {
   const previous = deviceContextQueue;
   let release;
   deviceContextQueue = new Promise(resolve => {
@@ -813,7 +858,9 @@ async function withDevice(deviceId, task) {
   const previousBoard = BOARD;
   const previousKnownHosts = knownHosts;
   const previousActiveEndpoint = activeEndpoint;
-  selectDevice(deviceId);
+  BOARD = board;
+  knownHosts = process.env.VIBEBOARD_KNOWN_HOSTS || path.join(os.tmpdir(), `${BOARD.id}_known_hosts`);
+  setActiveEndpoint(null);
   try {
     return await task();
   } finally {
@@ -2844,7 +2891,9 @@ const { runAgentRequest } = createAgentOrchestrator({
 });
 
 async function runDeployRequest(body = {}) {
-  const deviceId = deviceIdFrom(body || {}, BOARD.id);
+  const user = body.user_id ? await authStore.userCreditSummary(body.user_id).catch(() => null) : null;
+  const resolvedBoard = await resolveRequestBoard(body || {}, user);
+  const deviceId = resolvedBoard.id || deviceIdFrom(body || {}, BOARD.id);
   if (!hasBoardCredentials()) {
     if (!currentBuild) await loadGeneratedBuild();
     if (currentBuild && (!currentBuild.built || !currentBuild.buildEvidence)) await buildCurrent();
@@ -2855,7 +2904,7 @@ async function runDeployRequest(body = {}) {
   }
   console.log("[deploy] Starting deploy...");
   await appendServerLog("deploy.start", { id: currentBuild?.id || "", deviceId });
-  const result = await withDeployLock(() => withDevice(deviceId, () => deployCurrent()));
+  const result = await withDeployLock(() => withBoardConfig(resolvedBoard, () => deployCurrent()));
   console.log("[deploy] Deploy completed successfully");
   await appendServerLog("deploy.done", { id: result.id, goldenLoopOk: result.goldenLoop?.ok });
   return { ok: true, deviceId, ...result };
@@ -2966,6 +3015,11 @@ async function route(req, res) {
       json(res, 200, { ok: true, boards: buildBoardCatalog(process.env) });
       return;
     }
+    if (req.method === "GET" && PUBLIC_DEPLOYMENT && url.pathname === "/workbench" && !(await currentUser(req))) {
+      res.writeHead(302, { Location: "/", "Cache-Control": "no-store" });
+      res.end();
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/api/me") {
       const user = await currentUser(req);
       const credits = user ? await authStore.userCreditSummary(user.id) : null;
@@ -3022,6 +3076,18 @@ async function route(req, res) {
       ? await requireApiUser(req, res, url)
       : await currentUser(req);
     if (req.url.startsWith("/api/") && PUBLIC_DEPLOYMENT && !requestUser && !isPublicApi(url.pathname)) {
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/my-devices") {
+      json(res, 200, { ok: true, devices: await deviceBindingStore.listForUser(requestUser?.id || "") });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/device-bindings") {
+      const body = await readBody(req).catch(() => ({}));
+      const result = await deviceBindingStore.bindSerial({ userId: requestUser?.id || "", serial: body.serial });
+      await flushMutationSaves();
+      json(res, 200, { ok: true, ...result });
       return;
     }
 
@@ -3106,15 +3172,15 @@ async function route(req, res) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/board") {
-      requirePublicAdmin(requestUser);
-      const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
-      const status = await withDevice(deviceId, () => fastBoardStatus());
+      const params = requestParamsWithRefererDevice(req, url);
+      if (!params.device) requirePublicAdmin(requestUser);
+      const status = await withResolvedBoard(params, requestUser, () => fastBoardStatus());
       json(res, 200, { ok: true, ...status });
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/board-config") {
-      const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
-      const boardConfig = await withDevice(deviceId, () => publicBoardConfig());
+      const params = requestParamsWithRefererDevice(req, url);
+      const boardConfig = await withResolvedBoard(params, requestUser, () => publicBoardConfig());
       json(res, 200, { ok: true, boardConfig, devices: publicDeviceProfiles() });
       return;
     }
@@ -3144,15 +3210,15 @@ async function route(req, res) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/status") {
-      requirePublicAdmin(requestUser);
-      const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
-      json(res, 200, await withDevice(deviceId, () => fastRawBoardStatus()));
+      const params = requestParamsWithRefererDevice(req, url);
+      if (!params.device) requirePublicAdmin(requestUser);
+      json(res, 200, await withResolvedBoard(params, requestUser, () => fastRawBoardStatus()));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/audio/status") {
-      requirePublicAdmin(requestUser);
-      const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
-      json(res, 200, await withDevice(deviceId, () => runAudioRoute("status", () => audioStatus())));
+      const params = requestParamsWithRefererDevice(req, url);
+      if (!params.device) requirePublicAdmin(requestUser);
+      json(res, 200, await withResolvedBoard(params, requestUser, () => runAudioRoute("status", () => audioStatus())));
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/audio/play") {
@@ -3183,14 +3249,14 @@ async function route(req, res) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/verify") {
-      requirePublicAdmin(requestUser);
-      const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
+      const params = requestParamsWithRefererDevice(req, url);
+      if (!params.device) requirePublicAdmin(requestUser);
       const id = url.searchParams.get("id") || currentBuild?.id || lastDeploy?.id || "";
       if (!hasBoardCredentials()) {
         json(res, 200, { ok: true, skipped: true, mode: "offline-simulated", goldenLoop: buildOfflineGoldenLoop(id) });
         return;
       }
-      const goldenLoop = await withDevice(deviceId, () => verifyGoldenLoop(id));
+      const goldenLoop = await withResolvedBoard(params, requestUser, () => verifyGoldenLoop(id));
       json(res, 200, { ok: true, goldenLoop });
       return;
     }
@@ -3508,16 +3574,16 @@ async function route(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/deploy") {
-      requirePublicAdmin(requestUser);
       try {
         const body = await readBody(req);
+        if (!body?.device && !body?.serial && !body?.deviceSerial) requirePublicAdmin(requestUser);
         if (wantsBackgroundJob(body || {})) {
-          const job = await enqueueBackgroundJob("deploy", body || {});
+          const job = await enqueueBackgroundJob("deploy", { ...(body || {}), user_id: requestUser?.id || "" });
           await flushMutationSaves();
           json(res, 202, { ok: true, job });
           return;
         }
-        const result = await runDeployRequest(body || {});
+        const result = await runDeployRequest({ ...(body || {}), user_id: requestUser?.id || "" });
         await writeProjectMemorySafe(body?.conversation_id, {
           trigger: "deploy-confirmed",
           buildId: result?.id || currentBuild?.id || "",

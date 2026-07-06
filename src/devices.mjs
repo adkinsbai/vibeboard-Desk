@@ -9,31 +9,13 @@ export function defaultBoardRoots(env = process.env) {
 }
 
 export const DEVICE_PROFILES = {
-  "taishan-transparent": {
-    id: "taishan-transparent",
-    label: "透明版",
-    host: "150.158.146.192",
-    port: "6223",
-    frpHost: "150.158.146.192",
-    frpPort: "6223",
-    user: "linaro"
-  },
   "taishan-gray": {
     id: "taishan-gray",
-    label: "灰色版",
+    label: "泰山派",
     host: "150.158.146.192",
     port: "6278",
     frpHost: "150.158.146.192",
     frpPort: "6278",
-    user: "linaro"
-  },
-  "taishan-black": {
-    id: "taishan-black",
-    label: "亮黑版",
-    host: "150.158.146.192",
-    port: "6279",
-    frpHost: "150.158.146.192",
-    frpPort: "6279",
     user: "linaro"
   }
 };

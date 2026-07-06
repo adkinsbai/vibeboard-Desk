@@ -27,7 +27,7 @@
       <div class="portal-copy">
         <p class="kicker">Hardware Agent Platform</p>
         <h2>选择开发板，进入对应的硬件 Agent 工作台。</h2>
-        <p>当前版本保留现有工作台，同时把开发板选择、用户登录和数据洞察放到统一入口。</p>
+        <p>泰山派暂时合并为一个通用入口。没有绑定真实硬件时可以先体验预览版，绑定设备后再使用自己的 FRP 硬件通道。</p>
       </div>
       <article class="portal-auth-card" id="portalAuthCard">
         <p class="kicker">Account</p>
@@ -70,6 +70,25 @@
           <p id="portalUserLabel"></p>
         </div>
         <div class="board-catalog" id="boardCatalog"></div>
+
+        <section class="portal-device-section" aria-labelledby="myDevicesTitle">
+          <div class="portal-section-head portal-section-head-row">
+            <div>
+              <p class="kicker">My Devices</p>
+              <h2 id="myDevicesTitle">我的设备</h2>
+            </div>
+            <p>输入设备自身的 8 位字母 + 4 位数字序列号完成绑定。每台设备只能绑定一个账号。</p>
+          </div>
+          <form class="device-bind-form" id="deviceBindForm">
+            <label class="auth-field">
+              <span>设备序列号</span>
+              <input id="deviceSerialInput" type="text" inputmode="latin" autocomplete="off" maxlength="16" placeholder="ABCDEFGH1234" required>
+            </label>
+            <button class="primary-btn device-bind-submit" type="submit">绑定设备</button>
+          </form>
+          <p class="auth-message device-bind-message" id="deviceBindMessage" aria-live="polite"></p>
+          <div class="my-device-list" id="myDeviceList"></div>
+        </section>
       </section>
     </section>
   </main>

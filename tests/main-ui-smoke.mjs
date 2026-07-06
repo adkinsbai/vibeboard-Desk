@@ -137,8 +137,13 @@ await withServer(async ({ baseUrl, json }) => {
     assert(previewReadyState.frameOpacity === "1", "iframe should fade in only after load");
     await page.unroute("**/never-finishes-preview.html*");
 
-    await page.locator("#deviceSelect").selectOption("taishan-transparent");
-    const transparentScreen = await page.locator("#macPhoto").evaluate(node => ({
+    const deviceOptions = await page.locator("#deviceSelect option").evaluateAll(options => options.map(option => ({
+      value: option.value,
+      label: option.textContent.trim(),
+    })));
+    assert(deviceOptions.length === 1, `device selector should expose one Taishan option, got ${JSON.stringify(deviceOptions)}`);
+    assert(deviceOptions[0]?.value === "taishan-gray", "single Taishan option should use the canonical taishan-gray id");
+    const taishanScreen = await page.locator("#macPhoto").evaluate(node => ({
       left: node.style.getPropertyValue("--screen-left"),
       top: node.style.getPropertyValue("--screen-top"),
       width: node.style.getPropertyValue("--screen-width"),
@@ -148,10 +153,10 @@ await withServer(async ({ baseUrl, json }) => {
       hasResizeHandle: Boolean(document.querySelector("#calibrationResizeHandle")),
       overlayCursor: getComputedStyle(document.querySelector(".mac-screen-overlay")).cursor,
     }));
-    assert(transparentScreen.left === "21.06%" && transparentScreen.top === "22.88%", "transparent board should use the confirmed screen position");
-    assert(transparentScreen.width === "58.43%" && transparentScreen.height === "30.66%", "transparent board should use the confirmed screen size");
-    assert(!transparentScreen.hasCalibrationButton && !transparentScreen.hasCalibrationPanel && !transparentScreen.hasResizeHandle, "screen calibration controls should not be exposed to users");
-    assert(!["move", "grab", "grabbing"].includes(transparentScreen.overlayCursor), "screen overlay should not advertise draggable calibration");
+    assert(taishanScreen.left === "30.18%" && taishanScreen.top === "31.88%", "canonical Taishan board should use the confirmed screen position");
+    assert(taishanScreen.width === "44.3%" && taishanScreen.height === "21.8%", "canonical Taishan board should use the confirmed screen size");
+    assert(!taishanScreen.hasCalibrationButton && !taishanScreen.hasCalibrationPanel && !taishanScreen.hasResizeHandle, "screen calibration controls should not be exposed to users");
+    assert(!["move", "grab", "grabbing"].includes(taishanScreen.overlayCursor), "screen overlay should not advertise draggable calibration");
 
     const beforeCreate = await page.locator(".conv-item").count();
     await page.locator("#newConversationBtn").click();

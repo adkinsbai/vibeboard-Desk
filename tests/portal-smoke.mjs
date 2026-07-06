@@ -31,6 +31,15 @@ await withServer(async ({ baseUrl }) => {
     assert(boards >= 4, "portal should show a board catalog after login");
     const hasCurrentWorkbench = await page.locator(".board-card", { hasText: "泰山派" }).count();
     assert(hasCurrentWorkbench >= 1, "portal should include current Taishan workbench entry");
+    const taishanCards = await page.locator(".board-card[data-board-id^='taishan-']").count();
+    assert(taishanCards === 1, `portal should show one generic Taishan entry, got ${taishanCards}`);
+    assert(await page.locator("#deviceBindForm").count() === 1, "portal should expose the device binding form");
+
+    await page.locator("#deviceSerialInput").fill("GRAYUNIT2026");
+    await page.locator("#deviceBindForm button[type='submit']").click();
+    await page.locator(".my-device-card", { hasText: "灰色版" }).waitFor({ timeout: 6000 });
+    const boundDevices = await page.locator(".my-device-card").count();
+    assert(boundDevices === 1, "bound devices should appear in My Devices after binding");
 
     await page.goto(`${baseUrl}/workbench`, { waitUntil: "domcontentloaded" });
     await page.locator("#chatLog").waitFor({ timeout: 6000 });
@@ -42,7 +51,7 @@ await withServer(async ({ baseUrl }) => {
     const preview = await fetch(`${baseUrl}/api/market/${encodeURIComponent(previewable.id)}/preview`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ deviceId: "taishan-transparent" }),
+      body: JSON.stringify({ deviceId: "taishan-gray" }),
     }).then(res => res.json());
     assert(preview.ok === true && preview.conversation_id, "market preview should create an editable conversation");
     const files = await fetch(`${baseUrl}/api/conversations/${preview.conversation_id}/files`).then(res => res.json());

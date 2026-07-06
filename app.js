@@ -153,27 +153,14 @@ let registerVerificationToken = "";
 
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
 const DEVICE_STORAGE_KEY = "vibeboard-active-device";
+const BOUND_DEVICE_STORAGE_KEY = "vibeboard-bound-device";
 const CONVERSATION_STORAGE_KEY = "vibeboard-current-conversation";
 const AGENT_MODE_STORAGE_KEY = "vibeboard-agent-mode";
 const BLANK_DEVICE_FRAME_HTML = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;}*{box-sizing:border-box;}</style></head><body></body></html>';
 const deviceProfiles = {
-  "taishan-transparent": {
-    id: "taishan-transparent",
-    label: "透明版",
-    image: "/mac-frame-transparent.png",
-    previewPath: "/generated/current/index.html",
-    screen: { left: "21.06%", top: "22.88%", width: "58.43%", height: "30.66%" }
-  },
   "taishan-gray": {
     id: "taishan-gray",
-    label: "灰色版",
-    image: "/mac-frame.png",
-    previewPath: "/generated/current/index.html",
-    screen: { left: "30.18%", top: "31.88%", width: "44.3%", height: "21.8%" }
-  },
-  "taishan-black": {
-    id: "taishan-black",
-    label: "亮黑版",
+    label: "泰山派",
     image: "/mac-frame.png",
     previewPath: "/generated/current/index.html",
     screen: { left: "30.18%", top: "31.88%", width: "44.3%", height: "21.8%" }
@@ -192,7 +179,20 @@ function getActiveDeviceId() {
   return "taishan-gray";
 }
 
+function getActiveDeviceSerial() {
+  const params = new URLSearchParams(window.location.search);
+  const fromUrl = params.get("device") || "";
+  if (fromUrl) return fromUrl;
+  try {
+    const saved = JSON.parse(localStorage.getItem(BOUND_DEVICE_STORAGE_KEY) || "{}");
+    return saved?.board_id === activeDeviceId ? String(saved.serial || "") : "";
+  } catch {
+    return "";
+  }
+}
+
 let activeDeviceId = getActiveDeviceId();
+let activeDeviceSerial = getActiveDeviceSerial();
 let currentAssetSummary = { count: 0, totalBytes: 0, byKind: {}, items: [] };
 let conversationCache = [];
 let optimisticConversations = [];
@@ -805,11 +805,16 @@ function createGenerateLogPoller(progress) {
 function withDeviceQuery(url) {
   const href = new URL(url, window.location.origin);
   href.searchParams.set("deviceId", activeDeviceId);
+  if (activeDeviceSerial) href.searchParams.set("device", activeDeviceSerial);
   return `${href.pathname}${href.search}`;
 }
 
 function withDevicePayload(payload = {}) {
-  return { ...payload, deviceId: activeDeviceId };
+  return {
+    ...payload,
+    deviceId: activeDeviceId,
+    ...(activeDeviceSerial ? { device: activeDeviceSerial } : {}),
+  };
 }
 
 async function authFetch(url, payload = {}, { method = "POST" } = {}) {
@@ -1453,6 +1458,7 @@ function makePreviewUrl(path = "/generated/current/index.html", buildId = Date.n
   const url = new URL(path, window.location.origin);
   url.searchParams.set("build", String(buildId));
   url.searchParams.set("deviceId", activeDeviceId);
+  if (activeDeviceSerial) url.searchParams.set("device", activeDeviceSerial);
   return `${url.pathname}${url.search}`;
 }
 
@@ -2612,10 +2618,10 @@ function addDeployButton(prompt) {
 }
 
 async function runDeployJob() {
-  const started = await postJson(api.deploy, {
+  const started = await postJson(api.deploy, withDevicePayload({
     background: true,
     conversation_id: currentConversationId || "",
-  }, { timeout: 30000 });
+  }), { timeout: 30000 });
   const jobId = started.job?.id;
   if (!jobId) throw new Error("Background deploy job was not created.");
   setJobDrawer(true);
@@ -2786,7 +2792,9 @@ projectCreateForm?.addEventListener("submit", event => {
 });
 deviceSelect?.addEventListener("change", () => {
   activeDeviceId = deviceProfiles[deviceSelect.value] ? deviceSelect.value : "taishan-gray";
+  activeDeviceSerial = "";
   localStorage.setItem(DEVICE_STORAGE_KEY, activeDeviceId);
+  localStorage.removeItem(BOUND_DEVICE_STORAGE_KEY);
   deployState.textContent = "device changed";
   applyDeviceProfile();
 });

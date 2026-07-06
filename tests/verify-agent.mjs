@@ -838,17 +838,16 @@ await test("hardware app contract centralizes embedded rules", () => {
   assert(prompt.includes("Runtime data"), "prompt contract should include runtime data rules");
 });
 
-await test("Taishan board profiles use the deployable linaro account", async () => {
-  const { createBoardConfig } = await import(pathToFileURL(path.join(ROOT, "src", "devices.mjs")).href);
-  const transparent = createBoardConfig("taishan-transparent", {});
+await test("Taishan board profiles expose one canonical deployable board", async () => {
+  const { createBoardConfig, deviceIdFrom, publicDeviceProfiles } = await import(pathToFileURL(path.join(ROOT, "src", "devices.mjs")).href);
+  const profiles = publicDeviceProfiles({});
   const gray = createBoardConfig("taishan-gray", {});
-  const black = createBoardConfig("taishan-black", {});
-  assert(transparent.user === "linaro", `transparent board should default to linaro, got ${transparent.user}`);
-  assert(gray.user === "linaro", `gray board should default to linaro, got ${gray.user}`);
-  assert(black.user === "linaro", `black board should default to linaro, got ${black.user}`);
-  assert(transparent.port === "6223", `transparent board should keep FRP port 6223, got ${transparent.port}`);
-  assert(gray.port === "6278", `gray board should keep FRP port 6278, got ${gray.port}`);
-  assert(black.port === "6279", `black board should keep FRP port 6279, got ${black.port}`);
+  assert(profiles.length === 1, `expected one public Taishan profile, got ${JSON.stringify(profiles)}`);
+  assert(profiles[0]?.id === "taishan-gray", "public Taishan profile should use canonical taishan-gray id");
+  assert(gray.user === "linaro", `canonical Taishan board should default to linaro, got ${gray.user}`);
+  assert(gray.port === "6278", `canonical Taishan board should keep FRP port 6278, got ${gray.port}`);
+  assert(deviceIdFrom({ deviceId: "taishan-transparent" }) === "taishan-gray", "legacy transparent id should fall back to canonical Taishan board");
+  assert(deviceIdFrom({ deviceId: "taishan-black" }) === "taishan-gray", "legacy black id should fall back to canonical Taishan board");
 });
 
 await test("hardware result contract rejects missing runtime APIs", () => {
