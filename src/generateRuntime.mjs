@@ -59,7 +59,6 @@ export function createGenerateRuntime(deps = {}) {
     injectAppHardwareSdkContracts = (source) => source,
     injectHardwareAppContracts,
     generatedManifest,
-    writeGenerated,
     buildCurrent,
     recordAgentLearning = () => {},
     filesWithHardwareResult = async files => files,
@@ -112,6 +111,12 @@ export function createGenerateRuntime(deps = {}) {
         : {};
 
       const settings = normalizeModelSettings(modelSettings);
+      if (!settings.enabled) {
+        throw createStructuredError("AI provider is not configured. Configure a model before generating.", "no_api_key", {
+          statusCode: 400,
+          stage: "model_config",
+        });
+      }
       const history = await compressHistory(normalizedHistory, settings);
       const userPreferences = memoryStore.getAll();
       const prompt = buildRefinedPrompt(
@@ -143,7 +148,19 @@ export function createGenerateRuntime(deps = {}) {
       const fileStore = { ...conversationFiles };
       const isEditing = Object.keys(fileStore).some(name => name !== "manifest.json");
       const agentStartedAt = Date.now();
-      const agentSettings = buildGenerateAgentSettings(settings, env, positiveInt, defaults);
+      const agentSettings = buildGenerateAgentSettings({
+        ...settings,
+        max_iterations: body.max_iterations,
+        maxIterations: body.maxIterations,
+        max_verification_attempts: body.max_verification_attempts,
+        maxVerificationAttempts: body.maxVerificationAttempts,
+        repair_attempts: body.repair_attempts,
+        repairAttempts: body.repairAttempts,
+        timeout_ms: body.timeout_ms,
+        timeoutMs: body.timeoutMs,
+        llm_timeout_ms: body.llm_timeout_ms,
+        llmTimeoutMs: body.llmTimeoutMs,
+      }, env, positiveInt, defaults);
 
       return await runBuildGraph({
         prompt,
@@ -172,7 +189,6 @@ export function createGenerateRuntime(deps = {}) {
           embeddedAssets,
           agentStartedAt,
         }),
-        templateGenerate: async () => runTemplateGenerate({ prompt, modelSettings, embeddedAssets }),
         saveSnapshot: async state => saveSnapshot({ state, conversationId, embeddedAssets, rawPrompt }),
       });
     } catch (error) {
@@ -464,6 +480,21 @@ export function createGenerateRuntime(deps = {}) {
       }
     }
 
+    const readabilityFallback = await tryReadabilityFallback({
+      id,
+      prompt,
+      files,
+      manifest: currentManifest,
+      embeddedAssets,
+      agentResult,
+      settings,
+      lastError,
+      agentStartedAt,
+      maxAttempts,
+    });
+    if (readabilityFallback.ok) return readabilityFallback;
+    if (readabilityFallback.error) lastError = readabilityFallback.error;
+
     const classified = classifyError(lastError, { stage: "auto_repair" });
     const error = createStructuredError(
       `Automatic repair could not finish before deployment: ${lastError?.message || "local verification failed"}`,
@@ -491,6 +522,66 @@ export function createGenerateRuntime(deps = {}) {
       success: false,
     });
     throw error;
+  }
+
+  async function tryReadabilityFallback({
+    id,
+    prompt,
+    files,
+    manifest,
+    embeddedAssets,
+    agentResult,
+    settings,
+    lastError,
+    agentStartedAt,
+    maxAttempts = 0,
+  }) {
+    if (!isLowContrastOnlyError(lastError)) return { ok: false };
+    await appendServerLog("generate.agent.readability_fallback.start", {
+      id,
+      error: lastError?.message || "",
+    });
+    const patched = finalizeAgentFiles({
+      id,
+      prompt,
+      files: applyReadabilitySafetyNet(files),
+      manifest,
+      embeddedAssets,
+      agentSummary: `${agentResult.summary || ""}\nSystem readability safety net: raised text contrast after auto repair.`.trim(),
+      provider: settings.provider,
+      model: settings.model,
+    });
+    files = patched.files;
+    manifest = patched.manifest;
+    await writeGeneratedFiles(generatedDir, files);
+    const currentBuild = getCurrentBuild();
+    if (currentBuild) {
+      currentBuild.files = files;
+      currentBuild.manifest = manifest;
+      currentBuild.built = false;
+      currentBuild.buildEvidence = null;
+    }
+    try {
+      await buildCurrent();
+      await appendServerLog("generate.agent.readability_fallback.done", {
+        id,
+        durationMs: Date.now() - agentStartedAt,
+      });
+      return {
+        ok: true,
+        files,
+        manifest,
+        attempts: maxAttempts,
+        summary: "System readability safety net raised text contrast after model repair.",
+      };
+    } catch (error) {
+      lastError = error;
+      await appendServerLog("generate.agent.readability_fallback.failed", {
+        id,
+        error: error.message,
+      });
+      return { ok: false, error };
+    }
   }
 
   async function runRepairAgent({
@@ -613,26 +704,6 @@ export function createGenerateRuntime(deps = {}) {
     return { files: nextFiles, manifest: nextManifest };
   }
 
-  async function runTemplateGenerate({ prompt, modelSettings, embeddedAssets }) {
-    requireFunction(writeGenerated, "writeGenerated");
-    const build = await writeGenerated(prompt, modelSettings, [], embeddedAssets);
-    const embedded = embedGeneratedAssetsInFiles(build.files, embeddedAssets, build.manifest);
-    return {
-      ok: true,
-      id: build.id,
-      files: embedded.files,
-      manifest: embedded.manifest || build.manifest || null,
-      source: "template",
-      spec: build.agentRun?.spec || null,
-      evidence: formatRunEvidence(build.agentRun || {}),
-      buildEvidence: build.buildEvidence || null,
-      intelligenceSummary: build.intelligenceSummary || null,
-      verificationMode: isBoardPasswordConfigured() ? "real-ready" : "local-simulated",
-      agentActions: [],
-      thinking: "",
-    };
-  }
-
   async function saveSnapshot({ state, conversationId, embeddedAssets, rawPrompt }) {
     if (!conversationId) return;
     try {
@@ -674,6 +745,44 @@ export function createGenerateRuntime(deps = {}) {
   }
 
   return { runGenerateRequest };
+}
+
+export function isLowContrastOnlyError(error = {}) {
+  const issues = Array.isArray(error?.verification?.issues)
+    ? error.verification.issues
+    : Array.isArray(error?.buildEvidence?.issues)
+      ? error.buildEvidence.issues
+      : Array.isArray(error?.verificationResult?.issues)
+        ? error.verificationResult.issues
+        : [];
+  const blocking = issues.filter(issue => String(issue.severity || "blocking") !== "warning" && String(issue.severity || "blocking") !== "info");
+  if (issues.length) return blocking.length > 0 && blocking.every(issue => issue.code === "TEXT_CONTRAST_LOW");
+  const text = [error?.message, error?.technicalDetail].filter(Boolean).join("\n");
+  return /TEXT_CONTRAST_LOW/i.test(text)
+    && !/LAYOUT_OVERFLOW|TEXT_TOO_SMALL|NETWORK_ERRORS|CONSOLE_ERRORS|PAGE_ERRORS|RENDER_VERIFIER_ERROR/i.test(text);
+}
+
+export function applyReadabilitySafetyNet(files = {}) {
+  const nextFiles = { ...(files || {}) };
+  const css = String(nextFiles["style.css"] || "");
+  if (css.includes("VibeBoard readability safety net")) return nextFiles;
+  const patch = `
+
+/* VibeBoard readability safety net: keep generated text legible on 480x360 LCD. */
+:where(body, main, section, article, div, p, span, label, button, input, output, time, strong, small, h1, h2, h3) {
+  color: #f8fbff;
+}
+:where(.muted, .subtle, .hint, .caption, small, label) {
+  color: #dbeafe;
+}
+:where(button, .button, [role="button"]) {
+  color: #f8fbff;
+  background-color: #14532d;
+  border-color: #bbf7d0;
+}
+`;
+  nextFiles["style.css"] = `${css.trimEnd()}${patch}`;
+  return nextFiles;
 }
 
 export function formatEmbeddedAssetContext(embeddedAssets = emptyEmbeddedAssets()) {

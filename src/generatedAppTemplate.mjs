@@ -180,6 +180,7 @@ import socket as __vb_socket
 import sys as __vb_sys
 
 __vb_build_id = ${idJson}
+__vb_source_file = "hardware_app.py"
 __vb_script_content = __vb_base64.b64decode(${sourceB64Json}).decode("utf-8")
 
 def __vb_parse_output(raw):
@@ -204,7 +205,7 @@ def __vb_wrapped_main():
     __vb_sys.stdout = buffer = io.StringIO()
     try:
         try:
-            exec(__vb_script_content, {"__name__": "__main__"})
+            exec(__vb_script_content, {"__name__": "__main__", "__file__": __vb_source_file})
         except SystemExit as exit_error:
             code = exit_error.code
             if code not in (None, 0):

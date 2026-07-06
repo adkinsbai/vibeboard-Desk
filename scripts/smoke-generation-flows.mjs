@@ -12,14 +12,29 @@ const TASKS = [
 await withServer(async ({ baseUrl, json, text }) => {
   const results = [];
   const created = [];
+  const stubModelSettings = () => ({
+    provider: "custom",
+    baseUrl,
+    model: "stub-model",
+    apiKey: "test-key",
+  });
   try {
+    const missingModelResponse = await fetch(`${baseUrl}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "missing model should not template", modelSettings: { enabled: false } }),
+    });
+    const missingModel = await missingModelResponse.json();
+    assert(missingModelResponse.status === 400, "missing model generate should be HTTP 400");
+    assert(missingModel.errorType === "no_api_key", `missing model should return no_api_key, got ${JSON.stringify(missingModel)}`);
+
     for (let i = 0; i < 4; i += 1) {
       const prompt = TASKS[(i + Math.floor(Math.random() * TASKS.length)) % TASKS.length];
       const generated = await json("/api/generate", {
         method: "POST",
         body: JSON.stringify({
           prompt: `${prompt} #${i + 1}`,
-          modelSettings: { enabled: false },
+          modelSettings: stubModelSettings(),
         }),
       });
       assert(generated.ok === true, `direct generate ${i} should succeed`);
@@ -35,7 +50,7 @@ await withServer(async ({ baseUrl, json, text }) => {
         action: "confirm_build",
         build_prompt: "用 Agent 确认构建一个迷你会议日程小屏，包含三条日程和当前时间",
         conversation_id: conversation.id,
-        modelSettings: { enabled: false },
+        modelSettings: stubModelSettings(),
         history: [{ role: "user", content: "开始吧" }],
       }),
     });
@@ -62,12 +77,12 @@ await withServer(async ({ baseUrl, json, text }) => {
       fetch(`${baseUrl}/api/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: `并发任务 A ${randomUUID()}`, modelSettings: { enabled: false } }),
+        body: JSON.stringify({ prompt: `并发任务 A ${randomUUID()}`, modelSettings: stubModelSettings() }),
       }).then(async response => ({ status: response.status, body: await response.json() })),
       fetch(`${baseUrl}/api/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: `并发任务 B ${randomUUID()}`, modelSettings: { enabled: false } }),
+        body: JSON.stringify({ prompt: `并发任务 B ${randomUUID()}`, modelSettings: stubModelSettings() }),
       }).then(async response => ({ status: response.status, body: await response.json() })),
     ]);
     const bodies = concurrent.map(item => item.status === "fulfilled" ? item.value : { error: item.reason?.message });

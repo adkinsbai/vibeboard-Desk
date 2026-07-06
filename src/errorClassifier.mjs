@@ -40,10 +40,10 @@ const ERROR_PROFILES = Object.freeze({
     label: "AI provider is not configured",
     stage: "model_config",
     userMessage: "当前没有可用的模型 API Key，Agent 无法调用真实模型完成理解或代码生成。",
-    suggestion: "在右上角 Model 中配置 API Key，或用环境变量 VIBEBOARD_LLM_API_KEY / DEEPSEEK_API_KEY 启动服务。未配置模型时只能走本地模板生成。",
+    suggestion: "在右上角 Model 中配置 API Key，或用环境变量 VIBEBOARD_LLM_API_KEY / DEEPSEEK_API_KEY 启动服务。未配置模型时不会生成应用文件，避免产生与需求无关的模板结果。",
     retryable: false,
     statusCode: 400,
-    nextActions: ["打开模型配置", "填写 API Key", "改用本地模板生成"],
+    nextActions: ["打开模型配置", "填写 API Key", "配置后重新生成"],
   },
   llm_auth: {
     label: "AI provider authentication failed",

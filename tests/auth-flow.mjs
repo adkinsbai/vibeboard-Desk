@@ -4,6 +4,14 @@ const PHONE = "+15551234567";
 const USER_PHONE = "+15557654321";
 const PASSWORD = "correct-horse-42";
 
+function stubModelSettings(baseUrl) {
+  return {
+    provider: "custom",
+    baseUrl,
+    model: "stub-model",
+  };
+}
+
 await withServer(async ({ baseUrl }) => {
   const unauthenticated = await raw(baseUrl, "/api/conversations");
   assert(unauthenticated.status === 401, "public deployment should require login for conversations");
@@ -72,13 +80,15 @@ await withServer(async ({ baseUrl }) => {
       payload: {
         prompt: "should not start",
         conversation_id: conversation.id,
-        modelSettings: { enabled: false },
+        modelSettings: stubModelSettings(baseUrl),
       },
     }),
   });
   assert(acceptedJob.status === 200, `public /api/jobs should run request-bound jobs, got ${acceptedJob.status}`);
   assert(acceptedJob.data.job?.status === "succeeded", `public /api/jobs should return a final job, got ${JSON.stringify(acceptedJob.data.job)}`);
   assert(acceptedJob.data.job?.output?.ok === true, "free public beta should allow AI jobs even with zero credits");
+  assert(acceptedJob.data.job?.input?.max_iterations === 12, "public jobs should allow enough agent iterations by default");
+  assert(acceptedJob.data.job?.input?.repair_attempts === 2, "public jobs should keep two auto-repair attempts by default");
   const persistedJob = await getJson(baseUrl, `/api/jobs/${encodeURIComponent(acceptedJob.data.job.id)}`, cookie);
   assert(persistedJob.job?.status === "succeeded", "request-bound public job should persist its final status");
 }, {
@@ -88,9 +98,7 @@ await withServer(async ({ baseUrl }) => {
     VIBEBOARD_BILLING_MODE: "free",
     VIBEBOARD_REQUIRE_PHONE_VERIFICATION: "0",
     VIBEBOARD_ADMIN_PHONES: PHONE,
-    VIBEBOARD_LLM_PROVIDER: "deepseek",
-    VIBEBOARD_LLM_BASE_URL: "https://api.deepseek.com",
-    VIBEBOARD_LLM_MODEL: "deepseek-v4-flash",
+    VIBEBOARD_LLM_PROVIDER: "custom",
     VIBEBOARD_LLM_API_KEY: "test-key",
     RENDER_RUNNER_REQUIRED: "false",
   },

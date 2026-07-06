@@ -19,6 +19,14 @@ const KEEP_SNAPSHOT = process.env.VIBEBOARD_KEEP_PROD_PERSIST_SNAPSHOT === "1";
 await fs.rm(snapshotPath, { force: true }).catch(() => {});
 await fs.rm(projectPersistencePath, { force: true }).catch(() => {});
 
+function stubModelSettings(baseUrl) {
+  return {
+    provider: "custom",
+    baseUrl,
+    model: "stub-model",
+  };
+}
+
 const serverSource = await fs.readFile(path.join(ROOT, "server.mjs"), "utf8");
 assert(
   /function shouldSaveSqliteSnapshot\(\)\s*{[\s\S]*?PUBLIC_DEPLOYMENT\s*&&\s*!TEST_CLOUD_SQLITE_FILE[\s\S]*?return false[\s\S]*?}/.test(serverSource),
@@ -106,7 +114,7 @@ try {
         prompt: "persisted request-bound job",
         conversation_id: conversationId,
         background: true,
-        modelSettings: { enabled: false },
+        modelSettings: stubModelSettings(baseUrl),
       },
     }),
   });
@@ -207,9 +215,7 @@ async function startServer(port, envOverrides = {}) {
       DATABASE_URL: "postgresql://user:pass@example.test/db",
       VIBEBOARD_TEST_CLOUD_SQLITE_FILE: snapshotPath,
       VIBEBOARD_TEST_PROJECT_PERSISTENCE_FILE: projectPersistencePath,
-      VIBEBOARD_LLM_PROVIDER: "deepseek",
-      VIBEBOARD_LLM_BASE_URL: "https://api.deepseek.com",
-      VIBEBOARD_LLM_MODEL: "deepseek-v4-flash",
+      VIBEBOARD_LLM_PROVIDER: "custom",
       VIBEBOARD_LLM_API_KEY: "test-key",
       RENDER_RUNNER_REQUIRED: "false",
       ...envOverrides,

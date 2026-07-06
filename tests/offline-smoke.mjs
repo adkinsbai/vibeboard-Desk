@@ -1,21 +1,43 @@
 import { assert, withServer } from "./support/serverHarness.mjs";
 
 await withServer(async ({ baseUrl, json, text }) => {
-const generate = await json("/api/generate", {
+const stubModelSettings = () => ({
+  provider: "custom",
+  baseUrl,
+  model: "stub-model",
+  apiKey: "test-key",
+});
+
+const missingModelResponse = await fetch(`${baseUrl}/api/generate`, {
   method: "POST",
+  headers: { "Content-Type": "application/json" },
   body: JSON.stringify({
     prompt: "offline acceptance dashboard",
     modelSettings: { enabled: false },
   }),
 });
-assert(generate.ok === true, "/api/generate should succeed in template mode");
+const missingModel = await missingModelResponse.json();
+assert(missingModelResponse.status === 400, "/api/generate should reject missing model settings");
+assert(missingModel.ok === false, "missing model generate should return ok:false");
+assert(missingModel.errorType === "no_api_key", `missing model should be classified, got ${JSON.stringify(missingModel)}`);
+assert(!missingModel.nextActions?.some(action => String(action).includes("模板")), "missing model guidance must not offer template generation");
+
+const generate = await json("/api/generate", {
+  method: "POST",
+  body: JSON.stringify({
+    prompt: "offline acceptance dashboard",
+    modelSettings: stubModelSettings(),
+  }),
+});
+assert(generate.ok === true, "/api/generate should succeed with the local stub model");
+assert(generate.source !== "template", `generate should not use template source: ${JSON.stringify(generate.source)}`);
 assert(generate.buildEvidence?.ok === true, "generate should include passing buildEvidence");
 assert(generate.intelligenceSummary?.confidence === "local_verified", "generate should include local verified intelligence summary");
 assert(generate.intelligenceSummary?.nextBestAction === "deploy_to_board", "generate intelligence should suggest deploy_to_board");
 assert(generate.intelligenceSummary?.userMoment?.includes(generate.id), "generate intelligence should mention current build id");
 assert(generate.verificationMode === "local-simulated", "generate should expose local-simulated verificationMode");
 assert(Array.isArray(generate.buildGraph), "generate should include BuildGraph trace");
-assert(generate.buildGraph.some(item => item.node === "template_generate"), "BuildGraph trace should include template_generate");
+assert(!generate.buildGraph.some(item => item.node === "template_generate"), "BuildGraph trace should not include template_generate");
 
 const emptyGenerateResponse = await fetch(`${baseUrl}/api/generate`, {
   method: "POST",
@@ -92,7 +114,7 @@ const backgroundAgent = await json("/api/agent", {
     build_prompt: "background job smoke dashboard",
     conversation_id: "",
     background: true,
-    modelSettings: { enabled: false },
+    modelSettings: stubModelSettings(),
   }),
 });
 assert(backgroundAgent.ok === true && backgroundAgent.job?.id, "/api/agent background mode should create a job");
@@ -205,7 +227,7 @@ try {
     body: JSON.stringify({
       prompt: promptA,
       conversation_id: conversationA.id,
-      modelSettings: { enabled: false },
+      modelSettings: stubModelSettings(),
     }),
   });
   const generatedB = await json("/api/generate", {
@@ -213,7 +235,7 @@ try {
     body: JSON.stringify({
       prompt: promptB,
       conversation_id: conversationB.id,
-      modelSettings: { enabled: false },
+      modelSettings: stubModelSettings(),
     }),
   });
   assert(generatedA.id !== generatedB.id, "separate conversations should get separate build ids");
@@ -231,11 +253,11 @@ try {
       action: "confirm_build",
       build_prompt: agentPrompt,
       conversation_id: conversationC.id,
-      modelSettings: { enabled: false },
+      modelSettings: stubModelSettings(),
       history: [{ role: "user", content: "确认按这个方案构建" }],
     }),
   });
-  assert(generatedC.ok === true, "/api/agent confirm_build should succeed in template mode");
+  assert(generatedC.ok === true, "/api/agent confirm_build should succeed with the local stub model");
   assert(generatedC.mode === "build_done", "/api/agent confirm_build should report build_done");
   assert(Array.isArray(generatedC.agentGraph), "/api/agent should include AgentGraph trace");
   assert(generatedC.agentGraph.some(item => item.node === "build_graph"), "AgentGraph trace should include build_graph");

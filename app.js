@@ -338,8 +338,8 @@ const FRIENDLY_ERRORS = {
   },
   no_api_key: {
     title: "未配置 AI 模型",
-    detail: "还没有设置 AI 模型的 API Key，将使用本地模板生成。",
-    suggestion: "点击右上角「Model」按钮配置 DeepSeek 或其他模型"
+    detail: "还没有设置 AI 模型的 API Key，因此不会生成应用文件。",
+    suggestion: "点击右上角「Model」按钮配置 DeepSeek 或其他模型后重新生成"
   },
   llm_quota: {
     title: "模型额度不可用",
@@ -614,8 +614,8 @@ function describeGenerateLog(entry = {}) {
   if (event === "generate.agent.start") {
     return `Agent started: ${entry.model || entry.provider || "model"}`;
   }
-  if (event === "generate.template.start") {
-    return "Using local template generator";
+  if (event === "generate.model.start") {
+    return "Calling configured model";
   }
   if (event === "generate.agent.auto_verify") {
     const issueCount = Number.isFinite(entry.issueCount) ? entry.issueCount : 0;
@@ -631,8 +631,8 @@ function describeGenerateLog(entry = {}) {
     const issueCount = Number.isFinite(entry.issueCount) ? entry.issueCount : 0;
     return issueCount > 0 ? `Local verification finished with ${issueCount} issue(s)` : "Local verification passed";
   }
-  if (event === "generate.template.done") {
-    return "Template generation finished";
+  if (event === "generate.model.done") {
+    return "Model generation finished";
   }
   if (event !== "generate.agent.action") {
     return "";
@@ -666,8 +666,8 @@ function createGenerateLogPoller(progress) {
     "generate.agent.action",
     "generate.agent.auto_verify",
     "generate.agent.failed",
-    "generate.template.start",
-    "generate.template.done",
+    "generate.model.start",
+    "generate.model.done",
     "build.start",
     "build.done"
   ]);
@@ -1120,11 +1120,6 @@ async function runJobChoice(job = {}, choice = {}) {
     await loadJobs();
     return;
   }
-  if (action === "retry_local_template") {
-    setJobDrawer(false);
-    await retryJob(job, { modelSettings: { enabled: false } });
-    return;
-  }
   if (action === "retry_job") {
     setJobDrawer(false);
     await retryJob(job);
@@ -1175,7 +1170,7 @@ function syncModelUi() {
   }
   if (modelDot) modelDot.classList.toggle("online", hasModelConfig());
   if (modelHelpText) {
-    modelHelpText.textContent = `${preset.help} API Key 只保存在当前浏览器本地；未配置时使用本地模板兜底。`;
+    modelHelpText.textContent = `${preset.help} API Key 只保存在当前浏览器本地；未配置时不会生成应用文件。`;
   }
 }
 
@@ -2422,7 +2417,7 @@ async function runFlow(prompt, history = [], conversationId = currentConversatio
       } else {
         addThinkingBubble(`Execution trace
 1. Task received: ${prompt}
-2. No model reasoning output is available, so I continued through the local template path
+2. Waiting for model reasoning output and generated files
 3. Local verification is checking contracts, syntax, hardware simulation, and 480x360 render
 4. Hardware write waits for your later deploy confirmation`);
       }

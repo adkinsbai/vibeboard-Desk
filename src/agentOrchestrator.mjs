@@ -69,7 +69,7 @@ export function createAgentOrchestrator({
           if (missingModelPlan) return missingModelPlan;
           return {
             intent: "clarify",
-            reply: "当前还没有配置可用的 AI 模型，所以我不能调用真实 LLM 来理解复杂需求。不过你可以先走本地模板生成一个可验证的小屏版本，或者先配置模型后再继续。",
+            reply: "当前还没有配置可用的 AI 模型，所以我不能调用真实 LLM 来理解需求或生成代码。请先配置模型，或者继续补充需求，等模型可用后再开始构建。",
             understanding: [],
             planned_changes: [],
             target: "chat",
@@ -77,7 +77,6 @@ export function createAgentOrchestrator({
             build_prompt: "",
             project_memory: projectMemory,
             quick_replies: [
-              { label: "先本地生成", value: "先用本地模板生成一个可验证的 480x360 小屏应用" },
               { label: "配置模型", value: "我先配置模型 API Key，然后继续让 Agent 理解需求" },
               { label: "继续补充", value: "我继续补充小屏应用需求，暂时不开始构建" },
             ],

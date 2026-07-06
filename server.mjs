@@ -104,7 +104,6 @@ import {
   validateGeneratedFileContracts,
 } from "./src/generatedAppTemplate.mjs";
 import {
-  advancedTemplateFilesV2,
   generatedAppV2,
   generatedHardwareAppV2,
   generatedIndexV2,
@@ -570,7 +569,7 @@ function parseUsageMetadata(value) {
 
 function publicSafeModelSettings(input = {}) {
   if (!PUBLIC_DEPLOYMENT) return input || {};
-  if (input.enabled === false || input.forceTemplate === true) {
+  if (input.enabled === false) {
     return {
       provider: input.provider || process.env.VIBEBOARD_LLM_PROVIDER || process.env.VIBEBOARD_MODEL_PROVIDER || "deepseek",
       baseUrl: input.baseUrl || process.env.VIBEBOARD_LLM_BASE_URL || process.env.VIBEBOARD_MODEL_BASE_URL || "",
@@ -586,16 +585,13 @@ function publicSafeModelSettings(input = {}) {
   };
 }
 
-function withServerModelSettings(body = {}, options = {}) {
-  const forceTemplate = options.forceTemplate === true;
-  const modelInput = forceTemplate
-    ? { ...(body?.modelSettings || {}), enabled: false, forceTemplate: true }
-    : (body?.modelSettings || {});
+function withServerModelSettings(body = {}) {
+  const modelInput = body?.modelSettings || {};
   const cloudAgentLimits = PUBLIC_DEPLOYMENT
     ? {
-        max_iterations: Math.min(6, Number(body?.max_iterations || body?.maxIterations || 6)),
+        max_iterations: clampPublicAgentIterations(body?.max_iterations ?? body?.maxIterations),
         max_verification_attempts: 0,
-        repair_attempts: 0,
+        repair_attempts: clampPublicRepairAttempts(body?.repair_attempts ?? body?.repairAttempts),
       }
     : {};
   return {
@@ -603,6 +599,20 @@ function withServerModelSettings(body = {}, options = {}) {
     modelSettings: publicSafeModelSettings(modelInput),
     ...cloudAgentLimits,
   };
+}
+
+function clampPublicAgentIterations(value) {
+  if (value === undefined || value === null || value === "") return 12;
+  const parsed = Math.floor(Number(value));
+  if (!Number.isFinite(parsed)) return 12;
+  return Math.max(4, Math.min(12, parsed));
+}
+
+function clampPublicRepairAttempts(value) {
+  if (value === undefined || value === null || value === "") return 2;
+  const parsed = Math.floor(Number(value));
+  if (!Number.isFinite(parsed)) return 2;
+  return Math.max(0, Math.min(2, parsed));
 }
 
 async function ensureConversationAccess(conversationId, user) {
@@ -1042,6 +1052,136 @@ function extractJsonObject(text) {
     return JSON.parse(cleaned.slice(start, end + 1));
   }
   throw new Error("Model did not return valid JSON.");
+}
+
+function buildStubModelGeneratedPayload(prompt = "stub model app", id = "vb-stub-model") {
+  const safePrompt = htmlEscape(prompt).slice(0, 160);
+  return {
+    title: "Stub Model Screen",
+    mode: "dashboard",
+    notes: "local stub model response for verification",
+    files: {
+      "index.html": `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=480,height=360,initial-scale=1">
+  <title>Stub Model Screen</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main id="screen">
+    <section class="panel">
+      <p class="eyebrow">VibeBoard</p>
+      <h1>Stub Model Screen</h1>
+      <p id="prompt">${safePrompt}</p>
+      <pre id="state">loading</pre>
+    </section>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>`,
+      "style.css": `html, body { width: 480px; height: 360px; margin: 0; overflow: hidden; background: #0b1220; color: #e5f3ff; font-family: Arial, sans-serif; }
+#screen { width: 480px; height: 360px; display: grid; place-items: center; background: linear-gradient(135deg, #0b1220, #123046); }
+.panel { width: 420px; min-height: 250px; border: 1px solid #62d2ff; padding: 24px; background: rgba(3, 12, 24, 0.82); box-sizing: border-box; }
+.eyebrow { margin: 0 0 8px; font-size: 12px; color: #78f0c4; }
+h1 { margin: 0 0 14px; font-size: 28px; }
+#prompt { font-size: 14px; line-height: 1.4; }
+#state { margin-top: 18px; font-size: 12px; white-space: pre-wrap; color: #d7ff7a; }`,
+      "app.js": `const BUILD_ID = ${JSON.stringify(id)};
+const PROMPT = ${JSON.stringify(prompt)};
+
+window.VibeBoardHardware = {
+  async getStatus() {
+    const response = await fetch("/api/status", { cache: "no-store" });
+    return response.json();
+  },
+  async getProgramResult() {
+    const response = await fetch("./hardware-result.json", { cache: "no-store" });
+    return response.json();
+  },
+  getSnapshot() {
+    return { build_id: BUILD_ID, prompt: PROMPT };
+  }
+};
+
+document.addEventListener("DOMContentLoaded", async () => {
+  const state = document.getElementById("state");
+  const status = await window.VibeBoardHardware.getStatus().catch(() => ({ ok: false }));
+  const program = await window.VibeBoardHardware.getProgramResult().catch(() => ({ ok: false }));
+  state.textContent = JSON.stringify({ build_id: BUILD_ID, status: status.mode || "offline", program: program.runtime || "pending" }, null, 2);
+});`,
+      "hardware_app.py": `import json
+
+BUILD_ID = ${JSON.stringify(id)}
+PROMPT = ${JSON.stringify(prompt)}
+available_apis = ["/api/status", "./hardware-result.json"]
+
+result = {
+    "build_id": BUILD_ID,
+    "prompt": PROMPT,
+    "runtime": {"mode": "stub_model", "executed_on_board": False},
+    "available_apis": available_apis
+}
+
+with open("hardware-result.json", "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(result, ensure_ascii=False))
+
+print(json.dumps(result, ensure_ascii=False))
+`,
+    },
+  };
+}
+
+function buildStubToolMessage(body = {}) {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const created = new Set();
+  for (const message of messages) {
+    for (const call of message.tool_calls || []) {
+      if (call?.function?.name !== "create_file") continue;
+      try {
+        const args = JSON.parse(call.function.arguments || "{}");
+        if (args.path) created.add(String(args.path));
+      } catch {}
+    }
+    if (message.role !== "tool") continue;
+    const match = String(message.content || "").match(/(?:创建|重写|created|rewrote)\s+([a-z0-9_.-]+)/i);
+    if (match?.[1]) created.add(match[1]);
+  }
+
+  const prompt = [...messages].reverse()
+    .find(message => message.role === "user")?.content || "stub model app";
+  const payload = buildStubModelGeneratedPayload(prompt, "vb-stub-agent");
+  const order = ["index.html", "style.css", "app.js", "hardware_app.py"];
+  const nextFile = order.find(name => !created.has(name));
+  if (nextFile) {
+    return {
+      content: "",
+      tool_calls: [stubToolCall("create_file", {
+        path: nextFile,
+        content: payload.files[nextFile],
+      })],
+    };
+  }
+  return {
+    content: "",
+    tool_calls: [stubToolCall("done", {
+      summary: "stub model generated complete VibeBoard files",
+      what_worked: ["created required files"],
+      what_failed: [],
+    })],
+  };
+}
+
+function stubToolCall(name, args = {}) {
+  return {
+    id: `call_${name}_${Math.random().toString(16).slice(2, 8)}`,
+    type: "function",
+    function: {
+      name,
+      arguments: JSON.stringify(args),
+    },
+  };
 }
 
 function hasBoardCredentials() {
@@ -1725,26 +1865,6 @@ function normalizeGeneratedFiles(raw, prompt, id, meta = {}) {
   return { files, manifest };
 }
 
-function templateGeneratedFiles(prompt, id, reason = "") {
-  const spec = createAppSpec(prompt, id);
-  const manifest = generatedManifestV2(prompt, id, spec, {
-    source: "template",
-    fallbackReason: reason,
-    target: BOARD.targetStatic
-  });
-  const advanced = advancedTemplateFilesV2(prompt, id, spec);
-  return {
-    files: {
-      "index.html": advanced?.["index.html"] || generatedIndexV2(prompt, id, spec),
-      "style.css": advanced?.["style.css"] || generatedStyleV2(prompt, id, spec),
-      "app.js": injectAppHardwareSdkContracts(advanced?.["app.js"] || generatedAppV2(prompt, id, spec), id),
-      "hardware_app.py": generatedHardwareAppV2(prompt, id, spec),
-      "manifest.json": JSON.stringify(manifest, null, 2)
-    },
-    manifest
-  };
-}
-
 const HISTORY_WINDOW = 10; // keep last N messages uncompressed
 const HISTORY_LOOKBACK = 20; // how many old messages to summarize
 const GENERATE_HISTORY_ALLOWED_ROLES = new Set(["user", "assistant", "system"]);
@@ -1897,23 +2017,18 @@ function buildExtractiveSummary(messages) {
 async function generateFilesForPrompt(prompt, id, modelSettings = {}, history = []) {
   const settings = normalizeModelSettings(modelSettings);
   if (!settings.enabled) {
-    return templateGeneratedFiles(prompt, id, "model settings not configured");
+    const error = new Error("AI provider is not configured. Configure a model before generating.");
+    error.errorType = "no_api_key";
+    error.statusCode = 400;
+    throw error;
   }
 
-  try {
-    const content = await callChatModel(settings, prompt, id, history);
-    const raw = extractJsonObject(content);
-    return normalizeGeneratedFiles(raw, prompt, id, {
-      provider: settings.provider,
-      model: settings.model
-    });
-  } catch (error) {
-    if (history.length > 0) {
-      // If editing and LLM fails, don't fall back to template - throw the error
-      throw error;
-    }
-    return templateGeneratedFiles(prompt, id, `model generation failed: ${error.message}`);
-  }
+  const content = await callChatModel(settings, prompt, id, history);
+  const raw = extractJsonObject(content);
+  return normalizeGeneratedFiles(raw, prompt, id, {
+    provider: settings.provider,
+    model: settings.model
+  });
 }
 
 function generatedIndex(prompt, id) {
@@ -2187,7 +2302,7 @@ print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 async function writeGenerated(prompt, modelSettings = {}, history = [], embeddedAssets = null) {
   const id = buildId();
-  await appendServerLog("generate.template.start", { id, prompt: String(prompt || "").slice(0, 160) });
+  await appendServerLog("generate.model.start", { id, prompt: String(prompt || "").slice(0, 160) });
   const generated = await generateFilesForPrompt(prompt, id, modelSettings, history);
   const embedded = embedGeneratedAssetsInFiles(generated.files, embeddedAssets, generated.manifest);
   const files = embedded.files;
@@ -2195,7 +2310,7 @@ async function writeGenerated(prompt, modelSettings = {}, history = [], embedded
   await writeGeneratedFiles(GENERATED_DIR, files);
   const agentRun = transitionRun(createAgentRun({
     prompt,
-    mode: "template",
+    mode: "model",
     buildId: id,
     hardwareMode: boardPassword ? "real" : "simulated",
   }), AGENT_PHASES.CODE, {
@@ -2203,7 +2318,7 @@ async function writeGenerated(prompt, modelSettings = {}, history = [], embedded
   });
   setCurrentBuild({ id, prompt, files, dir: GENERATED_DIR, built: false, deployed: false, manifest, agentRun });
   await buildCurrent();
-  await appendServerLog("generate.template.done", { id, files: Object.keys(files) });
+  await appendServerLog("generate.model.done", { id, files: Object.keys(files) });
   return currentBuild;
 }
 
@@ -2953,12 +3068,30 @@ async function route(req, res) {
       const body = await readBody(req);
       if (body?.model === "stub-model") {
         const isAppraisal = body.messages?.some((message) => String(message.content || "").includes("affect appraisal engine"));
+        const isDigitalLifeReply = !isAppraisal && !Array.isArray(body.tools) && body.messages?.some((message) => (
+          /digital life companion|Continuous brain state|Never write stage directions/i.test(String(message.content || ""))
+        ));
+        const userPrompt = [...(body.messages || [])].reverse()
+          .find((message) => message.role === "user")?.content || "";
+        const buildIdMatch = String(userPrompt).match(/Build id:\s*([^\s]+)/i);
+        const requestMatch = String(userPrompt).match(/User request:\s*([\s\S]*?)(?:\n\nRules:|$)/i);
+        const stubToolMessage = !isAppraisal && Array.isArray(body.tools)
+          ? buildStubToolMessage(body)
+          : null;
         json(res, 200, {
           choices: [{
             message: {
               content: isAppraisal
                 ? JSON.stringify({ warmth: 0.45, reward: 0.2, goalProgress: 0.5, soothing: 0.2, safety: 0.2, uncertainty: 0.05, controllability: 0.6 })
-                : "I heard you. The local stub model is responding.",
+                : Array.isArray(body.tools)
+                  ? stubToolMessage.content
+                  : isDigitalLifeReply
+                    ? "（轻轻清了清嗓子）主人，我听见你了。以后我会更直接一点。"
+                    : JSON.stringify(buildStubModelGeneratedPayload(
+                      requestMatch?.[1]?.trim() || "stub model app",
+                      buildIdMatch?.[1]?.trim() || "vb-stub-model",
+                    )),
+              ...(stubToolMessage ? { tool_calls: stubToolMessage.tool_calls } : {}),
             },
           }],
         });
@@ -3193,7 +3326,7 @@ async function route(req, res) {
       if (payload?.conversation_id) await ensureConversationAccess(payload.conversation_id, requestUser);
       if (type === "agent" || type === "generate") await ensureCreditsAvailable(requestUser);
       const normalizedPayload = type === "generate"
-        ? withServerModelSettings(payload || {}, { forceTemplate: PUBLIC_DEPLOYMENT && payload?.agent_full !== true && payload?.agentFull !== true })
+        ? withServerModelSettings(payload || {})
         : { ...(payload || {}) };
       const jobInput = { ...normalizedPayload, user_id: requestUser?.id || "" };
       const job = PUBLIC_DEPLOYMENT
@@ -3291,9 +3424,7 @@ async function route(req, res) {
       let body = {};
       try {
         const rawBody = await readBody(req);
-        body = withServerModelSettings(rawBody, {
-          forceTemplate: PUBLIC_DEPLOYMENT && rawBody?.agent_full !== true && rawBody?.agentFull !== true,
-        });
+        body = withServerModelSettings(rawBody);
         if (body?.conversation_id) await ensureConversationAccess(body.conversation_id, requestUser);
         await ensureCreditsAvailable(requestUser);
         if (wantsBackgroundJob(body || {})) {

@@ -165,6 +165,16 @@ function generatedFilesForBuildId(buildId) {
   return files;
 }
 
+function mockModelSettings(overrides = {}) {
+  return {
+    provider: "custom",
+    baseUrl: "http://mock.local",
+    model: "mock",
+    apiKey: "key",
+    ...overrides,
+  };
+}
+
 function templateFilesForPrompt(prompt, id = "vb-template-test") {
   const spec = createAppSpec(prompt, id);
   const specialized = advancedTemplateFilesV2(prompt, id, spec);
@@ -1603,6 +1613,32 @@ sys.exit(0)
   });
 });
 
+await test("hardware contract wrapper provides script __file__ during execution", async () => {
+  const { injectHardwareAppContracts } = await import(pathToFileURL(path.join(ROOT, "src", "generatedAppTemplate.mjs")).href);
+  await withTempDir("vibeboard-hardware-file-", async dir => {
+    const script = injectHardwareAppContracts(`import json
+from pathlib import Path
+
+script_name = Path(__file__).name
+print(json.dumps({
+    "build_id": "source-build",
+    "runtime": "source-runtime",
+    "script_name": script_name,
+    "available_apis": ["/api/status", "./hardware-result.json"]
+}))
+`, "vb-wrapper-file-ok");
+    const scriptPath = path.join(dir, "hardware_app.py");
+    await fs.writeFile(scriptPath, script, "utf8");
+
+    await execFileP(PYTHON_BIN, ["-m", "py_compile", scriptPath], { cwd: dir });
+    const result = await execFileP(PYTHON_BIN, [scriptPath], { cwd: dir });
+    const output = JSON.parse(result.stdout.trim());
+
+    assert(output.build_id === "vb-wrapper-file-ok", "wrapper should replace source build id");
+    assert(output.script_name === "hardware_app.py", `wrapper should expose hardware_app.py as __file__, got ${output.script_name}`);
+  });
+});
+
 await test("frontend hardware SDK injection prevents agent overrides", async () => {
   const { injectAppHardwareSdkContracts } = await import(pathToFileURL(path.join(ROOT, "src", "generatedAppTemplate.mjs")).href);
   const source = injectAppHardwareSdkContracts(`
@@ -2741,7 +2777,7 @@ await test("chat planner switches project memory when user replaces the goal", a
   assert(requestBody.messages[0].content.includes("不要因为旧记忆里有 build_prompt 就返回 build_ready"), "planner prompt should forbid old build_prompt reuse");
 });
 
-await test("build graph runs template path and returns trace", async () => {
+await test("build graph routes real generation through agent path even when model settings are missing", async () => {
   const { runBuildGraph } = await import(pathToFileURL(path.join(ROOT, "src", "buildGraph.mjs")).href);
   const result = await runBuildGraph({
     prompt: "offline graph test",
@@ -2749,12 +2785,12 @@ await test("build graph runs template path and returns trace", async () => {
     conversationId: "project-a",
     isEditing: false,
   }, {
-    templateGenerate: async () => ({
+    agentGenerate: async () => ({
       ok: true,
       id: "build-a",
       files: { "index.html": "<html></html>" },
-      source: "template",
-      agentActions: [],
+      source: "agent",
+      agentActions: [{ action: "generated" }],
     }),
     saveSnapshot: async state => {
       state.snapshotSaved = state.result.id === "build-a";
@@ -2763,15 +2799,18 @@ await test("build graph runs template path and returns trace", async () => {
 
   const nodes = result.buildGraph.map(item => item.node);
   assert(result.ok === true, `expected ok result, got ${JSON.stringify(result)}`);
-  assert(result.id === "build-a", "build graph should preserve template result");
+  assert(result.id === "build-a", "build graph should preserve agent result");
+  assert(result.source === "agent", "build graph should not synthesize a template result");
   assert(nodes.includes("prepare"), "build graph should include prepare node");
-  assert(nodes.includes("template_generate"), "build graph should include template node");
+  assert(nodes.includes("agent_generate"), "build graph should include agent node");
+  assert(!nodes.includes("template_generate"), "build graph should not include template node for real user generation");
   assert(nodes.includes("save_snapshot"), "build graph should include snapshot node");
 });
 
-await test("generate runtime runs template path and saves snapshot", async () => {
+await test("generate runtime rejects missing model settings without writing a template snapshot", async () => {
   const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
   let savedSnapshot = null;
+  let writeGeneratedCalled = false;
   const runtime = createGenerateRuntime({
     conversationStore: {
       getProjectMemory: id => {
@@ -2790,144 +2829,13 @@ await test("generate runtime runs template path and saves snapshot", async () =>
       getAll: () => ({ palette: "high contrast" }),
       set: () => {},
     },
-    writeGenerated: async (prompt, modelSettings, history) => ({
-      ok: true,
-      id: "vb-runtime-template",
-      files: { "index.html": "<html></html>" },
-      manifest: { id: "vb-runtime-template" },
-      agentRun: { spec: { prompt }, evidence: [{ phase: "code", ok: true, summary: "template ok" }] },
-      buildEvidence: { ok: true, issues: [] },
-      intelligenceSummary: { confidence: "local_verified", nextBestAction: "deploy_to_board" },
-      modelSettings,
-      history,
-    }),
-    filesWithHardwareResult: async files => ({ ...files, [HARDWARE_RESULT_FILE]: "{\"ok\":true}" }),
-  });
-
-  const result = await runtime.runGenerateRequest({
-    prompt: "Build a small device panel.",
-    conversation_id: "conv-runtime-template",
-    modelSettings: { enabled: false },
-  });
-
-  const nodes = result.buildGraph.map(item => item.node);
-  assert(result.ok === true, `expected runtime ok, got ${JSON.stringify(result)}`);
-  assert(result.id === "vb-runtime-template", "template build id should pass through");
-  assert(result.source === "template", "runtime should use template path when model settings are disabled");
-  assert(result.intelligenceSummary?.confidence === "local_verified", "runtime should return template build intelligence summary");
-  assert(nodes.includes("template_generate"), "runtime graph should include template node");
-  assert(nodes.includes("save_snapshot"), "runtime graph should include save snapshot node");
-  assert(savedSnapshot?.conversationId === "conv-runtime-template", "runtime should save conversation snapshot");
-  assert(savedSnapshot?.files?.[HARDWARE_RESULT_FILE], "snapshot should include hardware result file");
-});
-
-await test("generate runtime rejects overlapping generation requests with actionable error", async () => {
-  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
-  let releaseFirst;
-  const firstStarted = new Promise(resolve => {
-    releaseFirst = resolve;
-  });
-  let allowFirstToFinish;
-  const firstCanFinish = new Promise(resolve => {
-    allowFirstToFinish = resolve;
-  });
-  const runtime = createGenerateRuntime({
-    conversationStore: {
-      getProjectMemory: () => ({}),
-      loadConversationFiles: () => ({ files: {} }),
-      saveConversationFiles: () => {},
-    },
-    memoryStore: {
-      getAll: () => ({}),
-      set: () => {},
-    },
-    appendServerLog: async () => {},
-    writeGenerated: async () => {
-      releaseFirst();
-      await firstCanFinish;
+    writeGenerated: async (prompt, modelSettings, history) => {
+      writeGeneratedCalled = true;
       return {
         ok: true,
-        id: "vb-runtime-lock",
+        id: "vb-runtime-template",
         files: { "index.html": "<html></html>" },
-        manifest: { id: "vb-runtime-lock" },
-        agentRun: { spec: {}, evidence: [] },
-        buildEvidence: { ok: true, issues: [] },
-        intelligenceSummary: { confidence: "local_verified" },
-      };
-    },
-    filesWithHardwareResult: async files => ({ ...files, [HARDWARE_RESULT_FILE]: "{\"ok\":true}" }),
-  });
-
-  const first = runtime.runGenerateRequest({
-    prompt: "first long running task",
-    modelSettings: { enabled: false },
-  });
-  await firstStarted;
-
-  let overlapError = null;
-  try {
-    await runtime.runGenerateRequest({
-      prompt: "second task while first is active",
-      modelSettings: { enabled: false },
-    });
-  } catch (error) {
-    overlapError = error;
-  } finally {
-    allowFirstToFinish();
-  }
-  const firstResult = await first;
-
-  assert(firstResult.ok === true, "first generation should finish after the lock is released");
-  assert(overlapError?.errorType === "generate_busy", `expected generate_busy, got ${overlapError?.message} ${JSON.stringify(overlapError)}`);
-  assert(overlapError?.statusCode === 409, "overlapping generation should be reported as HTTP 409");
-  assert(overlapError?.userMessage?.includes("当前已经有一个生成任务"), "busy error should be user-actionable");
-});
-
-await test("generate runtime embeds uploaded passive assets into template builds", async () => {
-  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
-  const embeddedPng = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
-  let savedSnapshot = null;
-  let receivedPrompt = "";
-  let receivedEmbeddedAssets = null;
-  const runtime = createGenerateRuntime({
-    conversationStore: {
-      getProjectMemory: () => ({ goal: "use uploaded hero image" }),
-      loadConversationFiles: () => ({ files: {} }),
-      saveConversationFiles: (conversationId, buildId, files) => {
-        savedSnapshot = { conversationId, buildId, files };
-      },
-    },
-    memoryStore: {
-      getAll: () => ({}),
-      set: () => {},
-    },
-    assetLibraryStore: {
-      promptContext: () => "\n\n## Uploaded asset library\n- hero.png (image): product photo",
-      generatedAssets: () => ({
-        files: {
-          "assets/uploaded/hero.png": embeddedPng,
-        },
-        items: [{
-          name: "hero.png",
-          kind: "image",
-          size: embeddedPng.byteLength,
-          path: "assets/uploaded/hero.png",
-          use: "product hero image",
-        }],
-        manifestAssets: ["assets/uploaded/hero.png"],
-        rejected: [{ name: "component.html", error: "component remains a design reference only" }],
-        summary: { count: 1, totalBytes: embeddedPng.byteLength },
-      }),
-    },
-    appendServerLog: async () => {},
-    writeGenerated: async (prompt, modelSettings, history, embeddedAssets) => {
-      receivedPrompt = prompt;
-      receivedEmbeddedAssets = embeddedAssets;
-      return {
-        ok: true,
-        id: "vb-runtime-assets",
-        files: validGeneratedFiles(),
-        manifest: JSON.parse(validGeneratedFiles()["manifest.json"]),
+        manifest: { id: "vb-runtime-template" },
         agentRun: { spec: { prompt }, evidence: [{ phase: "code", ok: true, summary: "template ok" }] },
         buildEvidence: { ok: true, issues: [] },
         intelligenceSummary: { confidence: "local_verified", nextBestAction: "deploy_to_board" },
@@ -2938,75 +2846,254 @@ await test("generate runtime embeds uploaded passive assets into template builds
     filesWithHardwareResult: async files => ({ ...files, [HARDWARE_RESULT_FILE]: "{\"ok\":true}" }),
   });
 
-  const result = await runtime.runGenerateRequest({
-    prompt: "Build a product display with my uploaded hero image.",
-    conversation_id: "conv-runtime-assets",
-    modelSettings: { enabled: false },
-  });
-  const manifest = JSON.parse(result.files["manifest.json"]);
+  let caught = null;
+  try {
+    await runtime.runGenerateRequest({
+      prompt: "Build a small device panel.",
+      conversation_id: "conv-runtime-template",
+      modelSettings: { enabled: false },
+    });
+  } catch (error) {
+    caught = error;
+  }
 
-  assert(result.ok === true, `expected runtime ok, got ${JSON.stringify(result)}`);
-  assert(receivedPrompt.includes("Embedded uploaded assets"), "model prompt should expose embedded asset paths");
-  assert(receivedPrompt.includes("./assets/uploaded/hero.png"), "model prompt should include the generated asset path");
-  assert(receivedEmbeddedAssets?.items?.[0]?.path === "assets/uploaded/hero.png", "template generator should receive embedded asset metadata");
-  assert(Buffer.isBuffer(result.files["assets/uploaded/hero.png"]), "runtime result should include embedded binary asset");
-  assert(result.files["assets/uploaded/hero.png"].equals(embeddedPng), "embedded asset bytes should be preserved");
-  assert(manifest.assets.includes("assets/uploaded/hero.png"), "manifest assets[] should declare embedded asset");
-  assert(manifest.files.includes("assets/uploaded/hero.png"), "manifest files[] should include embedded asset");
-  assert(savedSnapshot?.files?.["assets/uploaded/hero.png"], "conversation snapshot should save embedded asset");
+  assert(caught, "runtime should reject generation when model settings are disabled");
+  assert(caught.errorType === "no_api_key", `expected no_api_key, got ${JSON.stringify(caught)}`);
+  assert(writeGeneratedCalled === false, "runtime must not call writeGenerated/template fallback when model is missing");
+  assert(savedSnapshot === null, "runtime must not save a generated snapshot on missing model");
+});
+
+await test("generate runtime rejects overlapping generation requests with actionable error", async () => {
+  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  await withTempDir("vibeboard-runtime-lock-", async dir => {
+    let releaseFirst;
+    const firstStarted = new Promise(resolve => {
+      releaseFirst = resolve;
+    });
+    let allowFirstToFinish;
+    const firstCanFinish = new Promise(resolve => {
+      allowFirstToFinish = resolve;
+    });
+    let currentBuild = null;
+    const runtime = createGenerateRuntime({
+      conversationStore: {
+        getProjectMemory: () => ({}),
+        loadConversationFiles: () => ({ files: {} }),
+        saveConversationFiles: () => {},
+      },
+      memoryStore: {
+        getAll: () => ({}),
+        set: () => {},
+      },
+      appendServerLog: async () => {},
+      runAgent: async () => {
+        releaseFirst();
+        await firstCanFinish;
+        return {
+          success: true,
+          summary: "agent generated files",
+          files: validGeneratedFiles(),
+          actions: [],
+        };
+      },
+      buildId: () => "vb-runtime-lock",
+      createAppSpec: (prompt, id) => ({ prompt, id }),
+      generatedHardwareApp: (_prompt, id) => validGeneratedFiles()["hardware_app.py"].replace("vb-test-valid", id),
+      injectHardwareAppContracts: source => source,
+      generatedManifest: (_prompt, id) => ({ id, assets: [], files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+      buildCurrent: async () => {
+        currentBuild.built = true;
+        currentBuild.buildEvidence = { ok: true, issues: [], phase: "local_verify" };
+        currentBuild.intelligenceSummary = { confidence: "local_verified" };
+      },
+      setCurrentBuild: build => {
+        currentBuild = build;
+        return currentBuild;
+      },
+      getCurrentBuild: () => currentBuild,
+      generatedDir: dir,
+      filesWithHardwareResult: async files => ({ ...files, [HARDWARE_RESULT_FILE]: "{\"ok\":true}" }),
+    });
+
+    const first = runtime.runGenerateRequest({
+      prompt: "first long running task",
+      modelSettings: mockModelSettings(),
+    });
+    await firstStarted;
+
+    let overlapError = null;
+    try {
+      await runtime.runGenerateRequest({
+        prompt: "second task while first is active",
+        modelSettings: mockModelSettings(),
+      });
+    } catch (error) {
+      overlapError = error;
+    } finally {
+      allowFirstToFinish();
+    }
+    const firstResult = await first;
+
+    assert(firstResult.ok === true, "first generation should finish after the lock is released");
+    assert(overlapError?.errorType === "generate_busy", `expected generate_busy, got ${overlapError?.message} ${JSON.stringify(overlapError)}`);
+    assert(overlapError?.statusCode === 409, "overlapping generation should be reported as HTTP 409");
+    assert(overlapError?.userMessage?.includes("当前已经有一个生成任务"), "busy error should be user-actionable");
+  });
+});
+
+await test("generate runtime embeds uploaded passive assets into agent builds", async () => {
+  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  await withTempDir("vibeboard-runtime-assets-", async dir => {
+    const embeddedPng = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    let savedSnapshot = null;
+    let receivedPrompt = "";
+    let currentBuild = null;
+    const runtime = createGenerateRuntime({
+      conversationStore: {
+        getProjectMemory: () => ({ goal: "use uploaded hero image" }),
+        loadConversationFiles: () => ({ files: {} }),
+        saveConversationFiles: (conversationId, buildId, files) => {
+          savedSnapshot = { conversationId, buildId, files };
+        },
+      },
+      memoryStore: {
+        getAll: () => ({}),
+        set: () => {},
+      },
+      assetLibraryStore: {
+        promptContext: () => "\n\n## Uploaded asset library\n- hero.png (image): product photo",
+        generatedAssets: () => ({
+          files: {
+            "assets/uploaded/hero.png": embeddedPng,
+          },
+          items: [{
+            name: "hero.png",
+            kind: "image",
+            size: embeddedPng.byteLength,
+            path: "assets/uploaded/hero.png",
+            use: "product hero image",
+          }],
+          manifestAssets: ["assets/uploaded/hero.png"],
+          rejected: [{ name: "component.html", error: "component remains a design reference only" }],
+          summary: { count: 1, totalBytes: embeddedPng.byteLength },
+        }),
+      },
+      appendServerLog: async () => {},
+      runAgent: async (_settings, prompt) => {
+        receivedPrompt = prompt;
+        return {
+          success: true,
+          summary: "agent used embedded asset",
+          files: validGeneratedFiles(),
+          actions: [],
+        };
+      },
+      buildId: () => "vb-runtime-assets",
+      createAppSpec: (prompt, id) => ({ prompt, id }),
+      generatedHardwareApp: (_prompt, id) => validGeneratedFiles()["hardware_app.py"].replace("vb-test-valid", id),
+      injectHardwareAppContracts: source => source,
+      generatedManifest: (_prompt, id) => ({ id, assets: [], files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+      buildCurrent: async () => {
+        currentBuild.built = true;
+        currentBuild.buildEvidence = { ok: true, issues: [], phase: "local_verify" };
+        currentBuild.intelligenceSummary = { confidence: "local_verified", nextBestAction: "deploy_to_board" };
+      },
+      setCurrentBuild: build => {
+        currentBuild = build;
+        return currentBuild;
+      },
+      getCurrentBuild: () => currentBuild,
+      generatedDir: dir,
+      filesWithHardwareResult: async files => ({ ...files, [HARDWARE_RESULT_FILE]: "{\"ok\":true}" }),
+    });
+
+    const result = await runtime.runGenerateRequest({
+      prompt: "Build a product display with my uploaded hero image.",
+      conversation_id: "conv-runtime-assets",
+      modelSettings: mockModelSettings(),
+    });
+    const manifest = JSON.parse(result.files["manifest.json"]);
+
+    assert(result.ok === true, `expected runtime ok, got ${JSON.stringify(result)}`);
+    assert(result.source === "agent", "asset embedding should happen on agent builds");
+    assert(receivedPrompt.includes("Embedded uploaded assets"), "model prompt should expose embedded asset paths");
+    assert(receivedPrompt.includes("./assets/uploaded/hero.png"), "model prompt should include the generated asset path");
+    assert(Buffer.isBuffer(result.files["assets/uploaded/hero.png"]), "runtime result should include embedded binary asset");
+    assert(result.files["assets/uploaded/hero.png"].equals(embeddedPng), "embedded asset bytes should be preserved");
+    assert(manifest.assets.includes("assets/uploaded/hero.png"), "manifest assets[] should declare embedded asset");
+    assert(manifest.files.includes("assets/uploaded/hero.png"), "manifest files[] should include embedded asset");
+    assert(savedSnapshot?.files?.["assets/uploaded/hero.png"], "conversation snapshot should save embedded asset");
+  });
 });
 
 await test("generate runtime fails when conversation snapshot save fails", async () => {
   const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
-  const logs = [];
-  const runtime = createGenerateRuntime({
-    conversationStore: {
-      getProjectMemory: async () => ({}),
-      loadConversationFiles: async () => ({ files: {} }),
-      saveConversationFiles: async () => {
-        const error = new Error("durable project save failed");
-        error.errorType = "storage_failed";
-        throw error;
+  await withTempDir("vibeboard-runtime-save-fails-", async dir => {
+    const logs = [];
+    let currentBuild = null;
+    const runtime = createGenerateRuntime({
+      conversationStore: {
+        getProjectMemory: async () => ({}),
+        loadConversationFiles: async () => ({ files: {} }),
+        saveConversationFiles: async () => {
+          const error = new Error("durable project save failed");
+          error.errorType = "storage_failed";
+          throw error;
+        },
       },
-    },
-    memoryStore: { getAll: () => ({}) },
-    assetLibraryStore: {
-      promptContext: () => "",
-      generatedAssets: () => ({ items: [], files: {}, rejected: [] }),
-      recordBuildSnapshot: () => {},
-    },
-    appendServerLog: async (event, data) => logs.push({ event, data }),
-    normalizeGenerateHistory: history => history,
-    compressHistory: async history => history,
-    buildId: () => "build-save-fails",
-    writeGenerated: async () => ({
-      id: "build-save-fails",
-      files: validGeneratedFiles(),
-      manifest: JSON.parse(validGeneratedFiles()["manifest.json"]),
-      buildEvidence: { ok: true, issues: [] },
-      agentRun: {},
-    }),
-    filesWithHardwareResult: async files => files,
-    projectWorkspace: {
-      writeBuildSnapshot: async () => {},
-      writeMemory: async () => {},
-      listProjectFiles: async () => [],
-    },
-  });
-
-  let failed = false;
-  try {
-    await runtime.runGenerateRequest({
-      prompt: "Build a clock",
-      conversation_id: "conv-save-fails",
-      modelSettings: { enabled: false },
+      memoryStore: { getAll: () => ({}) },
+      assetLibraryStore: {
+        promptContext: () => "",
+        generatedAssets: () => ({ items: [], files: {}, rejected: [] }),
+        recordBuildSnapshot: () => {},
+      },
+      appendServerLog: async (event, data) => logs.push({ event, data }),
+      normalizeGenerateHistory: history => history,
+      compressHistory: async history => history,
+      runAgent: async () => ({
+        success: true,
+        summary: "agent generated files",
+        files: validGeneratedFiles(),
+        actions: [],
+      }),
+      buildId: () => "build-save-fails",
+      createAppSpec: (prompt, id) => ({ prompt, id }),
+      generatedHardwareApp: (_prompt, id) => validGeneratedFiles()["hardware_app.py"].replace("vb-test-valid", id),
+      injectHardwareAppContracts: source => source,
+      generatedManifest: (_prompt, id) => ({ id, assets: [], files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+      buildCurrent: async () => {
+        currentBuild.built = true;
+        currentBuild.buildEvidence = { ok: true, issues: [], phase: "local_verify" };
+        currentBuild.intelligenceSummary = { confidence: "local_verified" };
+      },
+      setCurrentBuild: build => {
+        currentBuild = build;
+        return currentBuild;
+      },
+      getCurrentBuild: () => currentBuild,
+      generatedDir: dir,
+      filesWithHardwareResult: async files => files,
+      projectWorkspace: {
+        writeBuildSnapshot: async () => {},
+        writeMemory: async () => {},
+        listProjectFiles: async () => [],
+      },
     });
-  } catch (error) {
-    failed = error.errorType === "storage_failed" || /save failed/i.test(error.message);
-  }
 
-  assert(failed, "generation should fail when durable conversation file save fails");
-  assert(logs.some(item => /conversation_save_failed/.test(item.event)), "runtime should log conversation save failure");
+    let failed = false;
+    try {
+      await runtime.runGenerateRequest({
+        prompt: "Build a clock",
+        conversation_id: "conv-save-fails",
+        modelSettings: mockModelSettings(),
+      });
+    } catch (error) {
+      failed = error.errorType === "storage_failed" || /save failed/i.test(error.message);
+    }
+
+    assert(failed, "generation should fail when durable conversation file save fails");
+    assert(logs.some(item => /conversation_save_failed/.test(item.event)), "runtime should log conversation save failure");
+  });
 });
 
 await test("generate runtime passes conversation files into agent path", async () => {
@@ -3292,6 +3379,87 @@ await test("generate runtime surfaces user-actionable repair model failures", as
   });
 });
 
+await test("generate runtime applies deterministic readability fallback after low contrast repairs fail", async () => {
+  const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
+  await withTempDir("vibeboard-runtime-readability-fallback-", async dir => {
+    let runAgentCalls = 0;
+    let buildCalls = 0;
+    let currentBuild = null;
+    const runtime = createGenerateRuntime({
+      conversationStore: {
+        getProjectMemory: () => ({}),
+        loadConversationFiles: () => ({ files: {} }),
+        saveConversationFiles: () => {},
+      },
+      memoryStore: {
+        getAll: () => ({}),
+        set: () => {},
+      },
+      runAgent: async () => {
+        runAgentCalls += 1;
+        return {
+          success: true,
+          summary: runAgentCalls === 1 ? "initial low contrast files" : "model repair still low contrast",
+          files: {
+            ...validGeneratedFiles(),
+            "style.css": "body{background:#111;color:#222}.muted{color:#333}",
+          },
+          actions: [{ tool: "done", args: { summary: "low contrast" } }],
+        };
+      },
+      buildId: () => "vb-runtime-readability-fallback",
+      createAppSpec: (prompt, id) => ({ prompt, id }),
+      generatedHardwareApp: (_prompt, id) => validGeneratedFiles()["hardware_app.py"].replace("vb-test-valid", id),
+      injectHardwareAppContracts: source => source,
+      generatedManifest: (_prompt, id) => ({ id, files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+      buildCurrent: async () => {
+        buildCalls += 1;
+        const style = currentBuild?.files?.["style.css"] || "";
+        if (!style.includes("VibeBoard readability safety net")) {
+          const error = new Error("local verification failed: TEXT_CONTRAST_LOW: Rendered page has 2 visible text blocks below 3:1 contrast.");
+          error.verification = {
+            ok: false,
+            phase: "local_verification",
+            summary: "Local render verification failed",
+            issues: [{
+              code: "TEXT_CONTRAST_LOW",
+              message: "Rendered page has 2 visible text blocks below 3:1 contrast.",
+              phase: "render",
+              suggestedFixes: ["Raise text/background contrast to at least 3:1 on the 480x360 hardware screen."],
+            }],
+          };
+          throw error;
+        }
+        currentBuild.built = true;
+        currentBuild.buildEvidence = { ok: true, issues: [], phase: "local_verify", summary: "L0-L3 local verification passed after readability fallback" };
+      },
+      setCurrentBuild: build => {
+        currentBuild = build;
+      },
+      getCurrentBuild: () => currentBuild,
+      generatedDir: dir,
+      filesWithHardwareResult: async files => files,
+    });
+
+    const result = await runtime.runGenerateRequest({
+      prompt: "Build a low contrast screen.",
+      modelSettings: {
+        provider: "custom",
+        baseUrl: "http://mock.local",
+        model: "mock",
+        apiKey: "key",
+      },
+      repair_attempts: 1,
+    });
+
+    assert(result.ok === true, `expected readability fallback to pass, got ${JSON.stringify(result)}`);
+    assert(runAgentCalls === 2, `expected initial agent plus one repair agent, got ${runAgentCalls}`);
+    assert(buildCalls === 3, `expected initial build, repaired build, and safety-net build, got ${buildCalls}`);
+    assert(result.files["style.css"].includes("VibeBoard readability safety net"), "result should include deterministic readability CSS");
+    assert(result.buildEvidence?.ok === true, "fallback result should include passing build evidence");
+  });
+});
+
 await test("generate runtime allows disabling auto repair with zero attempts", async () => {
   const { buildGenerateAgentSettings } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
   const settings = buildGenerateAgentSettings({}, { VIBEBOARD_AGENT_REPAIR_ATTEMPTS: "0" });
@@ -3453,7 +3621,7 @@ await test("agent orchestrator returns choice-based guidance when model is missi
   assert(result.ready_to_build === false, "missing model should not auto-build from chat message");
   assert(result.reply.includes("没有配置可用的 AI 模型"), `missing model reply should be localized, got ${result.reply}`);
   assert(Array.isArray(result.quick_replies) && result.quick_replies.length >= 2, "missing model should offer quick reply choices");
-  assert(result.quick_replies.some(item => item.label.includes("本地生成")), "missing model should offer local template generation choice");
+  assert(!result.quick_replies.some(item => item.label.includes("本地生成")), "missing model should not offer local template generation choice");
 });
 
 await test("agent orchestrator exposes Codex hardware mode boundary", async () => {

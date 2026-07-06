@@ -1,6 +1,5 @@
 export const BUILD_GRAPH_NODES = Object.freeze({
   PREPARE: "prepare",
-  TEMPLATE_GENERATE: "template_generate",
   AGENT_GENERATE: "agent_generate",
   ENSURE_CONTRACTS: "ensure_contracts",
   LOCAL_VERIFY: "local_verify",
@@ -43,28 +42,17 @@ export async function runBuildGraph(input = {}, steps = {}) {
   if (steps.prepare) await steps.prepare(state);
   appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.PREPARE, "done");
 
-  if (!input.settings?.enabled) {
-    requireStep(steps.templateGenerate, BUILD_GRAPH_NODES.TEMPLATE_GENERATE);
-    appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.TEMPLATE_GENERATE, "start");
-    state.result = await steps.templateGenerate(state);
-    state.files = state.result?.files || {};
-    appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.TEMPLATE_GENERATE, "done", {
-      id: state.result?.id || "",
-      fileCount: Object.keys(state.files).length,
-    });
-  } else {
-    requireStep(steps.agentGenerate, BUILD_GRAPH_NODES.AGENT_GENERATE);
-    appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.AGENT_GENERATE, "start", {
-      fileCount: Object.keys(input.fileStore || {}).length,
-    });
-    state.result = await steps.agentGenerate(state);
-    state.files = state.result?.files || {};
-    appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.AGENT_GENERATE, "done", {
-      id: state.result?.id || "",
-      fileCount: Object.keys(state.files).length,
-      actionCount: state.result?.agentActions?.length || 0,
-    });
-  }
+  requireStep(steps.agentGenerate, BUILD_GRAPH_NODES.AGENT_GENERATE);
+  appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.AGENT_GENERATE, "start", {
+    fileCount: Object.keys(input.fileStore || {}).length,
+  });
+  state.result = await steps.agentGenerate(state);
+  state.files = state.result?.files || {};
+  appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.AGENT_GENERATE, "done", {
+    id: state.result?.id || "",
+    fileCount: Object.keys(state.files).length,
+    actionCount: state.result?.agentActions?.length || 0,
+  });
 
   if (steps.ensureContracts) {
     appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.ENSURE_CONTRACTS, "start");
