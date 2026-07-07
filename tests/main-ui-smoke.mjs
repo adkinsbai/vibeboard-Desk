@@ -11,6 +11,43 @@ await withServer(async ({ baseUrl, json }) => {
   try {
     await page.goto(`${baseUrl}/workbench`, { waitUntil: "domcontentloaded" });
     await page.locator("#chatLog").waitFor({ timeout: 6000 });
+    const lifecyclePolicyContract = await page.evaluate(() => {
+      const lifecycle = window.VibeBuildLifecycle;
+      if (!lifecycle?.createBuildLifecyclePolicy) {
+        return { ok: false, reason: "missing lifecycle module" };
+      }
+      let next = 0;
+      const snapshots = [];
+      const policy = lifecycle.createBuildLifecyclePolicy({
+        createId: () => `client-run-${++next}`,
+        getCurrentBuildId: () => "build-from-ui",
+        onChange: state => snapshots.push({ ...state }),
+      });
+      const first = policy.clientRunIdForFlow("Build a timer", "conv-a", "confirm_build");
+      const same = policy.clientRunIdForFlow("Build a timer", "conv-a", "confirm_build");
+      const edited = policy.clientRunIdForFlow("Build a timer", "conv-a", "edit_build");
+      policy.setState(lifecycle.STATES.AWAITING_DEPLOY, { currentBuildId: "build-ready" });
+      policy.setState(lifecycle.STATES.DEPLOYING);
+      policy.setState(lifecycle.STATES.DONE, { currentBuildId: "build-done" });
+      return {
+        ok: true,
+        states: Object.values(lifecycle.STATES),
+        first,
+        same,
+        edited,
+        snapshots,
+        final: policy.getState(),
+      };
+    });
+    assert(lifecyclePolicyContract.ok, lifecyclePolicyContract.reason || "build lifecycle module should load before app.js");
+    assert(
+      ["clarifying", "generating", "verified", "awaiting_deploy", "deploying", "done"].every(state => lifecyclePolicyContract.states.includes(state)),
+      `build lifecycle module should expose expected states, got ${JSON.stringify(lifecyclePolicyContract.states)}`
+    );
+    assert(lifecyclePolicyContract.first === lifecyclePolicyContract.same, "same conversation/action/prompt should reuse client_run_id while generating");
+    assert(lifecyclePolicyContract.edited !== lifecyclePolicyContract.first, "different build actions should receive a new client_run_id");
+    assert(lifecyclePolicyContract.snapshots.some(state => state.state === "generating" && state.currentBuildId === "build-from-ui"), "generating state should capture the current build id");
+    assert(lifecyclePolicyContract.final.state === "done" && lifecyclePolicyContract.final.currentBuildId === "build-done", "deploy lifecycle should transition through done with the build id preserved");
     await page.evaluate(() => {
       window.__vibeboardTestEvents = [];
       const originalFetch = window.fetch.bind(window);

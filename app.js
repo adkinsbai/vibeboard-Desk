@@ -129,21 +129,9 @@ let jobsPollTimer = null;
 let activeJobWaiters = new Set();
 let assetManagerSelectedConversationId = "";
 const GENERATION_START_TIMEOUT_MS = 300000;
-const GENERATION_FLOW_STATES = Object.freeze({
-  CLARIFYING: "clarifying",
-  GENERATING: "generating",
-  VERIFIED: "verified",
-  AWAITING_DEPLOY: "awaiting_deploy",
-  DEPLOYING: "deploying",
-  DONE: "done",
-});
-let generationFlowState = {
-  state: GENERATION_FLOW_STATES.CLARIFYING,
-  clientRunId: "",
-  conversationId: "",
-  promptKey: "",
-  currentBuildId: "",
-};
+const buildLifecycleModule = window.VibeBuildLifecycle;
+const GENERATION_FLOW_STATES = buildLifecycleModule.STATES;
+let generationFlowState = null;
 let assetManagerCurrentFolderId = "";
 let assetManagerSelection = null;
 let assetManagerCache = { folders: [], assets: [], projectFiles: [] };
@@ -270,49 +258,32 @@ const stages = [
   { id: "ready", title: "等待确认部署", note: "不会自动写入真机" },
 ];
 
-function setGenerationFlowState(state, patch = {}) {
-  generationFlowState = {
-    ...generationFlowState,
-    ...patch,
-    state,
-  };
-  const generating = state === GENERATION_FLOW_STATES.GENERATING;
+function syncGenerationFlowUi(state = generationFlowState) {
+  const generating = state?.state === GENERATION_FLOW_STATES.GENERATING;
   if (generateBtn) generateBtn.disabled = busy || generating;
   document.querySelectorAll('[data-action="confirm"]').forEach(button => {
     button.disabled = generating;
   });
 }
 
+const buildLifecycle = buildLifecycleModule.createBuildLifecyclePolicy({
+  getCurrentBuildId: () => currentGeneratedBuildId() || "",
+  onChange: state => {
+    generationFlowState = state;
+    syncGenerationFlowUi(state);
+  },
+});
+generationFlowState = buildLifecycle.getState();
+const flowPromptKey = buildLifecycle.flowPromptKey;
+const clientRunIdForFlow = buildLifecycle.clientRunIdForFlow;
+
+function setGenerationFlowState(state, patch = {}) {
+  return buildLifecycle.setState(state, patch);
+}
+
 function createClientRunId() {
   if (crypto?.randomUUID) return crypto.randomUUID();
   return `run_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-}
-
-function flowPromptKey(prompt = "", conversationId = "", action = "confirm_build") {
-  return [
-    String(conversationId || ""),
-    String(action || ""),
-    String(prompt || "").replace(/\s+/g, " ").trim().slice(0, 240),
-  ].join("|");
-}
-
-function clientRunIdForFlow(prompt = "", conversationId = "", action = "confirm_build") {
-  const promptKey = flowPromptKey(prompt, conversationId, action);
-  if (
-    generationFlowState.state === GENERATION_FLOW_STATES.GENERATING &&
-    generationFlowState.promptKey === promptKey &&
-    generationFlowState.clientRunId
-  ) {
-    return generationFlowState.clientRunId;
-  }
-  const clientRunId = createClientRunId();
-  setGenerationFlowState(GENERATION_FLOW_STATES.GENERATING, {
-    clientRunId,
-    conversationId: String(conversationId || ""),
-    promptKey,
-    currentBuildId: currentGeneratedBuildId() || "",
-  });
-  return clientRunId;
 }
 
 function pad(value) {
