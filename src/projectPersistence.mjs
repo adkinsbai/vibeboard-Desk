@@ -14,6 +14,15 @@ import {
   normalizeProjectMemory,
 } from "./conversationStore.mjs";
 import { createJobStore } from "./jobStore.mjs";
+import {
+  FINAL_STATUSES,
+  JOB_STATUS,
+  compactJobLogEntry,
+  jobIdempotencyScope,
+  jobMatchesIdempotencyScope,
+  normalizeIdempotencyValue,
+  normalizeJobStatus,
+} from "./jobLifecyclePolicy.mjs";
 
 const fileMutationLocks = new Map();
 
@@ -173,7 +182,7 @@ function normalizeLegacyJobRow(row = {}) {
   return {
     id: String(row.id || ""),
     type: String(row.type || ""),
-    status: String(row.status || "queued"),
+    status: normalizeJobStatus(row.status),
     phase: String(row.phase || ""),
     conversation_id: row.conversation_id || "",
     title: String(row.title || ""),
@@ -188,34 +197,6 @@ function normalizeLegacyJobRow(row = {}) {
     started_at: String(row.started_at || ""),
     completed_at: String(row.completed_at || ""),
   };
-}
-
-function normalizeIdempotencyValue(value) {
-  return String(value || "").trim().slice(0, 160);
-}
-
-function jobIdempotencyScope({ type = "", conversationId = "", input = {} } = {}) {
-  const clientRunId = normalizeIdempotencyValue(input.client_run_id || input.clientRunId);
-  if (!clientRunId) return null;
-  return {
-    type: normalizeIdempotencyValue(type || "task"),
-    conversationId: normalizeIdempotencyValue(conversationId || input.conversation_id || input.conversationId),
-    action: normalizeIdempotencyValue(input.action || input.job_action || type || "task"),
-    userId: normalizeIdempotencyValue(input.user_id || input.userId),
-    clientRunId,
-  };
-}
-
-function jobMatchesIdempotencyScope(job = {}, scope = null) {
-  if (!job || !scope) return false;
-  const input = job.input || {};
-  return (
-    normalizeIdempotencyValue(job.type) === scope.type &&
-    normalizeIdempotencyValue(job.conversation_id) === scope.conversationId &&
-    normalizeIdempotencyValue(input.client_run_id || input.clientRunId) === scope.clientRunId &&
-    normalizeIdempotencyValue(input.action || input.job_action || job.type || "task") === scope.action &&
-    normalizeIdempotencyValue(input.user_id || input.userId) === scope.userId
-  );
 }
 
 async function listAllLegacyJobs(legacy) {
@@ -320,11 +301,6 @@ export function createFileProjectPersistence({ filePath } = {}) {
 export function createPostgresProjectPersistence({ pg } = {}) {
   if (!pg) throw new Error("pg is required");
   const now = () => new Date().toISOString();
-  const finalStatuses = new Set(["succeeded", "failed", "canceled"]);
-  const normalizeStatus = (value, fallback = "queued") => {
-    const status = String(value || "").trim();
-    return ["queued", "running", "succeeded", "failed", "canceled"].includes(status) ? status : fallback;
-  };
   const jsonString = (value, fallback) => {
     try { return JSON.stringify(value ?? fallback); } catch { return JSON.stringify(fallback); }
   };
@@ -383,7 +359,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
     return {
       id: String(row.id || ""),
       type: String(row.type || ""),
-      status: normalizeStatus(row.status),
+      status: normalizeJobStatus(row.status),
       phase: String(row.phase || ""),
       conversation_id: row.conversation_id || "",
       title: String(row.title || ""),
@@ -399,12 +375,6 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       completed_at: row.completed_at ? String(row.completed_at) : "",
     };
   };
-  const compactLogEntry = entry => ({
-    ts: entry.ts || now(),
-    phase: String(entry.phase || "").slice(0, 80),
-    message: String(entry.message || "").slice(0, 600),
-    data: entry.data && typeof entry.data === "object" ? entry.data : {},
-  });
 
   return {
     async initSchema() {
@@ -480,17 +450,17 @@ export function createPostgresProjectPersistence({ pg } = {}) {
 
     async markInterruptedRunningJobs() {
       const interruptedAt = now();
-      const rows = rowsOf(await pg`SELECT * FROM jobs WHERE status = ${"running"}`);
+      const rows = rowsOf(await pg`SELECT * FROM jobs WHERE status = ${JOB_STATUS.RUNNING}`);
       for (const row of rows) {
         const job = normalizeJob(row);
-        const logs = [...job.logs, compactLogEntry({
+        const logs = [...job.logs, compactJobLogEntry({
           ts: interruptedAt,
           phase: "server_restart",
           message: "Server restarted before this job finished.",
-        })].slice(-80);
+        }, { now })].slice(-80);
         await pg`
           UPDATE jobs
-          SET status = ${"failed"},
+          SET status = ${JOB_STATUS.FAILED},
               phase = ${"server_restart"},
               error_json = ${jsonString({
                 errorType: "connection_dropped",
@@ -679,7 +649,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       completed_at = "",
     } = {}) {
       const ts = now();
-      const safeStatus = normalizeStatus(status);
+      const safeStatus = normalizeJobStatus(status);
       const row = {
         id,
         type: String(type || "task"),
@@ -691,12 +661,12 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         output,
         error,
         choices: Array.isArray(choices) ? choices : [],
-        logs: Array.isArray(logs) ? logs : [compactLogEntry({ ts, phase, message: "Job accepted." })],
+        logs: Array.isArray(logs) ? logs : [compactJobLogEntry({ ts, phase, message: "Job accepted." }, { now })],
         cancel_requested: Boolean(cancel_requested),
         created_at: created_at || ts,
         updated_at: updated_at || ts,
-        started_at: started_at || (safeStatus === "running" ? ts : ""),
-        completed_at: completed_at || (finalStatuses.has(safeStatus) ? ts : ""),
+        started_at: started_at || (safeStatus === JOB_STATUS.RUNNING ? ts : ""),
+        completed_at: completed_at || (FINAL_STATUSES.has(safeStatus) ? ts : ""),
       };
       await pg`
         INSERT INTO jobs
@@ -728,7 +698,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
 
     async listJobs({ limit = 50, conversationId = "", status = "" } = {}) {
       const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
-      const safeStatus = status ? normalizeStatus(status) : "";
+      const safeStatus = status ? normalizeJobStatus(status) : "";
       let rows;
       if (conversationId && safeStatus) {
         rows = rowsOf(await pg`
@@ -758,11 +728,11 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       const next = {
         ...existing,
         ...patch,
-        status: normalizeStatus(patch.status || existing.status),
+        status: normalizeJobStatus(patch.status || existing.status),
         updated_at: updatedAt,
       };
-      if (next.status === "running" && !next.started_at) next.started_at = updatedAt;
-      if (finalStatuses.has(next.status) && !next.completed_at) next.completed_at = updatedAt;
+      if (next.status === JOB_STATUS.RUNNING && !next.started_at) next.started_at = updatedAt;
+      if (FINAL_STATUSES.has(next.status) && !next.completed_at) next.completed_at = updatedAt;
       await pg`
         UPDATE jobs
         SET status = ${next.status},
@@ -784,18 +754,18 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       const job = await this.getJob(id);
       if (!job) throw new Error(`Job not found: ${id}`);
       return this.transition(id, {
-        logs: [...job.logs, compactLogEntry({ phase: phase || job.phase || "", message, data })].slice(-120),
+        logs: [...job.logs, compactJobLogEntry({ phase: phase || job.phase || "", message, data }, { now })].slice(-120),
       });
     },
 
     async requestCancel(id) {
       const job = await this.getJob(id);
       if (!job) throw new Error(`Job not found: ${id}`);
-      if (finalStatuses.has(job.status)) return job;
-      const canceled = job.status === "queued";
+      if (FINAL_STATUSES.has(job.status)) return job;
+      const canceled = job.status === JOB_STATUS.QUEUED;
       return this.transition(id, {
         cancel_requested: true,
-        status: canceled ? "canceled" : job.status,
+        status: canceled ? JOB_STATUS.CANCELED : job.status,
         phase: canceled ? "canceled" : job.phase,
         error: canceled ? { errorType: "job_canceled", message: "Job canceled before it started." } : job.error,
         choices: canceled ? [] : job.choices,
@@ -849,7 +819,6 @@ function createJsonProjectPersistence({ filePath }) {
   }
   const now = () => new Date().toISOString();
   const byId = (rows, id) => rows.find(row => String(row.id || "") === String(id || ""));
-  const normalizeStatus = value => ["queued", "running", "succeeded", "failed", "canceled"].includes(String(value || "")) ? String(value) : "queued";
   return {
     async initSchema() {
       await writeState(await readState());
@@ -857,8 +826,8 @@ function createJsonProjectPersistence({ filePath }) {
     async markInterruptedRunningJobs() {
       return mutate(state => {
         for (const job of state.jobs) {
-          if (job.status === "running") {
-            job.status = "failed";
+          if (job.status === JOB_STATUS.RUNNING) {
+            job.status = JOB_STATUS.FAILED;
             job.phase = "server_restart";
             job.completed_at = now();
             job.error = { errorType: "connection_dropped", error: "Server restarted before this job finished." };
@@ -1017,7 +986,7 @@ function createJsonProjectPersistence({ filePath }) {
       completed_at = "",
     } = {}) {
       const ts = now();
-      const safeStatus = normalizeStatus(status);
+      const safeStatus = normalizeJobStatus(status);
       const row = {
         id,
         type,
@@ -1029,12 +998,12 @@ function createJsonProjectPersistence({ filePath }) {
         output,
         error,
         choices: Array.isArray(choices) ? choices : [],
-        logs: Array.isArray(logs) ? logs : [{ ts, phase, message: "Job accepted.", data: {} }],
+        logs: Array.isArray(logs) ? logs : [compactJobLogEntry({ ts, phase, message: "Job accepted." }, { now })],
         cancel_requested: Boolean(cancel_requested),
         created_at: created_at || ts,
         updated_at: updated_at || ts,
-        started_at: started_at || (safeStatus === "running" ? ts : ""),
-        completed_at: completed_at || (["succeeded", "failed", "canceled"].includes(safeStatus) ? ts : ""),
+        started_at: started_at || (safeStatus === JOB_STATUS.RUNNING ? ts : ""),
+        completed_at: completed_at || (FINAL_STATUSES.has(safeStatus) ? ts : ""),
       };
       await mutate(state => {
         if (!byId(state.jobs, id)) state.jobs.push(row);
@@ -1057,8 +1026,9 @@ function createJsonProjectPersistence({ filePath }) {
     },
     async listJobs({ limit = 50, conversationId = "", status = "" } = {}) {
       const state = await readState();
+      const safeStatus = status ? normalizeJobStatus(status) : "";
       return state.jobs
-        .filter(row => (!conversationId || row.conversation_id === conversationId) && (!status || row.status === status))
+        .filter(row => (!conversationId || row.conversation_id === conversationId) && (!safeStatus || normalizeJobStatus(row.status) === safeStatus))
         .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
         .slice(0, Math.max(1, Math.min(Number(limit) || 50, 200)));
     },
@@ -1068,10 +1038,10 @@ function createJsonProjectPersistence({ filePath }) {
         const job = byId(state.jobs, id);
         if (!job) throw new Error(`Job not found: ${id}`);
         Object.assign(job, patch);
-        job.status = normalizeStatus(patch.status || job.status);
+        job.status = normalizeJobStatus(patch.status || job.status);
         job.updated_at = now();
-        if (job.status === "running" && !job.started_at) job.started_at = job.updated_at;
-        if (["succeeded", "failed", "canceled"].includes(job.status) && !job.completed_at) job.completed_at = job.updated_at;
+        if (job.status === JOB_STATUS.RUNNING && !job.started_at) job.started_at = job.updated_at;
+        if (FINAL_STATUSES.has(job.status) && !job.completed_at) job.completed_at = job.updated_at;
         next = { ...job };
       });
       return next;
@@ -1081,7 +1051,7 @@ function createJsonProjectPersistence({ filePath }) {
       await mutate(state => {
         const job = byId(state.jobs, id);
         if (!job) throw new Error(`Job not found: ${id}`);
-        job.logs = [...(job.logs || []), { ts: now(), phase: phase || job.phase || "", message: String(message || "").slice(0, 600), data }].slice(-120);
+        job.logs = [...(job.logs || []), compactJobLogEntry({ phase: phase || job.phase || "", message, data }, { now })].slice(-120);
         job.updated_at = now();
         next = { ...job };
       });
@@ -1090,8 +1060,12 @@ function createJsonProjectPersistence({ filePath }) {
     async requestCancel(id) {
       const job = await this.getJob(id);
       if (!job) throw new Error(`Job not found: ${id}`);
-      if (["succeeded", "failed", "canceled"].includes(job.status)) return job;
-      return this.transition(id, { cancel_requested: true, status: job.status === "queued" ? "canceled" : job.status, phase: job.status === "queued" ? "canceled" : job.phase });
+      if (FINAL_STATUSES.has(job.status)) return job;
+      return this.transition(id, {
+        cancel_requested: true,
+        status: job.status === JOB_STATUS.QUEUED ? JOB_STATUS.CANCELED : job.status,
+        phase: job.status === JOB_STATUS.QUEUED ? "canceled" : job.phase,
+      });
     },
     async isCancelRequested(id) {
       return Boolean((await this.getJob(id))?.cancel_requested);

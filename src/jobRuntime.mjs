@@ -1,30 +1,8 @@
-import { JOB_STATUS } from "./jobStore.mjs";
-
-const FINAL_STATUSES = new Set([
-  JOB_STATUS.SUCCEEDED,
-  JOB_STATUS.FAILED,
-  JOB_STATUS.CANCELED,
-]);
-
-function isFinal(status) {
-  return FINAL_STATUSES.has(String(status || ""));
-}
-
-function compactOutput(output) {
-  if (!output || typeof output !== "object") return output ?? null;
-  const copy = { ...output };
-  if (copy.files && typeof copy.files === "object") {
-    copy.files = Object.fromEntries(
-      Object.entries(copy.files).map(([name, value]) => [
-        name,
-        typeof value === "string" && value.length > 300000
-          ? `${value.slice(0, 300000)}\n/* truncated in job output */`
-          : value,
-      ])
-    );
-  }
-  return copy;
-}
+import {
+  JOB_STATUS,
+  compactJobOutput,
+  isFinalJobStatus,
+} from "./jobLifecyclePolicy.mjs";
 
 function serializeError(error, classified) {
   return {
@@ -90,7 +68,7 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
       jobId,
       async phase(phase, message = "") {
         const job = await jobStore.getJob(jobId);
-        if (!job || isFinal(job.status)) return job;
+        if (!job || isFinalJobStatus(job.status)) return job;
         const next = await jobStore.transition(jobId, { phase: String(phase || job.phase || "") });
         if (message) await jobStore.appendLog(jobId, message, {}, phase);
         return next;
@@ -112,7 +90,7 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
 
   async function runExisting(jobId) {
     const job = await jobStore.getJob(jobId);
-    if (!job || isFinal(job.status)) return job;
+    if (!job || isFinalJobStatus(job.status)) return job;
     const handler = handlers.get(job.type);
     if (!handler) {
       await jobStore.transition(jobId, {
@@ -154,7 +132,7 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
         await jobStore.transition(jobId, {
           status: JOB_STATUS.SUCCEEDED,
           phase: "done",
-          output: compactOutput(output),
+          output: compactJobOutput(output),
           error: null,
           choices: choicesFromOutput(job.type, output, job),
         });

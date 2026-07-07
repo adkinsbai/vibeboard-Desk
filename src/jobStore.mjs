@@ -1,18 +1,15 @@
 import crypto from "node:crypto";
 
-export const JOB_STATUS = Object.freeze({
-  QUEUED: "queued",
-  RUNNING: "running",
-  SUCCEEDED: "succeeded",
-  FAILED: "failed",
-  CANCELED: "canceled",
-});
+import {
+  FINAL_STATUSES,
+  JOB_STATUS,
+  compactJobLogEntry,
+  jobIdempotencyScope,
+  jobMatchesIdempotencyScope,
+  normalizeJobStatus,
+} from "./jobLifecyclePolicy.mjs";
 
-const FINAL_STATUSES = new Set([
-  JOB_STATUS.SUCCEEDED,
-  JOB_STATUS.FAILED,
-  JOB_STATUS.CANCELED,
-]);
+export { JOB_STATUS } from "./jobLifecyclePolicy.mjs";
 
 function query(db, sql, params = []) {
   const stmt = db.prepare(sql);
@@ -50,33 +47,12 @@ function isoNow(now) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
-function normalizeStatus(status, fallback = JOB_STATUS.QUEUED) {
-  const value = String(status || "").trim();
-  return Object.values(JOB_STATUS).includes(value) ? value : fallback;
-}
-
-function normalizeIdempotencyValue(value) {
-  return String(value || "").trim().slice(0, 160);
-}
-
-function jobIdempotencyScope({ type = "", conversationId = "", input = {} } = {}) {
-  const clientRunId = normalizeIdempotencyValue(input.client_run_id || input.clientRunId);
-  if (!clientRunId) return null;
-  return {
-    type: normalizeIdempotencyValue(type || "task"),
-    conversationId: normalizeIdempotencyValue(conversationId || input.conversation_id || input.conversationId),
-    action: normalizeIdempotencyValue(input.action || input.job_action || type || "task"),
-    userId: normalizeIdempotencyValue(input.user_id || input.userId),
-    clientRunId,
-  };
-}
-
 function normalizeJob(row) {
   if (!row) return null;
   return {
     id: String(row.id || ""),
     type: String(row.type || ""),
-    status: normalizeStatus(row.status),
+    status: normalizeJobStatus(row.status),
     phase: String(row.phase || ""),
     conversation_id: row.conversation_id || "",
     title: String(row.title || ""),
@@ -90,15 +66,6 @@ function normalizeJob(row) {
     updated_at: String(row.updated_at || ""),
     started_at: String(row.started_at || ""),
     completed_at: String(row.completed_at || ""),
-  };
-}
-
-function compactLogEntry(entry = {}) {
-  return {
-    ts: entry.ts || new Date().toISOString(),
-    phase: String(entry.phase || "").slice(0, 80),
-    message: String(entry.message || "").slice(0, 600),
-    data: entry.data && typeof entry.data === "object" ? entry.data : {},
   };
 }
 
@@ -117,7 +84,7 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
     const next = {
       ...existing,
       ...patch,
-      status: normalizeStatus(patch.status || existing.status),
+      status: normalizeJobStatus(patch.status || existing.status),
       updated_at: isoNow(now),
     };
     if (FINAL_STATUSES.has(next.status) && !next.completed_at) next.completed_at = next.updated_at;
@@ -179,11 +146,11 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
       const rows = query(db, "SELECT id, logs_json FROM jobs WHERE status = ?", [JOB_STATUS.RUNNING]);
       for (const row of rows) {
         const logs = parseJson(row.logs_json, []);
-        logs.push(compactLogEntry({
+        logs.push(compactJobLogEntry({
           ts: interruptedAt,
           phase: "server_restart",
           message: "Server restarted before this job finished.",
-        }));
+        }, { now }));
         run(
           db,
           saveDb,
@@ -221,7 +188,7 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
       if (existing) return existing;
       const id = idFactory();
       const ts = isoNow(now);
-      const safeStatus = normalizeStatus(status);
+      const safeStatus = normalizeJobStatus(status);
       run(
         db,
         saveDb,
@@ -240,7 +207,7 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
           stringifyJson(null, null),
           stringifyJson(null, null),
           stringifyJson([], []),
-          stringifyJson([compactLogEntry({ ts, phase, message: "Job accepted." })], []),
+          stringifyJson([compactJobLogEntry({ ts, phase, message: "Job accepted." }, { now })], []),
           ts,
           ts,
           safeStatus === JOB_STATUS.RUNNING ? ts : "",
@@ -262,15 +229,7 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
       );
       for (const row of rows) {
         const job = normalizeJob(row);
-        const jobInput = job?.input || {};
-        const jobClientRunId = normalizeIdempotencyValue(jobInput.client_run_id || jobInput.clientRunId);
-        const jobAction = normalizeIdempotencyValue(jobInput.action || jobInput.job_action || job.type || "task");
-        const jobUserId = normalizeIdempotencyValue(jobInput.user_id || jobInput.userId);
-        if (
-          jobClientRunId === scope.clientRunId &&
-          jobAction === scope.action &&
-          jobUserId === scope.userId
-        ) {
+        if (jobMatchesIdempotencyScope(job, scope)) {
           return job;
         }
       }
@@ -286,7 +245,7 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
       }
       if (status) {
         clauses.push("status = ?");
-        params.push(normalizeStatus(status));
+        params.push(normalizeJobStatus(status));
       }
       params.push(Math.max(1, Math.min(Number(limit) || 50, 200)));
       const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -301,12 +260,12 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
     appendLog(id, message, data = {}, phase = "") {
       const job = getJob(id);
       if (!job) throw new Error(`Job not found: ${id}`);
-      const entry = compactLogEntry({
+      const entry = compactJobLogEntry({
         ts: isoNow(now),
         phase: phase || job.phase || "",
         message,
         data,
-      });
+      }, { now });
       return updateJob(id, {
         logs: [...job.logs, entry].slice(-120),
       });
