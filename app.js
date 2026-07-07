@@ -129,7 +129,7 @@ let jobsPollTimer = null;
 let activeJobWaiters = new Set();
 let assetManagerSelectedConversationId = "";
 const GENERATION_START_TIMEOUT_MS = 300000;
-const buildLifecycleModule = window.VibeBuildLifecycle;
+const buildLifecycleModule = window.VibeBuildLifecycle || createInlineBuildLifecycleModule();
 const GENERATION_FLOW_STATES = buildLifecycleModule.STATES;
 let generationFlowState = null;
 let assetManagerCurrentFolderId = "";
@@ -257,6 +257,67 @@ const stages = [
   { id: "build", title: "本地 L0-L3 验证", note: "contracts + syntax + hardware sim + render" },
   { id: "ready", title: "等待确认部署", note: "不会自动写入真机" },
 ];
+
+function createInlineBuildLifecycleModule() {
+  const STATES = Object.freeze({
+    CLARIFYING: "clarifying",
+    GENERATING: "generating",
+    VERIFIED: "verified",
+    AWAITING_DEPLOY: "awaiting_deploy",
+    DEPLOYING: "deploying",
+    DONE: "done",
+  });
+  const DEFAULT_STATE = Object.freeze({
+    state: STATES.CLARIFYING,
+    clientRunId: "",
+    conversationId: "",
+    promptKey: "",
+    currentBuildId: "",
+  });
+  const flowPromptKey = (prompt = "", conversationId = "", action = "confirm_build") => [
+    String(conversationId || ""),
+    String(action || ""),
+    String(prompt || "").replace(/\s+/g, " ").trim().slice(0, 240),
+  ].join("|");
+  const createDefaultId = () => (
+    crypto?.randomUUID ? crypto.randomUUID() : `run_${Date.now()}_${Math.random().toString(36).slice(2)}`
+  );
+  function createBuildLifecyclePolicy(options = {}) {
+    const createId = typeof options.createId === "function" ? options.createId : createDefaultId;
+    const getCurrentBuildId = typeof options.getCurrentBuildId === "function" ? options.getCurrentBuildId : () => "";
+    const onChange = typeof options.onChange === "function" ? options.onChange : () => {};
+    let current = { ...DEFAULT_STATE, ...(options.initialState || {}) };
+    const snapshot = () => ({ ...current });
+    function setState(state, patch = {}) {
+      current = { ...current, ...patch, state };
+      onChange(snapshot());
+      return snapshot();
+    }
+    function clientRunIdForFlow(prompt = "", conversationId = "", action = "confirm_build") {
+      const promptKey = flowPromptKey(prompt, conversationId, action);
+      if (current.state === STATES.GENERATING && current.promptKey === promptKey && current.clientRunId) {
+        return current.clientRunId;
+      }
+      const clientRunId = createId();
+      setState(STATES.GENERATING, {
+        clientRunId,
+        conversationId: String(conversationId || ""),
+        promptKey,
+        currentBuildId: getCurrentBuildId() || "",
+      });
+      return clientRunId;
+    }
+    return {
+      STATES,
+      clientRunIdForFlow,
+      flowPromptKey,
+      getState: snapshot,
+      isGenerating: () => current.state === STATES.GENERATING,
+      setState,
+    };
+  }
+  return { STATES, createBuildLifecyclePolicy, flowPromptKey };
+}
 
 function syncGenerationFlowUi(state = generationFlowState) {
   const generating = state?.state === GENERATION_FLOW_STATES.GENERATING;

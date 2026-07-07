@@ -5,7 +5,7 @@
   "functions": {
     "server.mjs": {
       "maxDuration": 300,
-      "includeFiles": "{index.html,portal.html,admin.html,market.html,app.js,portal.js,admin.js,market.js,telemetry.js,digital-life*.js,digital-life.css,digital-life.html,styles.css,node_modules/sql.js/dist/sql-wasm.wasm,generated/current/**,market-apps/**,mac-frame*.png}"
+      "includeFiles": "{*.html,*.js,*.css,node_modules/sql.js/dist/sql-wasm.wasm,generated/current/**,market-apps/**,mac-frame*.png}"
     }
   }
 }

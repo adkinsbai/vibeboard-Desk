@@ -9,6 +9,34 @@ await withServer(async ({ baseUrl, json }) => {
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1366, height: 820 } });
   try {
+    const missingLifecyclePage = await browser.newPage({ viewport: { width: 1366, height: 820 } });
+    const missingLifecycleErrors = [];
+    missingLifecyclePage.on("pageerror", error => missingLifecycleErrors.push(error.message || String(error)));
+    await missingLifecyclePage.route("**/buildLifecycle.js", route => route.fulfill({
+      status: 404,
+      headers: { "content-type": "text/plain" },
+      body: "missing in production bundle",
+    }));
+    await missingLifecyclePage.route("**/api/agent", route => route.fulfill({
+      status: 400,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ok: false,
+        error: "stubbed",
+        errorType: "missing_model_config",
+        userMessage: "stubbed",
+        suggestion: "stubbed",
+      }),
+    }));
+    await missingLifecyclePage.goto(`${baseUrl}/workbench`, { waitUntil: "domcontentloaded" });
+    await missingLifecyclePage.locator("#promptInput").fill("Fallback lifecycle should keep Enter working");
+    await missingLifecyclePage.keyboard.press("Enter");
+    await missingLifecyclePage.waitForFunction(() => document.querySelector("#chatLog")?.innerText.includes("Fallback lifecycle should keep Enter working"));
+    const fallbackInputValue = await missingLifecyclePage.locator("#promptInput").inputValue();
+    assert(fallbackInputValue === "", "Enter should clear the composer even when buildLifecycle.js is unavailable");
+    assert(!missingLifecycleErrors.length, `missing buildLifecycle.js should not crash app.js: ${missingLifecycleErrors.join("; ")}`);
+    await missingLifecyclePage.close();
+
     await page.goto(`${baseUrl}/workbench`, { waitUntil: "domcontentloaded" });
     await page.locator("#chatLog").waitFor({ timeout: 6000 });
     const lifecyclePolicyContract = await page.evaluate(() => {
@@ -163,15 +191,18 @@ await withServer(async ({ baseUrl, json }) => {
     await page.evaluate(() => window.setDeviceFrameSrc("/generated/current/index.html?test=preview-gate"));
     await page.waitForFunction(() => (
       document.querySelector("#macPhoto")?.classList.contains("preview-ready") &&
-      getComputedStyle(document.querySelector("#deviceFrame")).opacity === "1"
+      getComputedStyle(document.querySelector("#deviceFrame")).opacity === "1" &&
+      getComputedStyle(document.querySelector("#previewLoadingMask")).opacity === "0"
     ));
     const previewReadyState = await page.locator("#macPhoto").evaluate(node => ({
       loading: node.classList.contains("preview-loading"),
       ready: node.classList.contains("preview-ready"),
       frameOpacity: getComputedStyle(document.querySelector("#deviceFrame")).opacity,
+      maskOpacity: getComputedStyle(document.querySelector("#previewLoadingMask")).opacity,
     }));
     assert(!previewReadyState.loading && previewReadyState.ready, "device preview should leave loading state after iframe load");
     assert(previewReadyState.frameOpacity === "1", "iframe should fade in only after load");
+    assert(previewReadyState.maskOpacity === "0", "loading mask should disappear after preview load");
     await page.unroute("**/never-finishes-preview.html*");
 
     const deviceOptions = await page.locator("#deviceSelect option").evaluateAll(options => options.map(option => ({

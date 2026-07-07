@@ -1073,6 +1073,11 @@ textarea:focus {
   opacity: 1;
 }
 
+.mac-photo.preview-ready .preview-loading-mask {
+  opacity: 0;
+  pointer-events: none;
+}
+
 @keyframes preview-spin {
   to {
     transform: rotate(360deg);
