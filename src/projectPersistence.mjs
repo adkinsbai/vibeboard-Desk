@@ -1,18 +1,16 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import {
-  declaredAssetPathsFromFiles,
-  deserializeFileMap,
-  serializeFileMap,
-} from "./assetContract.mjs";
 import { createConversationStore } from "./conversationStore.mjs";
 import {
-  CONVERSATION_FILE_NAMES,
   defaultProjectMemory,
-  filterConversationFiles,
   normalizeProjectMemory,
 } from "./conversationStore.mjs";
+import {
+  filterConversationFiles,
+  normalizeConversationFileRows,
+  serializeConversationFiles,
+} from "./conversationSnapshot.mjs";
 import { createJobStore } from "./jobStore.mjs";
 import {
   FINAL_STATUSES,
@@ -325,35 +323,6 @@ export function createPostgresProjectPersistence({ pg } = {}) {
     for (const build of builders) results.push(await build(pg));
     return results;
   };
-  const parseStoredFileContent = value => {
-    if (typeof value !== "string") return value;
-    try {
-      const parsed = JSON.parse(value);
-      if (
-        parsed &&
-        typeof parsed === "object" &&
-        (parsed.__vibeboardFileEncoding === "base64" || parsed.type === "Buffer")
-      ) {
-        return parsed;
-      }
-    } catch {}
-    return value;
-  };
-  const filterStoredConversationFileRows = rows => {
-    const files = {};
-    for (const row of rows) {
-      if (CONVERSATION_FILE_NAMES.has(row.filename)) {
-        files[row.filename] = row.content;
-        continue;
-      }
-      const content = parseStoredFileContent(row.content);
-      const candidate = { ...files, [row.filename]: content };
-      if (declaredAssetPathsFromFiles(candidate).includes(row.filename)) {
-        files[row.filename] = content;
-      }
-    }
-    return files;
-  };
   const normalizeJob = row => {
     if (!row) return null;
     return {
@@ -559,8 +528,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
     },
 
     async saveConversationFiles(conversationId, buildId, files = {}) {
-      const safeFiles = filterConversationFiles(files);
-      const serialized = serializeFileMap(safeFiles);
+      const serialized = serializeConversationFiles(files);
       const statements = [
         sql => sql`DELETE FROM conversation_files WHERE conversation_id = ${conversationId}`,
         ...Object.entries(serialized).map(([filename, content]) => sql => sql`
@@ -592,9 +560,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         WHERE conversation_id = ${conversationId}
         ORDER BY id ASC
       `);
-      if (rows.length === 0) return { buildId: null, files: {} };
-      const files = filterStoredConversationFileRows(rows);
-      return { buildId: rows[0].build_id, files: deserializeFileMap(files) };
+      return normalizeConversationFileRows(rows);
     },
 
     async deleteConversationFiles(conversationId) {
@@ -904,7 +870,6 @@ function createJsonProjectPersistence({ filePath }) {
       return state.messages.filter(row => row.conversation_id === conversationId).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
     },
     async saveConversationFiles(conversationId, buildId, files = {}) {
-      const { filterConversationFiles } = await import("./conversationStore.mjs");
       const safeFiles = filterConversationFiles(files);
       await mutate(state => {
         state.conversation_files = state.conversation_files.filter(row => row.conversation_id !== conversationId);
@@ -939,8 +904,7 @@ function createJsonProjectPersistence({ filePath }) {
     async loadConversationFiles(conversationId) {
       const state = await readState();
       const rows = state.conversation_files.filter(row => row.conversation_id === conversationId);
-      const files = Object.fromEntries(rows.map(row => [row.filename, row.content]));
-      return { buildId: rows[0]?.build_id || null, files };
+      return normalizeConversationFileRows(rows);
     },
     async deleteConversationFiles(conversationId) {
       await mutate(state => {
