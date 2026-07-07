@@ -1,24 +1,12 @@
 import crypto from "node:crypto";
 
 import {
-  declaredAssetPathsFromFiles,
-  deserializeFileMap,
-  serializeFileMap,
-} from "./assetContract.mjs";
-import { CONVERSATION_SNAPSHOT_FILE_NAMES } from "./contracts.mjs";
+  filterConversationFiles,
+  normalizeConversationFileRows,
+  serializeConversationFiles,
+} from "./conversationSnapshot.mjs";
 
-export const CONVERSATION_FILE_NAMES = new Set(CONVERSATION_SNAPSHOT_FILE_NAMES);
-
-export function filterConversationFiles(files = {}) {
-  const decoded = deserializeFileMap(files);
-  const declaredAssets = new Set(declaredAssetPathsFromFiles(decoded));
-  const filtered = {};
-  for (const [filename, content] of Object.entries(decoded || {})) {
-    if (!CONVERSATION_FILE_NAMES.has(filename) && !declaredAssets.has(filename)) continue;
-    filtered[filename] = content;
-  }
-  return filtered;
-}
+export { CONVERSATION_FILE_NAMES, filterConversationFiles } from "./conversationSnapshot.mjs";
 
 function query(db, sql, params = []) {
   const stmt = db.prepare(sql);
@@ -168,8 +156,7 @@ export function createConversationStore(db, saveDb = () => {}) {
     },
 
     saveConversationFiles(conversationId, buildId, files) {
-      const safeFiles = filterConversationFiles(files);
-      const serialized = serializeFileMap(safeFiles);
+      const serialized = serializeConversationFiles(files);
       runTransaction(db, saveDb, () => {
         runStep(db, "DELETE FROM conversation_files WHERE conversation_id = ?", [conversationId]);
         for (const [filename, content] of Object.entries(serialized)) {
@@ -184,20 +171,7 @@ export function createConversationStore(db, saveDb = () => {}) {
 
     loadConversationFiles(conversationId) {
       const rows = query(db, "SELECT filename, content, build_id FROM conversation_files WHERE conversation_id = ? ORDER BY id ASC", [conversationId]);
-      if (rows.length === 0) return { buildId: null, files: {} };
-      const files = {};
-      for (const row of rows) {
-        if (CONVERSATION_FILE_NAMES.has(row.filename)) {
-          files[row.filename] = row.content;
-          continue;
-        }
-        const content = parseStoredFileContent(row.content);
-        const candidate = { ...files, [row.filename]: content };
-        if (declaredAssetPathsFromFiles(candidate).includes(row.filename)) {
-          files[row.filename] = content;
-        }
-      }
-      return { buildId: rows[0].build_id, files: deserializeFileMap(files) };
+      return normalizeConversationFileRows(rows);
     },
 
     deleteConversationFiles(conversationId) {
@@ -272,17 +246,3 @@ function stringList(value) {
   return [...new Set(value.map(item => String(item || "").trim()).filter(Boolean))].slice(0, 20);
 }
 
-function parseStoredFileContent(value) {
-  if (typeof value !== "string") return value;
-  try {
-    const parsed = JSON.parse(value);
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      (parsed.__vibeboardFileEncoding === "base64" || parsed.type === "Buffer")
-    ) {
-      return parsed;
-    }
-  } catch {}
-  return value;
-}

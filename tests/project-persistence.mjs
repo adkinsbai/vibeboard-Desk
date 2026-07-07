@@ -109,6 +109,32 @@ await test("file ProjectPersistence keeps writes from two independent instances"
   assert(conversationsFromB.some(item => item.id === "conv-a"), "conversation should survive both writers");
 });
 
+await test("file ProjectPersistence filters loaded conversation rows like database adapters", async () => {
+  const filePath = fileURLToPath(new URL(`runtime/project-persistence-filter-load-${Date.now()}-${Math.random()}.json`, new URL("..", import.meta.url)));
+  const state = {
+    conversations: [{ id: "conv-file-filter", title: "Filter", user_id: "user-a", project_dir: "", created_at: "2026-07-07T01:00:00.000Z", updated_at: "2026-07-07T01:00:00.000Z" }],
+    messages: [],
+    conversation_files: [
+      { id: "row-1", conversation_id: "conv-file-filter", build_id: "build-file-filter", filename: "index.html", content: "<!doctype html>", created_at: "2026-07-07T01:00:00.000Z" },
+      { id: "row-2", conversation_id: "conv-file-filter", build_id: "build-file-filter", filename: "manifest.json", content: JSON.stringify({ id: "build-file-filter", files: ["index.html", "assets/logo.json"] }), created_at: "2026-07-07T01:00:00.000Z" },
+      { id: "row-3", conversation_id: "conv-file-filter", build_id: "build-file-filter", filename: "assets/logo.json", content: "{\"name\":\"logo\"}", created_at: "2026-07-07T01:00:00.000Z" },
+      { id: "row-4", conversation_id: "conv-file-filter", build_id: "build-file-filter", filename: "chat pollution", content: "must be filtered", created_at: "2026-07-07T01:00:00.000Z" },
+    ],
+    project_memory: [],
+    jobs: [],
+  };
+  await fs.mkdir(new URL("runtime/", new URL("..", import.meta.url)), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(state, null, 2));
+
+  const persistence = createFileProjectPersistence({ filePath });
+  const loaded = await persistence.loadConversationFiles("conv-file-filter");
+
+  assert(loaded.buildId === "build-file-filter", "file load should keep the first snapshot build id");
+  assert(loaded.files["index.html"] === "<!doctype html>", "allowed generated file should load");
+  assert(loaded.files["assets/logo.json"] === "{\"name\":\"logo\"}", "manifest-declared asset should load");
+  assert(!loaded.files["chat pollution"], "undeclared file rows should be filtered on load");
+});
+
 await test("ProjectPersistence can find idempotent jobs by client_run_id", async () => {
   const db = new SQL.Database();
   const sqlite = createSqliteProjectPersistence({
