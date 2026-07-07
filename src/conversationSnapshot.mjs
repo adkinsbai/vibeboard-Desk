@@ -27,19 +27,23 @@ export function serializeConversationFiles(files = {}) {
 export function normalizeConversationFileRows(rows = []) {
   const orderedRows = Array.isArray(rows) ? rows : [];
   if (!orderedRows.length) return { buildId: null, files: {} };
-  const files = {};
+  const candidateFiles = {};
   for (const row of orderedRows) {
     const filename = String(row?.filename || "");
     if (!filename) continue;
+    candidateFiles[filename] = parseStoredFileContent(row.content);
+  }
+  const baseFiles = {};
+  for (const [filename, content] of Object.entries(candidateFiles)) {
     if (CONVERSATION_FILE_NAMES.has(filename)) {
-      files[filename] = row.content;
-      continue;
+      baseFiles[filename] = content;
     }
-    const content = parseStoredFileContent(row.content);
-    const candidate = { ...files, [filename]: content };
-    if (declaredAssetPathsFromFiles(candidate).includes(filename)) {
-      files[filename] = content;
-    }
+  }
+  const declaredAssets = new Set(declaredAssetPathsFromFiles(baseFiles));
+  const files = { ...baseFiles };
+  for (const [filename, content] of Object.entries(candidateFiles)) {
+    if (CONVERSATION_FILE_NAMES.has(filename)) continue;
+    if (declaredAssets.has(filename)) files[filename] = content;
   }
   return {
     buildId: selectConversationBuildId(orderedRows),

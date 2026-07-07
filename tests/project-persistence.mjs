@@ -419,8 +419,9 @@ await test("postgres ProjectPersistence filters loaded conversation files", asyn
     const text = strings.join("?");
     if (/SELECT filename, content, build_id FROM conversation_files/.test(text)) {
       return [
+        { filename: "assets/early-logo.json", content: "{\"name\":\"early-logo\"}", build_id: "build-pg" },
         { filename: "index.html", content: "<!doctype html>", build_id: "build-pg" },
-        { filename: "manifest.json", content: JSON.stringify({ id: "build-pg", files: ["index.html", "assets/logo.json"] }), build_id: "build-pg" },
+        { filename: "manifest.json", content: JSON.stringify({ id: "build-pg", files: ["index.html", "assets/logo.json", "assets/early-logo.json"] }), build_id: "build-pg" },
         { filename: "assets/logo.json", content: "{\"name\":\"logo\"}", build_id: "build-pg" },
         { filename: "chat pollution", content: "must be filtered", build_id: "build-pg" },
       ];
@@ -431,6 +432,7 @@ await test("postgres ProjectPersistence filters loaded conversation files", asyn
   const loaded = await persistence.loadConversationFiles("conv-pg");
   assert(loaded.files["index.html"] === "<!doctype html>", "allowed generated file should load");
   assert(loaded.files["assets/logo.json"] === "{\"name\":\"logo\"}", "manifest-declared asset should load");
+  assert(loaded.files["assets/early-logo.json"] === "{\"name\":\"early-logo\"}", "manifest-declared asset should load when its row precedes manifest.json");
   assert(!loaded.files["chat pollution"], "undeclared file rows should be filtered");
 });
 
