@@ -245,4 +245,3 @@ function stringList(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map(item => String(item || "").trim()).filter(Boolean))].slice(0, 20);
 }
-
