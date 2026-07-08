@@ -227,44 +227,37 @@
     <div class="modal-panel guide-panel">
       <div class="drawer-head">
         <div>
-          <p class="kicker">Getting Started</p>
+          <p class="kicker">VibeBoard Guide</p>
           <h2 id="guideModalTitle">新手指引</h2>
         </div>
         <button class="icon-btn" id="closeGuideModal" type="button" aria-label="Close guide">x</button>
       </div>
       <div class="guide-grid">
-        <section>
-          <h3>平台功能</h3>
-          <p>通过 Agent 生成 480x360 小屏应用，先在网页右侧预览，再由你确认是否部署到硬件。</p>
-        </section>
-        <section>
-          <h3>创建项目</h3>
-          <p>点击左上角“新建”，输入项目名称。项目会出现在左侧列表，并在刷新后继续保留。</p>
-        </section>
-        <section>
-          <h3>生成应用</h3>
-          <p>在聊天框描述要做的硬件应用。Agent 会理解需求、生成文件、执行本地或 Runner 验证。</p>
-        </section>
-        <section>
-          <h3>Runner 与硬件执行</h3>
-          <p>公网部署后，Python 会优先交给服务器 Runner 执行；Runner 不可用时仍保留网页预览。</p>
-        </section>
-        <section>
-          <h3>应用市场</h3>
-          <p>应用市场支持“预览”和“一键部署”。预览会创建新项目，可继续和 Agent 对话修改。</p>
-        </section>
-        <section>
-          <h3>失败日志</h3>
-          <p>任务失败时，先看聊天区给出的技术详情、失败阶段和操作按钮，再决定重试或反馈。</p>
-        </section>
-        <section>
-          <h3>Credits / Usage</h3>
-          <p>当前公测阶段免费使用；Usage 会保留用量入口，后续接入 Credits 计费。</p>
-        </section>
-        <section>
-          <h3>支持板子</h3>
-          <p>当前重点支持泰山派 RK3566。绑定真实设备后会走你的硬件通道；其他开发板后续会在主控界面选择。</p>
-        </section>
+        <article class="guide-card">
+          <span class="guide-step">01</span>
+          <h3>一句话生成应用</h3>
+          <p>描述你想要的小屏功能，VibeBoard 会生成 480x360 应用、代码和硬件运行文件，并先在右侧预览。</p>
+        </article>
+        <article class="guide-card">
+          <span class="guide-step">02</span>
+          <h3>导入资产做复杂应用</h3>
+          <p>把图片、文案、数据文件等资产导入项目，Agent 会围绕这些素材生成更完整的界面和交互。</p>
+        </article>
+        <article class="guide-card">
+          <span class="guide-step">03</span>
+          <h3>先预览，再部署</h3>
+          <p>每次生成后先在网页小屏预览效果；部署到真机需要绑定并拥有支持的 VibeBoard 硬件。</p>
+        </article>
+        <article class="guide-card">
+          <span class="guide-step">04</span>
+          <h3>上传到应用市场</h3>
+          <p>满意的作品可以上传到应用市场，作为可复用的小屏应用分享给其他用户。</p>
+        </article>
+        <article class="guide-card">
+          <span class="guide-step">05</span>
+          <h3>预览并使用别人的应用</h3>
+          <p>在应用市场可以预览别人发布的应用，也可以直接部署到自己的设备上继续使用。</p>
+        </article>
       </div>
     </div>
   </section>

@@ -3847,7 +3847,7 @@ async function saveMessage(role, content, buildId = null, conversationId = curre
       body: JSON.stringify({ role, content, build_id: buildId })
     });
 
-    // Refresh conversation list to update title
+    // Refresh the conversation list so ordering reflects the latest activity.
     await loadConversations();
   } catch (err) {
     console.error("Failed to save message:", err);

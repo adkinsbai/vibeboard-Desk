@@ -507,13 +507,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         INSERT INTO messages (conversation_id, role, content, build_id)
         VALUES (${conversationId}, ${role}, ${content}, ${buildId})
       `;
-      if (role === "user") {
-        const countRow = await firstRow(pg`SELECT COUNT(*) as count FROM messages WHERE conversation_id = ${conversationId}`);
-        if (Number(countRow?.count || 0) === 1) {
-          const title = String(content || "").slice(0, 50) + (String(content || "").length > 50 ? "..." : "");
-          await pg`UPDATE conversations SET title = ${title}, updated_at = now() WHERE id = ${conversationId}`;
-        }
-      }
+      await pg`UPDATE conversations SET updated_at = now() WHERE id = ${conversationId}`;
     },
     async importLegacyMessages(conversationId, messages = []) {
       for (const message of messages) {
@@ -841,7 +835,11 @@ function createJsonProjectPersistence({ filePath }) {
     },
     async appendMessage(conversationId, message = {}) {
       const row = { id: `${Date.now()}-${Math.random()}`, conversation_id: conversationId, role: message.role, content: message.content, build_id: message.build_id || null, created_at: now() };
-      await mutate(state => { state.messages.push(row); });
+      await mutate(state => {
+        state.messages.push(row);
+        const conversation = state.conversations.find(item => item.id === conversationId);
+        if (conversation) conversation.updated_at = row.created_at;
+      });
       return row;
     },
     async importLegacyMessages(conversationId, messages = []) {

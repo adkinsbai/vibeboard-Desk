@@ -239,6 +239,14 @@ await withServer(async ({ baseUrl, json }) => {
     const afterCreate = await page.locator(".conv-item").count();
     assert(afterCreate > beforeCreate, "busy state should not block new conversation creation");
     const createdProjectId = await page.locator(".conv-item.active").getAttribute("data-id");
+    await json(`/api/conversations/${createdProjectId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ role: "user", content: "this first prompt must not become the history title" }),
+    });
+    await page.evaluate(() => window.loadConversations());
+    await page.locator(`.conv-item[data-id="${createdProjectId}"] .conv-title`).waitFor({ timeout: 3000 });
+    const persistedHistoryTitle = await page.locator(`.conv-item[data-id="${createdProjectId}"] .conv-title`).textContent();
+    assert(persistedHistoryTitle === "UI smoke project", `history title should keep the project name, got ${persistedHistoryTitle}`);
     await json(`/api/conversations/${createdProjectId}/assets`, {
       method: "POST",
       body: JSON.stringify({
@@ -264,8 +272,32 @@ await withServer(async ({ baseUrl, json }) => {
     assert(await page.locator("#jobCenterBtn").count() === 0, "top navigation should no longer expose the old task-list entry");
     await page.locator("#guideBtn").click();
     await page.locator("#guideModal.open").waitFor({ timeout: 3000 });
-    const guideText = await page.locator("#guideModal").textContent();
-    assert(guideText.includes("平台功能") && guideText.includes("Runner") && guideText.includes("应用市场"), "new guide should explain core workflows");
+    const guideState = await page.locator("#guideModal").evaluate(node => {
+      const panel = node.querySelector(".guide-panel");
+      const cards = [...node.querySelectorAll(".guide-card")];
+      const cardStyle = cards[0] ? getComputedStyle(cards[0]) : null;
+      const panelStyle = panel ? getComputedStyle(panel) : null;
+      return {
+        text: node.textContent,
+        cardCount: cards.length,
+        panelBackground: panelStyle?.backgroundColor || "",
+        panelColor: panelStyle?.color || "",
+        panelBackdrop: panelStyle?.backdropFilter || panelStyle?.webkitBackdropFilter || "",
+        cardBackground: cardStyle?.backgroundColor || "",
+        cardColor: cardStyle?.color || "",
+        cardRadius: cardStyle?.borderRadius || "",
+      };
+    });
+    assert(guideState.cardCount === 5, `new guide should focus on five essential cards, got ${guideState.cardCount}`);
+    for (const phrase of ["一句话生成应用", "导入资产", "需要绑定", "应用市场", "预览"]) {
+      assert(guideState.text.includes(phrase), `new guide should mention ${phrase}`);
+    }
+    assert(guideState.panelBackground.startsWith("rgba("), "guide panel should use a translucent dark surface");
+    assert(guideState.panelColor === "rgb(255, 255, 255)", "guide panel should use white text");
+    assert(guideState.cardBackground.startsWith("rgba("), "guide cards should be translucent");
+    assert(guideState.cardColor === "rgb(255, 255, 255)", "guide card text should be white");
+    assert(guideState.cardRadius === "8px", "guide cards should keep an 8px radius");
+    assert(guideState.panelBackdrop !== "none", "guide panel should use a blurred Apple-like backdrop");
     await page.locator("#closeGuideModal").click();
     await page.waitForFunction(() => !document.querySelector("#guideModal")?.classList.contains("open"));
     await page.waitForFunction(() => getComputedStyle(document.querySelector("#guideModal")).display === "none");

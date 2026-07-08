@@ -145,13 +145,7 @@ export function createConversationStore(db, saveDb = () => {}) {
           "INSERT INTO messages (conversation_id, role, content, build_id) VALUES (?, ?, ?, ?)",
           [conversationId, role, content, buildId]
         );
-        if (role === "user") {
-          const msgCount = query(db, "SELECT COUNT(*) as count FROM messages WHERE conversation_id = ?", [conversationId]);
-          if (msgCount[0]?.count === 1) {
-            const title = String(content || "").slice(0, 50) + (String(content || "").length > 50 ? "..." : "");
-            runStep(db, "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [title, conversationId]);
-          }
-        }
+        runStep(db, "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [conversationId]);
       });
     },
 

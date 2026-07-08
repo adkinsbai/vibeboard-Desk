@@ -66,7 +66,9 @@ await test("sqlite ProjectPersistence preserves conversations, files, memory, an
     input: { prompt: "clock", user_id: "user-a", client_run_id: "missing" },
   });
 
-  assert(listed.some(item => item.id === "conv-a"), "conversation should be listable by user");
+  const listedConversation = listed.find(item => item.id === "conv-a");
+  assert(listedConversation, "conversation should be listable by user");
+  assert(listedConversation.title === "Clock", `conversation should keep its project title, got ${listedConversation.title}`);
   assert(files.buildId === "build-a", "saved files should keep the build id");
   assert(files.files["index.html"] === "<!doctype html>", "valid generated file should be loaded");
   assert(!files.files["chat pollution"], "invalid generated file names should be filtered");
@@ -300,6 +302,22 @@ await test("postgres ProjectPersistence can find idempotent jobs by client_run_i
 
   assert(found?.id === "job-pg-idem", "postgres should find matching idempotent job");
   assert(miss === null, "postgres idempotency lookup should be scoped by user");
+});
+
+await test("postgres ProjectPersistence keeps project title when appending the first user message", async () => {
+  const calls = [];
+  const pg = async (strings, ...values) => {
+    const text = strings.join("?");
+    calls.push({ text, values });
+    if (/SELECT COUNT\(\*\) as count FROM messages/.test(text)) return [{ count: 1 }];
+    return [];
+  };
+  const persistence = createPostgresProjectPersistence({ pg });
+
+  await persistence.appendMessage("conv-pg-title", { role: "user", content: "make the whole thing about weather" });
+
+  assert(!calls.some(call => /UPDATE conversations SET title/.test(call.text)), "first user message should not overwrite the project title");
+  assert(calls.some(call => /UPDATE conversations SET updated_at/.test(call.text)), "message append should still bump the conversation timestamp");
 });
 
 await test("postgres ProjectPersistence sends null for absent job timestamp columns", async () => {

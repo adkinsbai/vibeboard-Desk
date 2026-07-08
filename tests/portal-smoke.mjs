@@ -40,6 +40,33 @@ await withServer(async ({ baseUrl }) => {
     await page.locator(".my-device-card", { hasText: "灰色版" }).waitFor({ timeout: 6000 });
     const boundDevices = await page.locator(".my-device-card").count();
     assert(boundDevices === 1, "bound devices should appear in My Devices after binding");
+    await page.locator("#portalAdminLink").evaluate(node => { node.hidden = false; });
+    const actionStyles = await page.locator(".portal-header-actions .ghost-btn").evaluateAll(nodes => {
+      const metrics = nodes.map(node => {
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return {
+          top: Math.round(rect.top),
+          centerY: Math.round(rect.top + rect.height / 2),
+          height: Math.round(rect.height),
+          fontSize: style.fontSize,
+          fontWeight: style.fontWeight,
+          textDecoration: style.textDecorationLine,
+          display: style.display,
+          alignItems: style.alignItems,
+        };
+      });
+      return {
+        metrics,
+        centerDelta: Math.max(...metrics.map(item => item.centerY)) - Math.min(...metrics.map(item => item.centerY)),
+      };
+    });
+    assert(actionStyles.metrics.length === 3, "portal should expose workbench, admin, and logout actions");
+    assert(actionStyles.centerDelta <= 1, `portal header actions should align horizontally: ${JSON.stringify(actionStyles.metrics)}`);
+    assert(actionStyles.metrics.every(item => item.textDecoration === "none"), "portal header actions should not be underlined");
+    assert(new Set(actionStyles.metrics.map(item => item.fontSize)).size === 1, "portal header actions should share the same font size");
+    assert(new Set(actionStyles.metrics.map(item => item.fontWeight)).size === 1, "portal header actions should share the same font weight");
+    assert(actionStyles.metrics.every(item => ["flex", "inline-flex"].includes(item.display) && item.alignItems === "center"), "portal header actions should use the same flex alignment");
 
     await page.goto(`${baseUrl}/workbench`, { waitUntil: "domcontentloaded" });
     await page.locator("#chatLog").waitFor({ timeout: 6000 });
