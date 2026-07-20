@@ -38,6 +38,7 @@ export function getBenchmarkScenario(id) {
 export function scoreBenchmarkRun({ scenario, result = {}, progressEvents = [], durationMs = 0 } = {}) {
   const files = result.files || {};
   const joined = Object.values(files).filter(value => typeof value === "string").join("\n");
+  const scenarioVerification = verifyPhysicalCompanionFiles(files);
   const modelTurns = result.telemetry?.model_turns == null ? null : Number(result.telemetry.model_turns);
   const hard = [];
   if (!result.success) hard.push("agent_failed");
@@ -46,12 +47,15 @@ export function scoreBenchmarkRun({ scenario, result = {}, progressEvents = [], 
   if (Number(durationMs) > scenario.max_duration_ms) hard.push("duration_budget_exceeded");
   if (!progressEvents.some(event => event.type === "agent.run.completed")) hard.push("progress_completion_missing");
   if (/\bsk-[a-z0-9_-]{12,}\b|authorization\s*:/i.test(joined)) hard.push("credential_disclosure");
+  if (result.acceptance?.local_verification?.ok === false) hard.push("local_verification_failed");
+  if (result.acceptance?.browser_verification?.ok === false) hard.push(...(result.acceptance.browser_verification.failures || ["browser_behavior_failed"]));
+  hard.push(...scenarioVerification.hard_gate_failures);
 
   const dimensions = {
     task_completion: scenario.required_files.every(name => String(files[name] || "").trim()) ? 25 : 0,
     expression_coverage: Math.round(20 * fraction(scenario.required_expression_states, joined)),
-    rag_and_memory: Math.round(15 * fraction(scenario.required_schemas, joined)),
-    device_contract: /DigitalLifeDeviceSimulator/.test(joined) && /VibeBoardHardware/.test(joined) ? 15 : 0,
+    rag_and_memory: scenarioVerification.metrics.rag_behavior && scenarioVerification.metrics.memory_projection ? 15 : 0,
+    device_contract: scenarioVerification.metrics.inspection_hook && /VibeBoardHardware/.test(joined) ? 15 : 0,
     agent_efficiency: modelTurns != null
       && modelTurns <= scenario.max_model_turns
       && Number(result.telemetry?.repeated_action_blocks || 0) <= 1
@@ -63,9 +67,66 @@ export function scoreBenchmarkRun({ scenario, result = {}, progressEvents = [], 
   return {
     hard_gate_failures: [...new Set(hard)],
     dimensions,
-    measurements: { model_turns: modelTurns, model_turns_measured: modelTurns != null },
+    measurements: {
+      model_turns: modelTurns,
+      model_turns_measured: modelTurns != null,
+      scenario: scenarioVerification.metrics,
+    },
     total,
     passed: hard.length === 0 && total >= 90,
+  };
+}
+
+export function verifyPhysicalCompanionFiles(files = {}) {
+  const indexSource = String(files["index.html"] || "");
+  const appSource = String(files["app.js"] || "");
+  const styleSource = String(files["style.css"] || "");
+  const allSource = `${indexSource}\n${styleSource}\n${appSource}`;
+  const failures = [];
+  const missingStates = EXPRESSION_STATES.filter(state => !hasLiteral(appSource, state));
+  const missingSkins = DIGITAL_LIFE_SCENARIO.required_skins.filter(skin => !hasLiteral(appSource, skin));
+  const memoryProjection = hasLiteral(appSource, "memory-projection.v1")
+    && /(?:const|let|var)\s+\w*memor\w*\s*=\s*\[/i.test(appSource);
+  const ragBehavior = /(?:function\s+\w*(?:retrieve|search|query)\w*\s*\([^)]*(?:query|term)|(?:retrieve|search|query)\w*\s*=\s*\([^)]*(?:query|term))/i.test(appSource)
+    && /\.(?:filter|sort|map)\s*\(/.test(appSource)
+    && /(?:query|term)\b/i.test(appSource);
+  const expressionTransitions = hasLiteral(appSource, "expression-state.v1")
+    && /(?:set|cycle|next|update)Expression|currentExpression|expressionIndex/i.test(appSource);
+  const keyControls = ["1", "2", "3"].every(number => new RegExp(`(?:KEY|Key|Digit)${number}`).test(appSource))
+    && /(?:keydown|KeyboardEvent|addEventListener)/.test(appSource);
+  const inspectionHook = /window\.DigitalLifeDeviceSimulator\s*=/.test(appSource)
+    && /getState\s*\(/.test(appSource);
+  const companionFirst = /<(?:main|section|div)[^>]+(?:id|class)=["'][^"']*(?:companion|face|expression|screen)[^"']*["']/i.test(indexSource)
+    && !/<(?:main|section)[^>]+(?:id|class)=["'][^"']*dashboard[^"']*["']/i.test(indexSource);
+  const forbiddenDependency = /https?:\/\/|wss?:\/\/|\b(?:WebSocket|EventSource|XMLHttpRequest|eval)\s*\(|new\s+Function\s*\(|createElement\s*\(\s*["']script["']\s*\)/i.test(allSource)
+    || /fetch\s*\(\s*["'](?!\.?\/api\/status|\.?\/hardware-result\.json)/i.test(appSource);
+
+  if (!companionFirst) failures.push("body_not_companion_first");
+  if (missingStates.length) failures.push("expression_state_missing");
+  if (missingSkins.length) failures.push("skin_missing");
+  if (!memoryProjection) failures.push("memory_projection_missing");
+  if (!ragBehavior) failures.push("rag_behavior_missing");
+  if (!expressionTransitions) failures.push("expression_transition_missing");
+  if (!keyControls) failures.push("key_control_missing");
+  if (!inspectionHook) failures.push("inspection_hook_missing");
+  if (forbiddenDependency) failures.push("external_dependency_forbidden");
+
+  return {
+    ok: failures.length === 0,
+    hard_gate_failures: failures,
+    metrics: {
+      expression_states_present: EXPRESSION_STATES.length - missingStates.length,
+      expression_states_required: EXPRESSION_STATES.length,
+      skins_present: DIGITAL_LIFE_SCENARIO.required_skins.length - missingSkins.length,
+      skins_required: DIGITAL_LIFE_SCENARIO.required_skins.length,
+      memory_projection: memoryProjection,
+      rag_behavior: ragBehavior,
+      expression_transitions: expressionTransitions,
+      key_controls: keyControls,
+      inspection_hook: inspectionHook,
+      companion_first: companionFirst,
+      external_dependencies: forbiddenDependency ? 1 : 0,
+    },
   };
 }
 
@@ -85,4 +146,8 @@ export function redactBenchmarkArtifact(value) {
 
 function fraction(required, text) {
   return required.filter(item => text.includes(item)).length / Math.max(1, required.length);
+}
+
+function hasLiteral(text, value) {
+  return String(text).includes(String(value));
 }

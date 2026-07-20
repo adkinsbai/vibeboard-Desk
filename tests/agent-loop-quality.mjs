@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { compactAgentMessages } from "../src/agentContextBudget.mjs";
 import { createAgentLoopGuard } from "../src/agentLoopGuard.mjs";
 import { createAgentRunTelemetry, publicAgentRunTelemetry } from "../src/agentRunTelemetry.mjs";
+import { AGENT_PROGRESS_TYPES, createAgentProgressEvent } from "../src/agentProgress.mjs";
 
 const messages = [{ role: "system", content: "contract" }];
 for (let i = 0; i < 30; i += 1) {
@@ -60,5 +61,26 @@ const sanitized = JSON.stringify(publicAgentRunTelemetry({
 }));
 assert(!sanitized.includes("synthetic-secret"));
 assert(!sanitized.includes("private prompt"));
+
+const progress = createAgentProgressEvent(AGENT_PROGRESS_TYPES.TOOL_COMPLETED, {
+  phase: "code",
+  tool: "create_file",
+  path: "app.js",
+  ok: true,
+  elapsedMs: 21,
+  content: "must not leak",
+  apiKey: "must not leak",
+});
+assert.deepEqual(progress, {
+  schema_version: "agent-progress.v1",
+  type: "agent.tool.completed",
+  phase: "code",
+  tool: "create_file",
+  path: "app.js",
+  ok: true,
+  elapsed_ms: 21,
+  message: "",
+});
+assert(!JSON.stringify(progress).includes("must not leak"));
 
 console.log("PASS agent loop quality");

@@ -3,6 +3,7 @@ import {
   getBenchmarkScenario,
   redactBenchmarkArtifact,
   scoreBenchmarkRun,
+  verifyPhysicalCompanionFiles,
 } from "../src/agentBenchmark.mjs";
 
 const scenario = getBenchmarkScenario("digital-life-physical-companion");
@@ -38,6 +39,29 @@ const passing = scoreBenchmarkRun({
 assert.equal(passing.hard_gate_failures.length, 0);
 assert(passing.total >= 90);
 
+const validScenario = verifyPhysicalCompanionFiles(benchmarkFixtureFiles());
+assert.deepEqual(validScenario.hard_gate_failures, []);
+
+const dashboardFirst = benchmarkFixtureFiles();
+dashboardFirst["index.html"] = dashboardFirst["index.html"].replace('id="companion-screen"', 'id="dashboard"');
+assert(verifyPhysicalCompanionFiles(dashboardFirst).hard_gate_failures.includes("body_not_companion_first"));
+
+const missingExpression = benchmarkFixtureFiles();
+missingExpression["app.js"] = missingExpression["app.js"].replace('"tired",', "");
+assert(verifyPhysicalCompanionFiles(missingExpression).hard_gate_failures.includes("expression_state_missing"));
+
+const fakeRag = benchmarkFixtureFiles();
+fakeRag["app.js"] = fakeRag["app.js"].replace("function retrieveMemories(query)", "function listMemories()");
+assert(verifyPhysicalCompanionFiles(fakeRag).hard_gate_failures.includes("rag_behavior_missing"));
+
+const external = benchmarkFixtureFiles();
+external["app.js"] += '\nfetch("https://example.com/private")';
+assert(verifyPhysicalCompanionFiles(external).hard_gate_failures.includes("external_dependency_forbidden"));
+
+const missingHook = benchmarkFixtureFiles();
+missingHook["app.js"] = missingHook["app.js"].replace("window.DigitalLifeDeviceSimulator", "window.MissingSimulator");
+assert(verifyPhysicalCompanionFiles(missingHook).hard_gate_failures.includes("inspection_hook_missing"));
+
 const unmeasured = scoreBenchmarkRun({
   scenario,
   durationMs: 62000,
@@ -70,10 +94,10 @@ function benchmarkFixtureFiles() {
     "tired", "confused", "lonely", "angry", "error", "sleeping", "away",
   ];
   return {
-    "index.html": '<!doctype html><meta name="viewport" content="width=480,height=360"><main id="screen"></main><script src="./app.js"></script>',
-    "style.css": "html,body,#screen{width:480px;height:360px;overflow:hidden;margin:0;background:#050505;color:#fff}",
-    "app.js": `const states=${JSON.stringify(states)}; const schemas=["memory-projection.v1","expression-state.v1"]; window.DigitalLifeDeviceSimulator={getState(){return {states,schemas,skins:["life-line","bot-face","hybrid"],rag:true}}}; window.VibeBoardHardware={getStatus(){},getProgramResult(){},getSnapshot(){}};`,
-    "hardware_app.py": 'import json\nprint(json.dumps({"build_id":"fixture","runtime":{"executed_on_board":False},"available_apis":["/api/status","./hardware-result.json"]}))',
-    "manifest.json": '{"id":"fixture"}',
+    "index.html": '<!doctype html><html><head><meta name="viewport" content="width=480,height=360"><link rel="stylesheet" href="./style.css"></head><body><main id="companion-screen"><div id="face"><i></i><i></i><b></b></div><aside id="memory-overlay" hidden></aside></main><script src="./app.js"></script></body></html>',
+    "style.css": "html,body,#companion-screen{width:480px;height:360px;overflow:hidden;margin:0;background:#050505;color:#fff}#face{font-size:24px}#memory-overlay{font-size:14px}@media(max-width:479px){html,body,#companion-screen{width:100vw}}",
+    "app.js": `const BUILD_ID="fixture"; const PROMPT="synthetic physical companion"; const states=${JSON.stringify(states)}; const skins=["life-line","bot-face","hybrid"]; const schemas=["memory-projection.v1","expression-state.v1"]; const memories=[{schema_version:"memory-projection.v1",text:"quiet high value guidance",tags:["guidance"]},{schema_version:"memory-projection.v1",text:"transparent screen companion",tags:["device"]}]; let expressionIndex=0; let skinIndex=0; let overlayOpen=false; function retrieveMemories(query){const term=String(query||"").toLowerCase(); return memories.filter(item=>item.text.includes(term)||item.tags.some(tag=>tag.includes(term))).sort((a,b)=>b.tags.length-a.tags.length);} function setExpression(value){expressionIndex=Math.max(0,states.indexOf(value)); document.body.dataset.expression=states[expressionIndex];} function cycleExpression(){setExpression(states[(expressionIndex+1)%states.length]);} function toggleMemory(){overlayOpen=!overlayOpen; document.getElementById("memory-overlay").hidden=!overlayOpen; retrieveMemories("guidance");} function cycleSkin(){skinIndex=(skinIndex+1)%skins.length; document.body.dataset.skin=skins[skinIndex];} document.addEventListener("keydown",event=>{if(event.code==="Digit1"||event.key==="KEY1")cycleExpression();if(event.code==="Digit2"||event.key==="KEY2")toggleMemory();if(event.code==="Digit3"||event.key==="KEY3")cycleSkin();}); window.DigitalLifeDeviceSimulator={getState(){return {schema_version:"expression-state.v1",expression:states[expressionIndex],skin:skins[skinIndex],memory_overlay_open:overlayOpen,retrieval_count:retrieveMemories("guidance").length,states,schemas};}}; window.VibeBoardHardware={async getStatus(){return fetch("/api/status").then(r=>r.json())},async getProgramResult(){return fetch("./hardware-result.json").then(r=>r.json())},getSnapshot(){return {build_id:BUILD_ID,prompt:PROMPT}}}; setExpression("idle"); cycleSkin();`,
+    "hardware_app.py": 'import json\nBUILD_ID="fixture"\nPROMPT="synthetic physical companion"\navailable_apis=["/api/status","./hardware-result.json"]\npayload={"build_id":BUILD_ID,"prompt":PROMPT,"runtime":{"mode":"simulated"},"available_apis":available_apis}\nopen("hardware-result.json","w",encoding="utf-8").write(json.dumps(payload))\nprint(json.dumps(payload))',
+    "manifest.json": '{"id":"fixture","name":"Physical Companion Fixture","files":["index.html","style.css","app.js","hardware_app.py","manifest.json"]}',
   };
 }

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +11,9 @@ import {
   getBenchmarkScenario,
   redactBenchmarkArtifact,
   scoreBenchmarkRun,
+  verifyPhysicalCompanionFiles,
 } from "../src/agentBenchmark.mjs";
+import { verifyAllLocal } from "../src/verifiers/index.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const mode = process.argv.find(arg => arg.startsWith("--mode="))?.slice("--mode=".length) || "fixture";
@@ -25,6 +28,7 @@ try {
   execution = failedExecution(error);
 }
 const durationMs = Date.now() - startedAt;
+execution.result.acceptance = await verifyAcceptance(execution.result.files || {}, mode);
 const score = scoreBenchmarkRun({
   scenario,
   result: execution.result,
@@ -43,6 +47,9 @@ const artifact = redactBenchmarkArtifact({
   progress_summary: execution.progressEvents.map(publicProgress),
   planner_summary: execution.plannerSummary || {},
   build_evidence_summary: execution.buildEvidenceSummary || {},
+  local_verification: execution.result.acceptance.local_verification,
+  scenario_verification: execution.result.acceptance.scenario_verification,
+  browser_verification: execution.result.acceptance.browser_verification,
   failure_summary: execution.failureSummary || {},
 });
 const artifactJson = JSON.stringify(artifact, null, 2);
@@ -186,6 +193,7 @@ async function runLiveScenario(currentScenario) {
           { role: "user", content: "Confirmed. Start the local build and verification now." },
         ],
         modelSettings,
+        task_contract: benchmarkTaskContract(currentScenario),
       }, 240000);
     } finally {
       await stopPolling();
@@ -227,11 +235,227 @@ async function runLiveScenario(currentScenario) {
   }
 }
 
+async function verifyAcceptance(files, currentMode) {
+  if (!Object.keys(files || {}).length) {
+    return {
+      local_verification: { ok: false, issue_count: 1 },
+      scenario_verification: { ok: false, hard_gate_failures: ["required_file_missing"], metrics: {} },
+      browser_verification: { ok: false, failures: ["browser_behavior_missing"], metrics: {}, screenshots: [] },
+    };
+  }
+  const local = await verifyAllLocal(files);
+  const scenarioVerification = verifyPhysicalCompanionFiles(files);
+  const browserVerification = await verifyBrowserBehavior(files, currentMode);
+  return {
+    local_verification: {
+      ok: local.ok === true,
+      issue_count: Array.isArray(local.issues) ? local.issues.length : 0,
+      degraded: local.degraded === true,
+    },
+    scenario_verification: scenarioVerification,
+    browser_verification: browserVerification,
+  };
+}
+
+async function verifyBrowserBehavior(files, currentMode) {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vibeboard-companion-browser-"));
+  const screenshotDir = path.join(ROOT, "runtime", "benchmarks", "screenshots");
+  await fs.mkdir(screenshotDir, { recursive: true });
+  for (const [name, content] of Object.entries(files)) {
+    if (typeof content !== "string" || name.includes("..") || path.isAbsolute(name)) continue;
+    const target = path.join(tempRoot, name);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, content, "utf8");
+  }
+  await fs.writeFile(path.join(tempRoot, "hardware-result.json"), JSON.stringify({
+    build_id: "browser-benchmark",
+    runtime: { mode: "simulated" },
+    available_apis: ["/api/status", "./hardware-result.json"],
+  }), "utf8");
+
+  const server = await startStaticServer(tempRoot);
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({ headless: true });
+  const failures = [];
+  const pageErrors = [];
+  const externalRequests = [];
+  const screenshots = [];
+  try {
+    const desktop = await browser.newPage({ viewport: { width: 480, height: 360 } });
+    desktop.on("pageerror", error => pageErrors.push(String(error?.message || "page error").slice(0, 160)));
+    desktop.on("request", request => {
+      try {
+        if (new URL(request.url()).origin !== server.origin) externalRequests.push(new URL(request.url()).origin);
+      } catch {}
+    });
+    await desktop.goto(`${server.origin}/index.html`, { waitUntil: "networkidle" });
+    await desktop.waitForTimeout(150);
+    const before = await inspectSimulator(desktop);
+    await dispatchPhysicalKey(desktop, "Digit1", "KEY1");
+    const afterKey1 = await inspectSimulator(desktop);
+    await dispatchPhysicalKey(desktop, "Digit2", "KEY2");
+    const afterKey2 = await inspectSimulator(desktop);
+    await dispatchPhysicalKey(desktop, "Digit3", "KEY3");
+    const afterKey3 = await inspectSimulator(desktop);
+    const desktopMetrics = await inspectViewport(desktop);
+    const desktopName = `${currentMode}-digital-life-physical-companion-480x360.png`;
+    await desktop.screenshot({ path: path.join(screenshotDir, desktopName) });
+    screenshots.push(desktopName);
+
+    const mobile = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    mobile.on("pageerror", error => pageErrors.push(String(error?.message || "page error").slice(0, 160)));
+    await mobile.goto(`${server.origin}/index.html`, { waitUntil: "networkidle" });
+    await mobile.waitForTimeout(100);
+    const mobileMetrics = await inspectViewport(mobile);
+    const mobileName = `${currentMode}-digital-life-physical-companion-390x844.png`;
+    await mobile.screenshot({ path: path.join(screenshotDir, mobileName), fullPage: false });
+    screenshots.push(mobileName);
+
+    if (!before.exists) failures.push("inspection_hook_missing");
+    if (!before.expression || afterKey1.expression === before.expression) failures.push("key1_expression_transition_failed");
+    if (afterKey2.memory_overlay_open === before.memory_overlay_open) failures.push("key2_memory_overlay_failed");
+    if (!before.skin || afterKey3.skin === afterKey2.skin) failures.push("key3_skin_transition_failed");
+    if (desktopMetrics.horizontal_overflow || desktopMetrics.vertical_overflow) failures.push("desktop_overflow");
+    if (mobileMetrics.horizontal_overflow) failures.push("mobile_horizontal_overflow");
+    if (desktopMetrics.nonblank_sample_ratio <= 0.1) failures.push("render_blank");
+    if (pageErrors.length) failures.push("browser_runtime_error");
+    if (externalRequests.length) failures.push("external_request_forbidden");
+
+    return {
+      ok: failures.length === 0,
+      failures: [...new Set(failures)],
+      metrics: {
+        expression_changed: afterKey1.expression !== before.expression,
+        memory_overlay_changed: afterKey2.memory_overlay_open !== before.memory_overlay_open,
+        skin_changed: afterKey3.skin !== afterKey2.skin,
+        desktop: desktopMetrics,
+        mobile: mobileMetrics,
+        page_error_count: pageErrors.length,
+        external_request_count: new Set(externalRequests).size,
+      },
+      screenshots,
+    };
+  } finally {
+    await browser.close().catch(() => {});
+    await server.close().catch(() => {});
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+}
+
+async function inspectSimulator(page) {
+  return page.evaluate(() => {
+    const hook = window.DigitalLifeDeviceSimulator;
+    const state = hook?.getState?.() || {};
+    return {
+      exists: typeof hook?.getState === "function",
+      expression: String(state.expression || state.currentExpression || ""),
+      skin: String(state.skin || state.currentSkin || ""),
+      memory_overlay_open: Boolean(state.memory_overlay_open ?? state.memoryOverlayOpen ?? state.overlayOpen),
+    };
+  });
+}
+
+async function dispatchPhysicalKey(page, code, key) {
+  await page.evaluate(({ code: currentCode, key: currentKey }) => {
+    for (const type of ["keydown", "keyup"]) {
+      document.dispatchEvent(new KeyboardEvent(type, { code: currentCode, key: currentKey, bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent(type, { code: currentCode, key: currentKey, bubbles: true }));
+    }
+  }, { code, key });
+  await page.waitForTimeout(30);
+}
+
+async function inspectViewport(page) {
+  return page.evaluate(() => {
+    const root = document.documentElement;
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    let painted = 0;
+    let samples = 0;
+    for (let y = 10; y < Math.min(height, 360); y += 30) {
+      for (let x = 10; x < width; x += 30) {
+        samples += 1;
+        const element = document.elementFromPoint(x, y);
+        if (!element) continue;
+        const style = getComputedStyle(element);
+        if (style.visibility !== "hidden" && style.display !== "none" && (style.backgroundColor !== "rgba(0, 0, 0, 0)" || element.textContent?.trim() || element.children.length)) painted += 1;
+      }
+    }
+    return {
+      horizontal_overflow: root.scrollWidth > width + 1,
+      vertical_overflow: root.scrollHeight > height + 1,
+      scroll_width: root.scrollWidth,
+      scroll_height: root.scrollHeight,
+      viewport_width: width,
+      viewport_height: height,
+      nonblank_sample_ratio: samples ? Number((painted / samples).toFixed(3)) : 0,
+    };
+  });
+}
+
+function startStaticServer(root) {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer(async (req, res) => {
+      try {
+        const url = new URL(req.url || "/", "http://127.0.0.1");
+        if (url.pathname === "/api/status") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: true, mode: "simulated" }));
+          return;
+        }
+        const relative = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
+        const resolved = path.resolve(root, relative);
+        if (!resolved.startsWith(path.resolve(root))) throw new Error("unsafe path");
+        const body = await fs.readFile(resolved);
+        const extension = path.extname(resolved);
+        const contentType = extension === ".html" ? "text/html" : extension === ".css" ? "text/css" : extension === ".js" ? "text/javascript" : "application/json";
+        res.writeHead(200, { "content-type": `${contentType}; charset=utf-8` });
+        res.end(body);
+      } catch {
+        res.writeHead(404);
+        res.end("not found");
+      }
+    });
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve({
+        origin: `http://127.0.0.1:${address.port}`,
+        close: () => new Promise(done => server.close(done)),
+      });
+    });
+  });
+}
+
 function validateLiveGates() {
   assert.equal(process.env.VIBEBOARD_AGENT_BENCHMARK_LIVE, "1");
   assert.equal(process.env.VIBEBOARD_AGENT_BENCHMARK_SYNTHETIC_ONLY, "1");
   assert.equal(process.env.VIBEBOARD_AGENT_BENCHMARK_MAX_RUNS, "3");
   assert.equal(process.env.VIBEBOARD_AGENT_BENCHMARK_MAX_MODEL_CALLS, "42");
+}
+
+function benchmarkTaskContract(currentScenario) {
+  return {
+    schema_version: "agent-task-contract.v1",
+    objective: currentScenario.title,
+    required_files: currentScenario.required_files,
+    acceptance_criteria: [
+      "The expressive companion body is the first screen, not a dashboard.",
+      `Support every expression state: ${currentScenario.required_expression_states.join(", ")}.`,
+      `Support every skin: ${currentScenario.required_skins.join(", ")}.`,
+      `Use these local schemas: ${currentScenario.required_schemas.join(", ")}.`,
+      "KEY1 changes expression, KEY2 toggles memory inspection, and KEY3 changes skin.",
+      "Expose window.DigitalLifeDeviceSimulator.getState() for verification.",
+      "Pass all VibeBoard L0-L3 local verification.",
+    ],
+    forbidden: [
+      "external network APIs",
+      "credentials in generated files",
+      "automatic hardware deployment",
+      "claims of real memory, sensing, or device execution",
+    ],
+    max_model_turns: currentScenario.max_model_turns,
+  };
 }
 
 function publicProgress(event = {}) {
@@ -348,10 +572,10 @@ function fixtureFiles() {
     "tired", "confused", "lonely", "angry", "error", "sleeping", "away",
   ];
   return {
-    "index.html": '<!doctype html><meta name="viewport" content="width=480,height=360"><main id="screen"></main><script src="./app.js"></script>',
-    "style.css": "html,body,#screen{width:480px;height:360px;overflow:hidden;margin:0;background:#050505;color:#fff}",
-    "app.js": `const states=${JSON.stringify(states)}; const schemas=["memory-projection.v1","expression-state.v1"]; window.DigitalLifeDeviceSimulator={getState(){return {states,schemas,skins:["life-line","bot-face","hybrid"],rag:true}}}; window.VibeBoardHardware={getStatus(){},getProgramResult(){},getSnapshot(){}};`,
-    "hardware_app.py": 'import json\nprint(json.dumps({"build_id":"fixture","runtime":{"executed_on_board":False},"available_apis":["/api/status","./hardware-result.json"]}))',
-    "manifest.json": '{"id":"fixture"}',
+    "index.html": '<!doctype html><html><head><meta name="viewport" content="width=480,height=360"><link rel="stylesheet" href="./style.css"></head><body><main id="companion-screen"><div id="face"><i></i><i></i><b></b></div><aside id="memory-overlay" hidden></aside></main><script src="./app.js"></script></body></html>',
+    "style.css": "html,body,#companion-screen{width:480px;height:360px;overflow:hidden;margin:0;background:#050505;color:#fff}#face{font-size:24px}#memory-overlay{font-size:14px}@media(max-width:479px){html,body,#companion-screen{width:100vw}}",
+    "app.js": `const BUILD_ID="fixture"; const PROMPT="synthetic physical companion"; const states=${JSON.stringify(states)}; const skins=["life-line","bot-face","hybrid"]; const schemas=["memory-projection.v1","expression-state.v1"]; const memories=[{schema_version:"memory-projection.v1",text:"quiet high value guidance",tags:["guidance"]},{schema_version:"memory-projection.v1",text:"transparent screen companion",tags:["device"]}]; let expressionIndex=0; let skinIndex=0; let overlayOpen=false; function retrieveMemories(query){const term=String(query||"").toLowerCase(); return memories.filter(item=>item.text.includes(term)||item.tags.some(tag=>tag.includes(term))).sort((a,b)=>b.tags.length-a.tags.length);} function setExpression(value){expressionIndex=Math.max(0,states.indexOf(value)); document.body.dataset.expression=states[expressionIndex];} function cycleExpression(){setExpression(states[(expressionIndex+1)%states.length]);} function toggleMemory(){overlayOpen=!overlayOpen; document.getElementById("memory-overlay").hidden=!overlayOpen; retrieveMemories("guidance");} function cycleSkin(){skinIndex=(skinIndex+1)%skins.length; document.body.dataset.skin=skins[skinIndex];} document.addEventListener("keydown",event=>{if(event.code==="Digit1"||event.key==="KEY1")cycleExpression();if(event.code==="Digit2"||event.key==="KEY2")toggleMemory();if(event.code==="Digit3"||event.key==="KEY3")cycleSkin();}); window.DigitalLifeDeviceSimulator={getState(){return {schema_version:"expression-state.v1",expression:states[expressionIndex],skin:skins[skinIndex],memory_overlay_open:overlayOpen,retrieval_count:retrieveMemories("guidance").length,states,schemas};}}; window.VibeBoardHardware={async getStatus(){return fetch("/api/status").then(r=>r.json())},async getProgramResult(){return fetch("./hardware-result.json").then(r=>r.json())},getSnapshot(){return {build_id:BUILD_ID,prompt:PROMPT}}}; setExpression("idle"); cycleSkin();`,
+    "hardware_app.py": 'import json\nBUILD_ID="fixture"\nPROMPT="synthetic physical companion"\navailable_apis=["/api/status","./hardware-result.json"]\npayload={"build_id":BUILD_ID,"prompt":PROMPT,"runtime":{"mode":"simulated"},"available_apis":available_apis}\nopen("hardware-result.json","w",encoding="utf-8").write(json.dumps(payload))\nprint(json.dumps(payload))',
+    "manifest.json": '{"id":"fixture","name":"Physical Companion Fixture","files":["index.html","style.css","app.js","hardware_app.py","manifest.json"]}',
   };
 }
