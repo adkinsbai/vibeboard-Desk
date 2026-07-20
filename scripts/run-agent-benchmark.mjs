@@ -317,7 +317,7 @@ async function verifyBrowserBehavior(files, currentMode) {
     if (!before.skin || afterKey3.skin === afterKey2.skin) failures.push("key3_skin_transition_failed");
     if (desktopMetrics.horizontal_overflow || desktopMetrics.vertical_overflow) failures.push("desktop_overflow");
     if (mobileMetrics.horizontal_overflow) failures.push("mobile_horizontal_overflow");
-    if (desktopMetrics.nonblank_sample_ratio <= 0.1) failures.push("render_blank");
+    if (desktopMetrics.nonblank_foreground_elements < 1) failures.push("render_blank");
     if (pageErrors.length) failures.push("browser_runtime_error");
     if (externalRequests.length) failures.push("external_request_forbidden");
 
@@ -389,6 +389,16 @@ async function inspectViewport(page) {
       viewport_width: width,
       viewport_height: height,
       nonblank_sample_ratio: samples ? Number((painted / samples).toFixed(3)) : 0,
+      nonblank_foreground_elements: [...document.body.querySelectorAll("*")].filter(element => {
+        const rect = element.getBoundingClientRect();
+        if (rect.width * rect.height < 20) return false;
+        const style = getComputedStyle(element);
+        if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) <= 0.05) return false;
+        const text = element.childElementCount === 0 ? element.textContent?.trim() : "";
+        const paintedBackground = style.backgroundColor !== "rgba(0, 0, 0, 0)" && style.backgroundColor !== "rgb(5, 5, 5)";
+        const paintedBorder = parseFloat(style.borderTopWidth) + parseFloat(style.borderRightWidth) + parseFloat(style.borderBottomWidth) + parseFloat(style.borderLeftWidth) > 0;
+        return Boolean(text || paintedBackground || paintedBorder || element.matches("canvas,svg,img,video"));
+      }).length,
     };
   });
 }
@@ -573,7 +583,7 @@ function fixtureFiles() {
   ];
   return {
     "index.html": '<!doctype html><html><head><meta name="viewport" content="width=480,height=360"><link rel="stylesheet" href="./style.css"></head><body><main id="companion-screen"><div id="face"><i></i><i></i><b></b></div><aside id="memory-overlay" hidden></aside></main><script src="./app.js"></script></body></html>',
-    "style.css": "html,body,#companion-screen{width:480px;height:360px;overflow:hidden;margin:0;background:#050505;color:#fff}#face{font-size:24px}#memory-overlay{font-size:14px}@media(max-width:479px){html,body,#companion-screen{width:100vw}}",
+    "style.css": "html,body,#companion-screen{width:480px;height:360px;overflow:hidden;margin:0;background:#050505;color:#fff}#companion-screen{display:grid;place-items:center}#face{position:relative;width:220px;height:150px}#face i{position:absolute;top:28px;width:54px;height:38px;border-radius:50%;background:#dffcff;box-shadow:0 0 18px #46d7e8}#face i:first-child{left:28px}#face i:nth-child(2){right:28px}#face b{position:absolute;left:76px;bottom:25px;width:68px;height:28px;border-bottom:8px solid #ff8297;border-radius:0 0 50% 50%}#memory-overlay{font-size:14px}@media(max-width:479px){html,body,#companion-screen{width:100vw}}",
     "app.js": `const BUILD_ID="fixture"; const PROMPT="synthetic physical companion"; const states=${JSON.stringify(states)}; const skins=["life-line","bot-face","hybrid"]; const schemas=["memory-projection.v1","expression-state.v1"]; const memories=[{schema_version:"memory-projection.v1",text:"quiet high value guidance",tags:["guidance"]},{schema_version:"memory-projection.v1",text:"transparent screen companion",tags:["device"]}]; let expressionIndex=0; let skinIndex=0; let overlayOpen=false; function retrieveMemories(query){const term=String(query||"").toLowerCase(); return memories.filter(item=>item.text.includes(term)||item.tags.some(tag=>tag.includes(term))).sort((a,b)=>b.tags.length-a.tags.length);} function setExpression(value){expressionIndex=Math.max(0,states.indexOf(value)); document.body.dataset.expression=states[expressionIndex];} function cycleExpression(){setExpression(states[(expressionIndex+1)%states.length]);} function toggleMemory(){overlayOpen=!overlayOpen; document.getElementById("memory-overlay").hidden=!overlayOpen; retrieveMemories("guidance");} function cycleSkin(){skinIndex=(skinIndex+1)%skins.length; document.body.dataset.skin=skins[skinIndex];} document.addEventListener("keydown",event=>{if(event.code==="Digit1"||event.key==="KEY1")cycleExpression();if(event.code==="Digit2"||event.key==="KEY2")toggleMemory();if(event.code==="Digit3"||event.key==="KEY3")cycleSkin();}); window.DigitalLifeDeviceSimulator={getState(){return {schema_version:"expression-state.v1",expression:states[expressionIndex],skin:skins[skinIndex],memory_overlay_open:overlayOpen,retrieval_count:retrieveMemories("guidance").length,states,schemas};}}; window.VibeBoardHardware={async getStatus(){return fetch("/api/status").then(r=>r.json())},async getProgramResult(){return fetch("./hardware-result.json").then(r=>r.json())},getSnapshot(){return {build_id:BUILD_ID,prompt:PROMPT}}}; setExpression("idle"); cycleSkin();`,
     "hardware_app.py": 'import json\nBUILD_ID="fixture"\nPROMPT="synthetic physical companion"\navailable_apis=["/api/status","./hardware-result.json"]\npayload={"build_id":BUILD_ID,"prompt":PROMPT,"runtime":{"mode":"simulated"},"available_apis":available_apis}\nopen("hardware-result.json","w",encoding="utf-8").write(json.dumps(payload))\nprint(json.dumps(payload))',
     "manifest.json": '{"id":"fixture","name":"Physical Companion Fixture","files":["index.html","style.css","app.js","hardware_app.py","manifest.json"]}',
