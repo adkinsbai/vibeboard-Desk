@@ -1010,6 +1010,7 @@ const digitalLifeRoutes = createDigitalLifeRoutes({
   readBody,
   json,
   appendLog: appendServerLog,
+  env: process.env,
 });
 
 function htmlEscape(value) {

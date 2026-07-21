@@ -42,6 +42,12 @@ async function main() {
     assert(initial.ok === true, "GET /api/digital-life/state should return ok");
     assertStateShape(initial.state, "initial.state");
 
+    const speech = await json("/api/digital-life/speech/status");
+    assert(speech.ok === true, "speech status should remain queryable without credentials");
+    assert(typeof speech.configured === "boolean", "speech status should expose configured boolean");
+    assert(speech.max_recording_seconds === 60, "speech status should expose the 60-second hard limit");
+    assert(!("api_key" in speech) && !("authorization" in speech), "speech status should expose no authentication material");
+
     const runtime = await json("/api/digital-life/runtime");
     assert(runtime.ok === true, "GET /api/digital-life/runtime should return ok");
     assertObject(runtime.runtime, "runtime.runtime");

@@ -5,6 +5,7 @@ import {
   digitalLifeSay,
   getDigitalLifeHardware,
 } from "./digitalLifeHardware.mjs";
+import { createDigitalLifeSpeechRoutes } from "./digitalLifeSpeechRoutes.mjs";
 
 function positiveInt(value, fallback) {
   const parsed = Number(value);
@@ -92,8 +93,10 @@ export function createDigitalLifeRoutes({ store, readBody, json, appendLog, env 
   if (typeof json !== "function") throw new Error("createDigitalLifeRoutes requires json");
 
   const runtime = createDigitalLifeRuntime(store, { appendLog, env });
+  const speechRoutes = createDigitalLifeSpeechRoutes({ readBody, json, env });
 
   async function handle(req, res, url) {
+    if (await speechRoutes.handle(req, res, url)) return true;
     if (await handleDigitalLifeRequest({ req, res, url, readBody, json, store })) {
       return true;
     }
