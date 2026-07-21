@@ -1,0 +1,118 @@
+:root {
+  color-scheme: dark;
+  --ink: #f8fbff;
+  --muted: #a7b3c2;
+  --line: rgba(226, 235, 246, .18);
+  --panel: rgba(15, 23, 35, .88);
+  --cyan: #75e1dc;
+  --pink: #ff8fb4;
+  --amber: #ffd27c;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; min-width: 0; min-height: 100%; overflow: hidden; }
+
+body {
+  background: #101722;
+  color: var(--ink);
+  font: 12px/1.35 "Segoe UI", "Microsoft YaHei", sans-serif;
+  letter-spacing: 0;
+}
+
+button, input { font: inherit; }
+button { color: inherit; cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+#companion-screen {
+  position: relative;
+  width: min(100vw, 480px);
+  height: min(100vh, 360px);
+  min-height: 320px;
+  margin: 0 auto;
+  overflow: hidden;
+  background: #182332;
+}
+
+.status-line {
+  position: absolute;
+  z-index: 4;
+  top: 8px;
+  right: 10px;
+  left: 10px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+#connectionStatus { margin-right: auto; color: var(--amber); }
+#connectionStatus[data-connection="online"] { color: var(--cyan); }
+#connectionStatus[data-connection="error"] { color: var(--pink); }
+
+.companion { position: absolute; inset: 0 0 auto; height: 182px; text-align: center; }
+.antenna { position: absolute; top: 26px; left: 50%; width: 2px; height: 18px; background: var(--cyan); transform: translateX(-50%); }
+.antenna i { position: absolute; top: -5px; left: 50%; width: 8px; height: 8px; border-radius: 50%; background: var(--pink); transform: translateX(-50%); box-shadow: 0 0 10px rgba(255, 143, 180, .65); }
+.face-shell { position: absolute; top: 48px; left: 50%; width: 128px; height: 90px; border: 3px solid var(--cyan); border-radius: 42% 42% 38% 38%; transform: translateX(-50%); box-shadow: 0 0 24px rgba(117, 225, 220, .12); }
+.eye { position: absolute; top: 22px; width: 28px; height: 32px; overflow: hidden; border: 2px solid var(--ink); border-radius: 50%; background: #253348; }
+.eye-left { left: 22px; }
+.eye-right { right: 22px; }
+.eye b { position: absolute; top: 8px; left: 8px; width: 9px; height: 14px; border-radius: 50%; background: var(--pink); }
+.mouth { position: absolute; bottom: 13px; left: 50%; width: 30px; height: 13px; border-bottom: 3px solid var(--amber); border-radius: 0 0 50% 50%; transform: translateX(-50%); }
+.mouth i { display: block; width: 100%; height: 100%; }
+.life-line { position: absolute; top: 153px; left: 50%; width: 104px; height: 5px; overflow: hidden; border-radius: 999px; background: rgba(117, 225, 220, .16); transform: translateX(-50%); }
+.life-line i { display: block; width: 42%; height: 100%; border-radius: inherit; background: var(--cyan); animation: pulse 2.2s ease-in-out infinite; }
+.mood-line { margin: 0; }
+#moodLine { position: absolute; top: 160px; right: 14px; left: 14px; margin: 0; color: var(--muted); font-size: 11px; }
+
+body[data-expression="listening"] .face-shell { border-color: var(--amber); }
+body[data-expression="thinking"] .eye b { transform: translate(7px, -4px); }
+body[data-expression="speaking"] .mouth { height: 22px; border: 3px solid var(--pink); border-radius: 50%; animation: talk .42s ease-in-out infinite alternate; }
+body[data-expression="happy"] .mouth, body[data-expression="warm"] .mouth { width: 38px; }
+body[data-expression="tired"] .eye, body[data-expression="sleeping"] .eye { height: 11px; top: 34px; border-radius: 50%; }
+body[data-expression="lonely"] .mouth, body[data-expression="angry"] .mouth { transform: translateX(-50%) rotate(180deg); }
+body[data-expression="error"] .face-shell { border-color: var(--pink); }
+
+.conversation-panel { position: absolute; z-index: 3; right: 10px; bottom: 46px; left: 10px; max-height: 142px; padding: 7px 8px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px rgba(0, 0, 0, .2); }
+.message-log { min-height: 26px; max-height: 58px; overflow-y: auto; scrollbar-width: thin; }
+.message-bubble { max-width: 90%; margin: 2px 0; padding: 3px 6px; border-radius: 5px; overflow-wrap: anywhere; }
+.message-user { margin-left: auto; color: #10212b; background: var(--cyan); }
+.message-assistant { color: var(--ink); background: rgba(255, 255, 255, .1); }
+.message-offline { border-left: 2px solid var(--amber); }
+.transcript-line, .interaction-status { margin: 3px 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.transcript-line { color: var(--amber); }
+.composer { display: grid; grid-template-columns: minmax(0, 1fr) 32px 32px; gap: 5px; align-items: center; }
+.composer input { width: 100%; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--ink); background: rgba(255, 255, 255, .06); }
+.icon-button { width: 32px; height: 28px; padding: 0; border: 1px solid var(--line); border-radius: 5px; background: rgba(255, 255, 255, .08); }
+#sendMessage { color: #10212b; background: var(--cyan); }
+#micButton[data-listening="true"] { color: #10212b; background: var(--pink); }
+.tts-toggle { display: inline-flex; gap: 4px; align-items: center; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.tts-toggle input { accent-color: var(--cyan); }
+.replay-button { position: absolute; right: 8px; bottom: 6px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; background: rgba(255, 255, 255, .08); }
+
+.memory-overlay { position: absolute; z-index: 6; right: 12px; bottom: 48px; left: 12px; max-height: 178px; padding: 9px; border: 1px solid var(--cyan); border-radius: 8px; background: #101722; box-shadow: 0 14px 36px rgba(0, 0, 0, .45); }
+.memory-head { display: flex; align-items: center; justify-content: space-between; color: var(--cyan); font-size: 10px; }
+.memory-head button { width: 24px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 4px; background: transparent; }
+#memoryQuery { width: 100%; height: 26px; margin: 7px 0; padding: 0 7px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: rgba(255, 255, 255, .06); }
+.memory-results { max-height: 106px; overflow-y: auto; }
+.memory-item { padding: 5px 0; border-bottom: 1px solid rgba(226, 235, 246, .1); overflow-wrap: anywhere; }
+.memory-item:last-child { border-bottom: 0; }
+.memory-meta { display: block; margin-bottom: 2px; color: var(--amber); font-size: 10px; }
+
+.controls { position: absolute; right: 10px; bottom: 8px; left: 10px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.controls button { display: flex; gap: 6px; align-items: center; justify-content: center; height: 32px; border: 1px solid var(--line); border-radius: 5px; background: rgba(255, 255, 255, .06); }
+.controls kbd { color: var(--cyan); font-weight: 700; }
+
+@keyframes pulse { 0%, 100% { transform: translateX(-4px); opacity: .5; } 50% { transform: translateX(64px); opacity: 1; } }
+@keyframes talk { from { transform: scaleY(.65); } to { transform: scaleY(1.15); } }
+
+@media (max-width: 420px), (max-height: 420px) {
+  #companion-screen { width: 100vw; height: 100vh; min-height: 320px; }
+  .conversation-panel { right: 8px; bottom: 46px; left: 8px; max-height: 138px; }
+  .memory-overlay { right: 8px; bottom: 48px; left: 8px; }
+  .controls { right: 8px; left: 8px; }
+}
