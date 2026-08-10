@@ -13,7 +13,12 @@ import {
   filterConversationFiles,
   normalizeProjectMemory,
 } from "./conversationStore.mjs";
-import { createJobStore } from "./jobStore.mjs";
+import {
+  createJobStore,
+  digestJobInput,
+  idempotencyConflict,
+  normalizeJobIdentity,
+} from "./jobStore.mjs";
 
 const fileMutationLocks = new Map();
 
@@ -113,6 +118,11 @@ async function migrateLegacySqliteSnapshotInto(target, buffer) {
       type: job.type,
       conversationId: job.conversation_id,
       title: job.title,
+      organizationId: job.organization_id,
+      projectId: job.project_id,
+      buildId: job.build_id,
+      idempotencyKey: job.idempotency_key,
+      inputDigest: job.input_digest,
       input: job.input,
       phase: job.phase,
       status: job.status,
@@ -177,6 +187,11 @@ function normalizeLegacyJobRow(row = {}) {
     phase: String(row.phase || ""),
     conversation_id: row.conversation_id || "",
     title: String(row.title || ""),
+    organization_id: String(row.organization_id || ""),
+    project_id: String(row.project_id || ""),
+    build_id: String(row.build_id || ""),
+    idempotency_key: String(row.idempotency_key || ""),
+    input_digest: String(row.input_digest || ""),
     input: parseJsonValue(row.input_json, {}),
     output: parseJsonValue(row.output_json, null),
     error: parseJsonValue(row.error_json, null),
@@ -260,6 +275,12 @@ function wrapStores(conversationStore, jobStore) {
     },
     async getJob(id) {
       return jobStore.getJob(id);
+    },
+    async getJobForOrganization(id, organizationId) {
+      return jobStore.getJobForOrganization(id, organizationId);
+    },
+    async createOrGetJob(input = {}) {
+      return jobStore.createOrGetJob(input);
     },
     async listJobs(filters = {}) {
       return jobStore.listJobs(filters);
@@ -354,6 +375,11 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       phase: String(row.phase || ""),
       conversation_id: row.conversation_id || "",
       title: String(row.title || ""),
+      organization_id: String(row.organization_id || ""),
+      project_id: String(row.project_id || ""),
+      build_id: String(row.build_id || ""),
+      idempotency_key: String(row.idempotency_key || ""),
+      input_digest: String(row.input_digest || ""),
       input: parseJson(row.input_json, {}),
       output: parseJson(row.output_json, null),
       error: parseJson(row.error_json, null),
@@ -422,6 +448,11 @@ export function createPostgresProjectPersistence({ pg } = {}) {
           phase TEXT,
           conversation_id TEXT,
           title TEXT,
+          organization_id TEXT,
+          project_id TEXT,
+          build_id TEXT,
+          idempotency_key TEXT,
+          input_digest TEXT,
           input_json TEXT,
           output_json TEXT,
           error_json TEXT,
@@ -434,6 +465,29 @@ export function createPostgresProjectPersistence({ pg } = {}) {
           completed_at TIMESTAMPTZ
         )
       `;
+      await pg`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS organization_id TEXT`;
+      await pg`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS project_id TEXT`;
+      await pg`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS build_id TEXT`;
+      await pg`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS idempotency_key TEXT`;
+      await pg`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS input_digest TEXT`;
+      const legacyJobRows = rowsOf(await pg`
+        SELECT id, input_json, organization_id, input_digest
+        FROM jobs
+        WHERE COALESCE(organization_id, '') = '' OR COALESCE(input_digest, '') = ''
+      `);
+      for (const legacyJob of legacyJobRows) {
+        const input = parseJson(legacyJob.input_json, {});
+        const identity = normalizeJobIdentity({ input });
+        const organizationId = identity.organization_id;
+        const inputDigest = String(legacyJob.input_digest || digestJobInput(input));
+        if (organizationId || inputDigest !== String(legacyJob.input_digest || "")) {
+          await pg`
+            UPDATE jobs
+            SET organization_id = ${organizationId}, input_digest = ${inputDigest}
+            WHERE id = ${legacyJob.id}
+          `;
+        }
+      }
       await pg`ALTER TABLE messages ADD COLUMN IF NOT EXISTS legacy_id TEXT`;
       await pg`ALTER TABLE conversation_files ADD COLUMN IF NOT EXISTS legacy_id TEXT`;
       await pg`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_legacy_id ON messages(legacy_id) WHERE legacy_id IS NOT NULL`;
@@ -443,6 +497,12 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       await pg`CREATE INDEX IF NOT EXISTS idx_conversation_files_conversation_id ON conversation_files(conversation_id, id)`;
       await pg`CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at)`;
       await pg`CREATE INDEX IF NOT EXISTS idx_jobs_conversation_created ON jobs(conversation_id, created_at)`;
+      await pg`CREATE INDEX IF NOT EXISTS idx_jobs_organization_created ON jobs(organization_id, created_at)`;
+      await pg`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_organization_operation_idempotency
+        ON jobs(organization_id, type, idempotency_key)
+        WHERE idempotency_key IS NOT NULL AND idempotency_key <> ''
+      `;
     },
 
     async markInterruptedRunningJobs() {
@@ -632,6 +692,16 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       type,
       conversationId = "",
       title = "",
+      organizationId = "",
+      organization_id = "",
+      projectId = "",
+      project_id = "",
+      buildId = "",
+      build_id = "",
+      idempotencyKey = "",
+      idempotency_key = "",
+      inputDigest = "",
+      input_digest = "",
       input = {},
       phase = "queued",
       status = "queued",
@@ -647,13 +717,26 @@ export function createPostgresProjectPersistence({ pg } = {}) {
     } = {}) {
       const ts = now();
       const safeStatus = normalizeStatus(status);
+      const identity = normalizeJobIdentity({
+        type,
+        organizationId: organizationId || organization_id,
+        projectId: projectId || project_id,
+        buildId: buildId || build_id,
+        idempotencyKey: idempotencyKey || idempotency_key,
+        input,
+      });
       const row = {
         id,
-        type: String(type || "task"),
+        type: identity.type,
         status: safeStatus,
         phase: String(phase || safeStatus),
         conversation_id: String(conversationId || ""),
         title: String(title || ""),
+        organization_id: identity.organization_id,
+        project_id: identity.project_id,
+        build_id: identity.build_id,
+        idempotency_key: identity.idempotency_key,
+        input_digest: String(inputDigest || input_digest || digestJobInput(input)),
         input,
         output,
         error,
@@ -667,9 +750,9 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       };
       await pg`
         INSERT INTO jobs
-        (id, type, status, phase, conversation_id, title, input_json, output_json, error_json,
-         choices_json, logs_json, cancel_requested, created_at, updated_at, started_at, completed_at)
-        VALUES (${row.id}, ${row.type}, ${row.status}, ${row.phase}, ${row.conversation_id}, ${row.title},
+        (id, type, status, phase, conversation_id, title, organization_id, project_id, build_id, idempotency_key, input_digest,
+         input_json, output_json, error_json, choices_json, logs_json, cancel_requested, created_at, updated_at, started_at, completed_at)
+        VALUES (${row.id}, ${row.type}, ${row.status}, ${row.phase}, ${row.conversation_id}, ${row.title}, ${row.organization_id}, ${row.project_id}, ${row.build_id}, ${row.idempotency_key}, ${row.input_digest},
           ${jsonString(row.input, {})}, ${jsonString(row.output, null)}, ${jsonString(row.error, null)},
           ${jsonString(row.choices, [])}, ${jsonString(row.logs, [])}, ${row.cancel_requested ? 1 : 0}, ${timestampValue(row.created_at)}, ${timestampValue(row.updated_at)},
           ${timestampValue(row.started_at)}, ${timestampValue(row.completed_at)})
@@ -682,11 +765,113 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       return normalizeJob(await firstRow(pg`SELECT * FROM jobs WHERE id = ${id}`));
     },
 
-    async listJobs({ limit = 50, conversationId = "", status = "" } = {}) {
+    async getJobForOrganization(id, organizationId) {
+      return normalizeJob(await firstRow(pg`
+        SELECT * FROM jobs WHERE organization_id = ${String(organizationId || "")} AND id = ${id}
+      `));
+    },
+
+    async createOrGetJob({ context, operation, idempotencyKey, input = {}, ...job } = {}) {
+      const identity = normalizeJobIdentity({ context, operation, idempotencyKey, input }, { requireOrganization: true });
+      const inputDigest = digestJobInput(input);
+      if (!identity.idempotency_key) {
+        return this.createJob({
+          ...job,
+          type: identity.type,
+          organizationId: identity.organization_id,
+          projectId: identity.project_id,
+          buildId: identity.build_id,
+          inputDigest,
+          input,
+        });
+      }
+      const existing = normalizeJob(await firstRow(pg`
+        SELECT * FROM jobs
+        WHERE organization_id = ${identity.organization_id}
+          AND type = ${identity.type}
+          AND idempotency_key = ${identity.idempotency_key}
+      `));
+      if (existing) {
+        if (existing.input_digest !== inputDigest) throw idempotencyConflict();
+        return existing;
+      }
+
+      const ts = now();
+      const safeStatus = normalizeStatus(job.status || "queued");
+      const row = {
+        id: job.id || `job_${cryptoRandom()}`,
+        type: identity.type,
+        status: safeStatus,
+        phase: String(job.phase || safeStatus),
+        conversation_id: String(job.conversationId || ""),
+        title: String(job.title || ""),
+        organization_id: identity.organization_id,
+        project_id: identity.project_id,
+        build_id: identity.build_id,
+        idempotency_key: identity.idempotency_key,
+        input_digest: inputDigest,
+        input,
+        output: job.output ?? null,
+        error: job.error ?? null,
+        choices: Array.isArray(job.choices) ? job.choices : [],
+        logs: Array.isArray(job.logs) ? job.logs : [compactLogEntry({ ts, phase: job.phase || safeStatus, message: "Job accepted." })],
+        cancel_requested: Boolean(job.cancel_requested),
+        created_at: job.created_at || ts,
+        updated_at: job.updated_at || ts,
+        started_at: job.started_at || (safeStatus === "running" ? ts : ""),
+        completed_at: job.completed_at || (finalStatuses.has(safeStatus) ? ts : ""),
+      };
+      const inserted = rowsOf(await pg`
+        INSERT INTO jobs
+        (id, type, status, phase, conversation_id, title, organization_id, project_id, build_id, idempotency_key, input_digest,
+         input_json, output_json, error_json, choices_json, logs_json, cancel_requested, created_at, updated_at, started_at, completed_at)
+        VALUES (${row.id}, ${row.type}, ${row.status}, ${row.phase}, ${row.conversation_id}, ${row.title}, ${row.organization_id}, ${row.project_id}, ${row.build_id}, ${row.idempotency_key}, ${row.input_digest},
+          ${jsonString(row.input, {})}, ${jsonString(row.output, null)}, ${jsonString(row.error, null)},
+          ${jsonString(row.choices, [])}, ${jsonString(row.logs, [])}, ${row.cancel_requested ? 1 : 0}, ${timestampValue(row.created_at)}, ${timestampValue(row.updated_at)},
+          ${timestampValue(row.started_at)}, ${timestampValue(row.completed_at)})
+        ON CONFLICT (organization_id, type, idempotency_key)
+          WHERE idempotency_key IS NOT NULL AND idempotency_key <> ''
+        DO NOTHING
+        RETURNING *
+      `);
+      if (inserted.length) return normalizeJob(inserted[0]);
+      const winner = normalizeJob(await firstRow(pg`
+        SELECT * FROM jobs
+        WHERE organization_id = ${identity.organization_id}
+          AND type = ${identity.type}
+          AND idempotency_key = ${identity.idempotency_key}
+      `));
+      if (!winner) throw new Error("Idempotency job was not persisted.");
+      if (winner.input_digest !== inputDigest) throw idempotencyConflict();
+      return winner;
+    },
+
+    async listJobs({ limit = 50, conversationId = "", status = "", organizationId = "", organization_id = "" } = {}) {
       const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
       const safeStatus = status ? normalizeStatus(status) : "";
+      const scopedOrganization = String(organizationId || organization_id || "").trim();
       let rows;
-      if (conversationId && safeStatus) {
+      if (scopedOrganization && conversationId && safeStatus) {
+        rows = rowsOf(await pg`
+          SELECT * FROM jobs WHERE organization_id = ${scopedOrganization} AND conversation_id = ${conversationId} AND status = ${safeStatus}
+          ORDER BY created_at DESC LIMIT ${safeLimit}
+        `);
+      } else if (scopedOrganization && conversationId) {
+        rows = rowsOf(await pg`
+          SELECT * FROM jobs WHERE organization_id = ${scopedOrganization} AND conversation_id = ${conversationId}
+          ORDER BY created_at DESC LIMIT ${safeLimit}
+        `);
+      } else if (scopedOrganization && safeStatus) {
+        rows = rowsOf(await pg`
+          SELECT * FROM jobs WHERE organization_id = ${scopedOrganization} AND status = ${safeStatus}
+          ORDER BY created_at DESC LIMIT ${safeLimit}
+        `);
+      } else if (scopedOrganization) {
+        rows = rowsOf(await pg`
+          SELECT * FROM jobs WHERE organization_id = ${scopedOrganization}
+          ORDER BY created_at DESC LIMIT ${safeLimit}
+        `);
+      } else if (conversationId && safeStatus) {
         rows = rowsOf(await pg`
           SELECT * FROM jobs WHERE conversation_id = ${conversationId} AND status = ${safeStatus}
           ORDER BY created_at DESC LIMIT ${safeLimit}
@@ -806,6 +991,26 @@ function createJsonProjectPersistence({ filePath }) {
   const now = () => new Date().toISOString();
   const byId = (rows, id) => rows.find(row => String(row.id || "") === String(id || ""));
   const normalizeStatus = value => ["queued", "running", "succeeded", "failed", "canceled"].includes(String(value || "")) ? String(value) : "queued";
+  const normalizeJobRow = row => {
+    if (!row) return null;
+    const identity = normalizeJobIdentity({
+      type: row.type,
+      organizationId: row.organization_id,
+      projectId: row.project_id,
+      buildId: row.build_id,
+      idempotencyKey: row.idempotency_key,
+      input: row.input || {},
+    });
+    return {
+      ...row,
+      type: identity.type,
+      organization_id: identity.organization_id,
+      project_id: identity.project_id,
+      build_id: identity.build_id,
+      idempotency_key: identity.idempotency_key,
+      input_digest: String(row.input_digest || digestJobInput(row.input || {})),
+    };
+  };
   return {
     async initSchema() {
       await writeState(await readState());
@@ -959,6 +1164,16 @@ function createJsonProjectPersistence({ filePath }) {
       type,
       conversationId = "",
       title = "",
+      organizationId = "",
+      organization_id = "",
+      projectId = "",
+      project_id = "",
+      buildId = "",
+      build_id = "",
+      idempotencyKey = "",
+      idempotency_key = "",
+      inputDigest = "",
+      input_digest = "",
       input = {},
       phase = "queued",
       status = "queued",
@@ -974,13 +1189,26 @@ function createJsonProjectPersistence({ filePath }) {
     } = {}) {
       const ts = now();
       const safeStatus = normalizeStatus(status);
-      const row = {
-        id,
+      const identity = normalizeJobIdentity({
         type,
+        organizationId: organizationId || organization_id,
+        projectId: projectId || project_id,
+        buildId: buildId || build_id,
+        idempotencyKey: idempotencyKey || idempotency_key,
+        input,
+      });
+      const row = normalizeJobRow({
+        id,
+        type: identity.type,
         status: safeStatus,
         phase,
         conversation_id: conversationId,
         title,
+        organization_id: identity.organization_id,
+        project_id: identity.project_id,
+        build_id: identity.build_id,
+        idempotency_key: identity.idempotency_key,
+        input_digest: String(inputDigest || input_digest || digestJobInput(input)),
         input,
         output,
         error,
@@ -991,7 +1219,7 @@ function createJsonProjectPersistence({ filePath }) {
         updated_at: updated_at || ts,
         started_at: started_at || (safeStatus === "running" ? ts : ""),
         completed_at: completed_at || (["succeeded", "failed", "canceled"].includes(safeStatus) ? ts : ""),
-      };
+      });
       await mutate(state => {
         if (!byId(state.jobs, id)) state.jobs.push(row);
       });
@@ -999,12 +1227,62 @@ function createJsonProjectPersistence({ filePath }) {
     },
     async getJob(id) {
       const state = await readState();
-      return byId(state.jobs, id) || null;
+      return normalizeJobRow(byId(state.jobs, id));
     },
-    async listJobs({ limit = 50, conversationId = "", status = "" } = {}) {
+    async getJobForOrganization(id, organizationId) {
       const state = await readState();
+      const job = byId(state.jobs, id);
+      const normalized = normalizeJobRow(job);
+      return normalized?.organization_id === String(organizationId || "").trim() ? normalized : null;
+    },
+    async createOrGetJob({ context, operation, idempotencyKey, input = {}, ...job } = {}) {
+      const identity = normalizeJobIdentity({ context, operation, idempotencyKey, input }, { requireOrganization: true });
+      const inputDigest = digestJobInput(input);
+      let result = null;
+      await mutate(state => {
+        const existing = identity.idempotency_key
+          ? state.jobs.map(normalizeJobRow).find(item => item.organization_id === identity.organization_id && item.type === identity.type && item.idempotency_key === identity.idempotency_key)
+          : null;
+        if (existing) {
+          if (existing.input_digest !== inputDigest) throw idempotencyConflict();
+          result = existing;
+          return;
+        }
+        const ts = now();
+        const row = normalizeJobRow({
+          id: job.id || `job_${cryptoRandom()}`,
+          type: identity.type,
+          status: normalizeStatus(job.status),
+          phase: job.phase || "queued",
+          conversation_id: job.conversationId || "",
+          title: job.title || "",
+          organization_id: identity.organization_id,
+          project_id: identity.project_id,
+          build_id: identity.build_id,
+          idempotency_key: identity.idempotency_key,
+          input_digest: inputDigest,
+          input,
+          output: job.output ?? null,
+          error: job.error ?? null,
+          choices: Array.isArray(job.choices) ? job.choices : [],
+          logs: Array.isArray(job.logs) ? job.logs : [{ ts, phase: job.phase || "queued", message: "Job accepted.", data: {} }],
+          cancel_requested: Boolean(job.cancel_requested),
+          created_at: job.created_at || ts,
+          updated_at: job.updated_at || ts,
+          started_at: job.started_at || "",
+          completed_at: job.completed_at || "",
+        });
+        state.jobs.push(row);
+        result = row;
+      });
+      return result;
+    },
+    async listJobs({ limit = 50, conversationId = "", status = "", organizationId = "", organization_id = "" } = {}) {
+      const state = await readState();
+      const scopedOrganization = String(organizationId || organization_id || "").trim();
       return state.jobs
-        .filter(row => (!conversationId || row.conversation_id === conversationId) && (!status || row.status === status))
+        .map(normalizeJobRow)
+        .filter(row => (!conversationId || row.conversation_id === conversationId) && (!status || row.status === status) && (!scopedOrganization || row.organization_id === scopedOrganization))
         .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
         .slice(0, Math.max(1, Math.min(Number(limit) || 50, 200)));
     },

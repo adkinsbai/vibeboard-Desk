@@ -624,10 +624,27 @@ async function ensureCreditsAvailable(user) {
   return credits;
 }
 
+function organizationIdForUser(user) {
+  const explicit = String(user?.organizationId ?? user?.organization_id ?? "").trim();
+  if (explicit) return explicit;
+  const actorId = String(user?.id || "").trim();
+  return actorId ? `personal:${actorId}` : "";
+}
+
+async function getJobForRequest(jobId, user) {
+  if (PUBLIC_DEPLOYMENT && user?.role !== "admin") {
+    return jobStore.getJobForOrganization(jobId, organizationIdForUser(user));
+  }
+  return jobStore.getJob(jobId);
+}
+
 async function ensureJobAccess(job, user) {
   if (!job) throw httpError(404, "Job not found");
-  if (PUBLIC_DEPLOYMENT && user?.role !== "admin" && String(job.input?.user_id || "") !== user?.id) {
-    throw httpError(403, "Job access denied.");
+  if (PUBLIC_DEPLOYMENT && user?.role !== "admin" && (
+    job.organization_id !== organizationIdForUser(user)
+    || String(job.input?.user_id || "") !== user?.id
+  )) {
+    throw httpError(404, "Job not found");
   }
   return job;
 }
@@ -3161,6 +3178,7 @@ async function route(req, res) {
         limit: Number(url.searchParams.get("limit") || 50),
         conversationId: url.searchParams.get("conversation_id") || "",
         status: url.searchParams.get("status") || "",
+        organizationId: PUBLIC_DEPLOYMENT && requestUser?.role !== "admin" ? organizationIdForUser(requestUser) : "",
       });
       jobs = filterJobsForUser(jobs, requestUser);
       json(res, 200, { ok: true, jobs });
@@ -3168,14 +3186,14 @@ async function route(req, res) {
     }
     if (req.method === "GET" && /^\/api\/jobs\/[^/]+$/.test(url.pathname)) {
       const jobId = decodeURIComponent(url.pathname.split("/")[3] || "");
-      const job = await ensureJobAccess(await jobStore.getJob(jobId), requestUser);
+      const job = await ensureJobAccess(await getJobForRequest(jobId, requestUser), requestUser);
       json(res, 200, { ok: true, job });
       return;
     }
     if (req.method === "POST" && /^\/api\/jobs\/[^/]+\/cancel$/.test(url.pathname)) {
       const jobId = decodeURIComponent(url.pathname.split("/")[3] || "");
       try {
-        await ensureJobAccess(await jobStore.getJob(jobId), requestUser);
+        await ensureJobAccess(await getJobForRequest(jobId, requestUser), requestUser);
         const job = await jobStore.requestCancel(jobId);
         await flushMutationSaves();
         json(res, 200, { ok: true, job });

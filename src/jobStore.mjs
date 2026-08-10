@@ -64,6 +64,11 @@ function normalizeJob(row) {
     phase: String(row.phase || ""),
     conversation_id: row.conversation_id || "",
     title: String(row.title || ""),
+    organization_id: String(row.organization_id || ""),
+    project_id: String(row.project_id || ""),
+    build_id: String(row.build_id || ""),
+    idempotency_key: String(row.idempotency_key || ""),
+    input_digest: String(row.input_digest || ""),
     input: parseJson(row.input_json, {}),
     output: parseJson(row.output_json, null),
     error: parseJson(row.error_json, null),
@@ -75,6 +80,88 @@ function normalizeJob(row) {
     started_at: String(row.started_at || ""),
     completed_at: String(row.completed_at || ""),
   };
+}
+
+const SECRET_OR_VOLATILE_INPUT_KEYS = new Set([
+  "api_key",
+  "apikey",
+  "authorization",
+  "background",
+  "client_run_id",
+  "clientrunid",
+  "idempotency_key",
+  "idempotencykey",
+  "request_id",
+  "requestid",
+  "timeout_ms",
+  "job_timeout_ms",
+  "as_job",
+]);
+
+function canonicalInput(value) {
+  if (Array.isArray(value)) return value.map(canonicalInput);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value)
+    .sort()
+    .filter(key => {
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+      return !SECRET_OR_VOLATILE_INPUT_KEYS.has(key.toLowerCase())
+        && !SECRET_OR_VOLATILE_INPUT_KEYS.has(normalized)
+        && !/(secret|token|password|credential)/i.test(key);
+    })
+    .map(key => [key, canonicalInput(value[key])])
+  );
+}
+
+export function digestJobInput(input = {}) {
+  return crypto.createHash("sha256").update(JSON.stringify(canonicalInput(input))).digest("hex");
+}
+
+function stringValue(value) {
+  return String(value || "").trim();
+}
+
+function legacyOrganizationId(input = {}) {
+  const userId = stringValue(input?.user_id);
+  return userId ? `personal:${userId}` : "";
+}
+
+export function normalizeJobIdentity({
+  context = null,
+  operation = "",
+  type = "",
+  organizationId = "",
+  organization_id = "",
+  projectId = "",
+  project_id = "",
+  buildId = "",
+  build_id = "",
+  idempotencyKey = "",
+  idempotency_key = "",
+  input = {},
+} = {}, { requireOrganization = false } = {}) {
+  const organization = stringValue(context?.organizationId || context?.organization_id || organizationId || organization_id)
+    || stringValue(input?.organization_id)
+    || legacyOrganizationId(input);
+  if (requireOrganization && !organization) {
+    const error = new Error("Job organization identity is required.");
+    error.errorType = "execution_context_invalid";
+    throw error;
+  }
+  return {
+    type: stringValue(operation || type) || "task",
+    organization_id: organization,
+    project_id: stringValue(context?.projectId || context?.project_id || projectId || project_id) || stringValue(input?.project_id),
+    build_id: stringValue(context?.buildId || context?.build_id || buildId || build_id) || stringValue(input?.build_id),
+    idempotency_key: stringValue(idempotencyKey || idempotency_key || context?.idempotencyKey || context?.idempotency_key),
+  };
+}
+
+export function idempotencyConflict() {
+  const error = new Error("Idempotency key was already used with a different request.");
+  error.errorType = "idempotency_conflict";
+  error.statusCode = 409;
+  return error;
 }
 
 function compactLogEntry(entry = {}) {
@@ -93,6 +180,91 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
   function getJob(id) {
     const rows = query(db, "SELECT * FROM jobs WHERE id = ?", [String(id || "")]);
     return normalizeJob(rows[0]);
+  }
+
+  function getJobForOrganization(id, organizationId) {
+    const rows = query(
+      db,
+      "SELECT * FROM jobs WHERE organization_id = ? AND id = ?",
+      [stringValue(organizationId), String(id || "")]
+    );
+    return normalizeJob(rows[0]);
+  }
+
+  function findJobByIdempotency(identity) {
+    if (!identity.organization_id || !identity.idempotency_key) return null;
+    const rows = query(
+      db,
+      "SELECT * FROM jobs WHERE organization_id = ? AND type = ? AND idempotency_key = ?",
+      [identity.organization_id, identity.type, identity.idempotency_key]
+    );
+    return normalizeJob(rows[0]);
+  }
+
+  function makeJobRow({
+    id = idFactory(),
+    type,
+    conversationId = "",
+    title = "",
+    input = {},
+    phase = "queued",
+    status = JOB_STATUS.QUEUED,
+    output = null,
+    error = null,
+    choices = [],
+    logs = null,
+    cancel_requested = false,
+    created_at = "",
+    updated_at = "",
+    started_at = "",
+    completed_at = "",
+    inputDigest = "",
+    input_digest = "",
+    ...identityInput
+  } = {}) {
+    const identity = normalizeJobIdentity({ ...identityInput, type, input });
+    const ts = isoNow(now);
+    const safeStatus = normalizeStatus(status);
+    return {
+      id: String(id || idFactory()),
+      type: identity.type,
+      status: safeStatus,
+      phase: String(phase || safeStatus),
+      conversation_id: String(conversationId || ""),
+      title: String(title || ""),
+      organization_id: identity.organization_id,
+      project_id: identity.project_id,
+      build_id: identity.build_id,
+      idempotency_key: identity.idempotency_key,
+      input_digest: String(inputDigest || input_digest || digestJobInput(input)),
+      input,
+      output,
+      error,
+      choices: Array.isArray(choices) ? choices : [],
+      logs: Array.isArray(logs) ? logs : [compactLogEntry({ ts, phase, message: "Job accepted." })],
+      cancel_requested: Boolean(cancel_requested),
+      created_at: created_at || ts,
+      updated_at: updated_at || ts,
+      started_at: started_at || (safeStatus === JOB_STATUS.RUNNING ? ts : ""),
+      completed_at: completed_at || (FINAL_STATUSES.has(safeStatus) ? ts : ""),
+    };
+  }
+
+  function insertJob(row, { ignoreIdempotencyConflict = false } = {}) {
+    const insert = ignoreIdempotencyConflict ? "INSERT OR IGNORE" : "INSERT";
+    run(
+      db,
+      saveDb,
+      `${insert} INTO jobs
+       (id, type, status, phase, conversation_id, title, organization_id, project_id, build_id, idempotency_key, input_digest,
+        input_json, output_json, error_json, choices_json, logs_json, cancel_requested, created_at, updated_at, started_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.id, row.type, row.status, row.phase, row.conversation_id, row.title, row.organization_id, row.project_id, row.build_id, row.idempotency_key, row.input_digest,
+        stringifyJson(row.input, {}), stringifyJson(row.output, null), stringifyJson(row.error, null), stringifyJson(row.choices, []), stringifyJson(row.logs, []),
+        row.cancel_requested ? 1 : 0, row.created_at, row.updated_at, row.started_at || "", row.completed_at || "",
+      ]
+    );
   }
 
   function updateJob(id, patch = {}) {
@@ -140,6 +312,11 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
           phase TEXT,
           conversation_id TEXT,
           title TEXT,
+          organization_id TEXT,
+          project_id TEXT,
+          build_id TEXT,
+          idempotency_key TEXT,
+          input_digest TEXT,
           input_json TEXT,
           output_json TEXT,
           error_json TEXT,
@@ -152,8 +329,23 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
           completed_at TEXT
         )
       `);
+      const columns = new Set(query(db, "PRAGMA table_info(jobs)").map(row => row.name));
+      for (const [name, type] of [["organization_id", "TEXT"], ["project_id", "TEXT"], ["build_id", "TEXT"], ["idempotency_key", "TEXT"], ["input_digest", "TEXT"]]) {
+        if (!columns.has(name)) db.run(`ALTER TABLE jobs ADD COLUMN ${name} ${type}`);
+      }
+      const legacyRows = query(db, "SELECT id, input_json, organization_id, input_digest FROM jobs");
+      for (const legacy of legacyRows) {
+        const input = parseJson(legacy.input_json, {});
+        const organizationId = stringValue(legacy.organization_id) || legacyOrganizationId(input);
+        const inputDigest = stringValue(legacy.input_digest) || digestJobInput(input);
+        if (organizationId !== stringValue(legacy.organization_id) || inputDigest !== stringValue(legacy.input_digest)) {
+          db.run("UPDATE jobs SET organization_id = ?, input_digest = ? WHERE id = ?", [organizationId, inputDigest, legacy.id]);
+        }
+      }
       db.run("CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at)");
       db.run("CREATE INDEX IF NOT EXISTS idx_jobs_conversation_created ON jobs(conversation_id, created_at)");
+      db.run("CREATE INDEX IF NOT EXISTS idx_jobs_organization_created ON jobs(organization_id, created_at)");
+      db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_organization_operation_idempotency ON jobs(organization_id, type, idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key <> ''");
       if (typeof saveDb === "function") saveDb();
     },
 
@@ -199,41 +391,48 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
       }
     },
 
-    createJob({ type, conversationId = "", title = "", input = {}, phase = "queued", status = JOB_STATUS.QUEUED } = {}) {
-      const id = idFactory();
-      const ts = isoNow(now);
-      const safeStatus = normalizeStatus(status);
-      run(
-        db,
-        saveDb,
-        `INSERT INTO jobs
-         (id, type, status, phase, conversation_id, title, input_json, output_json, error_json,
-          choices_json, logs_json, cancel_requested, created_at, updated_at, started_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
-        [
-          id,
-          String(type || "task"),
-          safeStatus,
-          String(phase || safeStatus),
-          String(conversationId || ""),
-          String(title || ""),
-          stringifyJson(input, {}),
-          stringifyJson(null, null),
-          stringifyJson(null, null),
-          stringifyJson([], []),
-          stringifyJson([compactLogEntry({ ts, phase, message: "Job accepted." })], []),
-          ts,
-          ts,
-          safeStatus === JOB_STATUS.RUNNING ? ts : "",
-          FINAL_STATUSES.has(safeStatus) ? ts : "",
-        ]
-      );
-      return getJob(id);
+    createJob(input = {}) {
+      const row = makeJobRow(input);
+      insertJob(row);
+      return getJob(row.id);
     },
 
     getJob,
 
-    listJobs({ limit = 50, conversationId = "", status = "" } = {}) {
+    getJobForOrganization,
+
+    createOrGetJob({ context, operation, idempotencyKey, input = {}, ...job } = {}) {
+      const identity = normalizeJobIdentity({ context, operation, idempotencyKey, input }, { requireOrganization: true });
+      const inputDigest = digestJobInput(input);
+      const existing = findJobByIdempotency(identity);
+      if (existing) {
+        if (existing.input_digest !== inputDigest) throw idempotencyConflict();
+        return existing;
+      }
+      const row = makeJobRow({
+        ...job,
+        type: identity.type,
+        organizationId: identity.organization_id,
+        projectId: identity.project_id,
+        buildId: identity.build_id,
+        idempotencyKey: identity.idempotency_key,
+        inputDigest,
+        input,
+      });
+      if (!identity.idempotency_key) {
+        insertJob(row);
+        return getJob(row.id);
+      }
+      insertJob(row, { ignoreIdempotencyConflict: true });
+      const created = getJob(row.id);
+      if (created) return created;
+      const winner = findJobByIdempotency(identity);
+      if (!winner) throw new Error("Idempotency job was not persisted.");
+      if (winner.input_digest !== inputDigest) throw idempotencyConflict();
+      return winner;
+    },
+
+    listJobs({ limit = 50, conversationId = "", status = "", organizationId = "", organization_id = "" } = {}) {
       const clauses = [];
       const params = [];
       if (conversationId) {
@@ -243,6 +442,11 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
       if (status) {
         clauses.push("status = ?");
         params.push(normalizeStatus(status));
+      }
+      const scopedOrganization = stringValue(organizationId || organization_id);
+      if (scopedOrganization) {
+        clauses.push("organization_id = ?");
+        params.push(scopedOrganization);
       }
       params.push(Math.max(1, Math.min(Number(limit) || 50, 200)));
       const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";

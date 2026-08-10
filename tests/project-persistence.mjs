@@ -134,6 +134,8 @@ await test("postgres ProjectPersistence initializes first-class project tables",
   assert(schema.includes("CREATE TABLE IF NOT EXISTS project_memory"), "schema should create project_memory table");
   assert(schema.includes("CREATE TABLE IF NOT EXISTS jobs"), "schema should create jobs table");
   assert(schema.includes("idx_jobs_conversation_created"), "schema should index jobs by conversation");
+  assert(schema.includes("organization_id"), "schema should retain job organization identity");
+  assert(schema.includes("idx_jobs_organization_operation_idempotency"), "schema should enforce organization-scoped idempotency");
 });
 
 function createRecordingPg(options = {}) {
