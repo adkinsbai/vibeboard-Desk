@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/;
+const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/;
 
 export function createExecutionContext(input = {}) {
   const organizationId = requiredId(input.organizationId ?? input.organization_id, "organization");

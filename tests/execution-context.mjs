@@ -50,6 +50,11 @@ assert.throws(
   error => error?.errorType === "execution_context_invalid" && /control/i.test(error.message),
   "contexts reject control characters"
 );
+assert.throws(
+  () => createExecutionContext({ organizationId: "org-a\u0085", actorId: "user-a", projectId: "project-a", operation: "generate" }),
+  error => error?.errorType === "execution_context_invalid" && /control/i.test(error.message),
+  "contexts reject C1 control characters"
+);
 
 assert.equal(
   normalizeIdempotencyKey({ client_run_id: " client-run ", clientRunId: "camel", request_id: "legacy" }),
