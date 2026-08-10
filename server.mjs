@@ -41,6 +41,7 @@ import { createDigitalLifeRoutes } from "./src/digitalLifeRoutes.mjs";
 import { createExperienceStore, makePlaybookCandidate } from "./src/experienceStore.mjs";
 import { createPlaybookStore } from "./src/playbookStore.mjs";
 import { createJobRuntime } from "./src/jobRuntime.mjs";
+import { executionContextFromRequest } from "./src/executionContext.mjs";
 import { verifyAllLocal } from "./src/verifiers/index.mjs";
 import { classifyError } from "./src/errorClassifier.mjs";
 import { analyzeAndClarify } from "./src/clarifyEngine.mjs";
@@ -3191,12 +3192,26 @@ async function route(req, res) {
         return;
       }
       const payload = body?.payload && typeof body.payload === "object" ? body.payload : body;
+      const executionContext = executionContextFromRequest(req, requestUser, {
+        ...(payload || {}),
+        operation: type,
+      });
       if (payload?.conversation_id) await ensureConversationAccess(payload.conversation_id, requestUser);
       if (type === "agent" || type === "generate") await ensureCreditsAvailable(requestUser);
       const normalizedPayload = type === "generate"
         ? withServerModelSettings(payload || {}, { forceTemplate: PUBLIC_DEPLOYMENT && payload?.agent_full !== true && payload?.agentFull !== true })
         : { ...(payload || {}) };
-      const jobInput = { ...normalizedPayload, user_id: requestUser?.id || "" };
+      const jobInput = {
+        ...normalizedPayload,
+        organization_id: executionContext.organizationId,
+        actor_id: executionContext.actorId,
+        project_id: executionContext.projectId,
+        application_id: executionContext.applicationId,
+        build_id: executionContext.buildId,
+        device_id: executionContext.deviceId,
+        idempotency_key: executionContext.idempotencyKey,
+        user_id: requestUser?.id || "",
+      };
       const job = PUBLIC_DEPLOYMENT
         ? await runRequestBoundJob(type, jobInput)
         : await enqueueBackgroundJob(type, jobInput);
