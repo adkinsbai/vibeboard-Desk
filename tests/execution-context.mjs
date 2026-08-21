@@ -97,4 +97,13 @@ assert.deepEqual(requestContext, {
   idempotencyKey: "client-run-a",
 }, "request contexts preserve explicit IDs and derive legacy personal ownership");
 
+const fallbackProjectContext = executionContextFromRequest({}, { id: "user-b" }, {
+  operation: "agent",
+});
+assert.equal(
+  fallbackProjectContext.projectId,
+  "personal-project:user-b",
+  "request contexts fall back to a personal project when project and conversation IDs are absent"
+);
+
 console.log(JSON.stringify({ ok: true }));

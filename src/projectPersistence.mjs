@@ -18,6 +18,7 @@ import {
   digestJobInput,
   idempotencyConflict,
   normalizeJobIdentity,
+  sanitizeJobInput,
 } from "./jobStore.mjs";
 
 const fileMutationLocks = new Map();
@@ -288,11 +289,17 @@ function wrapStores(conversationStore, jobStore) {
     async transition(id, patch = {}) {
       return jobStore.transition(id, patch);
     },
+    async claimJob(id) {
+      return jobStore.claimJob(id);
+    },
     async appendLog(id, message, data = {}, phase = "") {
       return jobStore.appendLog(id, message, data, phase);
     },
     async requestCancel(id) {
       return jobStore.requestCancel(id);
+    },
+    async requestCancelForOrganization(id, organizationId) {
+      return jobStore.requestCancelForOrganization(id, organizationId);
     },
     async isCancelRequested(id) {
       return jobStore.isCancelRequested(id);
@@ -380,7 +387,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       build_id: String(row.build_id || ""),
       idempotency_key: String(row.idempotency_key || ""),
       input_digest: String(row.input_digest || ""),
-      input: parseJson(row.input_json, {}),
+      input: sanitizeJobInput(parseJson(row.input_json, {})),
       output: parseJson(row.output_json, null),
       error: parseJson(row.error_json, null),
       choices: parseJson(row.choices_json, []),
@@ -473,17 +480,22 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       const legacyJobRows = rowsOf(await pg`
         SELECT id, input_json, organization_id, input_digest
         FROM jobs
-        WHERE COALESCE(organization_id, '') = '' OR COALESCE(input_digest, '') = ''
       `);
       for (const legacyJob of legacyJobRows) {
         const input = parseJson(legacyJob.input_json, {});
-        const identity = normalizeJobIdentity({ input });
-        const organizationId = identity.organization_id;
-        const inputDigest = String(legacyJob.input_digest || digestJobInput(input));
-        if (organizationId || inputDigest !== String(legacyJob.input_digest || "")) {
+        const safeInput = sanitizeJobInput(input);
+        const identity = normalizeJobIdentity({ input: safeInput });
+        const persistedOrganizationId = String(legacyJob.organization_id || "").trim();
+        const organizationId = persistedOrganizationId || identity.organization_id;
+        const inputDigest = digestJobInput(safeInput);
+        if (
+          organizationId !== persistedOrganizationId
+          || inputDigest !== String(legacyJob.input_digest || "")
+          || jsonString(input, {}) !== jsonString(safeInput, {})
+        ) {
           await pg`
             UPDATE jobs
-            SET organization_id = ${organizationId}, input_digest = ${inputDigest}
+            SET organization_id = ${organizationId}, input_digest = ${inputDigest}, input_json = ${jsonString(safeInput, {})}
             WHERE id = ${legacyJob.id}
           `;
         }
@@ -717,13 +729,14 @@ export function createPostgresProjectPersistence({ pg } = {}) {
     } = {}) {
       const ts = now();
       const safeStatus = normalizeStatus(status);
+      const safeInput = sanitizeJobInput(input);
       const identity = normalizeJobIdentity({
         type,
         organizationId: organizationId || organization_id,
         projectId: projectId || project_id,
         buildId: buildId || build_id,
         idempotencyKey: idempotencyKey || idempotency_key,
-        input,
+        input: safeInput,
       });
       const row = {
         id,
@@ -736,8 +749,8 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         project_id: identity.project_id,
         build_id: identity.build_id,
         idempotency_key: identity.idempotency_key,
-        input_digest: String(inputDigest || input_digest || digestJobInput(input)),
-        input,
+        input_digest: String(inputDigest || input_digest || digestJobInput(safeInput)),
+        input: safeInput,
         output,
         error,
         choices: Array.isArray(choices) ? choices : [],
@@ -772,8 +785,9 @@ export function createPostgresProjectPersistence({ pg } = {}) {
     },
 
     async createOrGetJob({ context, operation, idempotencyKey, input = {}, ...job } = {}) {
-      const identity = normalizeJobIdentity({ context, operation, idempotencyKey, input }, { requireOrganization: true });
-      const inputDigest = digestJobInput(input);
+      const safeInput = sanitizeJobInput(input);
+      const identity = normalizeJobIdentity({ context, operation, idempotencyKey, input: safeInput }, { requireOrganization: true });
+      const inputDigest = digestJobInput(safeInput);
       if (!identity.idempotency_key) {
         return this.createJob({
           ...job,
@@ -782,7 +796,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
           projectId: identity.project_id,
           buildId: identity.build_id,
           inputDigest,
-          input,
+          input: safeInput,
         });
       }
       const existing = normalizeJob(await firstRow(pg`
@@ -810,7 +824,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         build_id: identity.build_id,
         idempotency_key: identity.idempotency_key,
         input_digest: inputDigest,
-        input,
+        input: safeInput,
         output: job.output ?? null,
         error: job.error ?? null,
         choices: Array.isArray(job.choices) ? job.choices : [],
@@ -921,6 +935,21 @@ export function createPostgresProjectPersistence({ pg } = {}) {
       return next;
     },
 
+    async claimJob(id) {
+      const updatedAt = now();
+      return normalizeJob(await firstRow(pg`
+        UPDATE jobs
+        SET status = ${"running"},
+            phase = ${"starting"},
+            updated_at = ${timestampValue(updatedAt)},
+            started_at = COALESCE(started_at, ${timestampValue(updatedAt)})
+        WHERE id = ${id}
+          AND status = ${"queued"}
+          AND cancel_requested = ${0}
+        RETURNING *
+      `));
+    },
+
     async appendLog(id, message, data = {}, phase = "") {
       const job = await this.getJob(id);
       if (!job) throw new Error(`Job not found: ${id}`);
@@ -941,6 +970,39 @@ export function createPostgresProjectPersistence({ pg } = {}) {
         error: canceled ? { errorType: "job_canceled", message: "Job canceled before it started." } : job.error,
         choices: canceled ? [] : job.choices,
       });
+    },
+
+    async requestCancelForOrganization(id, organizationId) {
+      const organization = String(organizationId || "").trim();
+      const job = await this.getJobForOrganization(id, organization);
+      if (!job) return null;
+      if (finalStatuses.has(job.status)) return job;
+      const updatedAt = now();
+      const canceled = job.status === "queued";
+      const next = {
+        ...job,
+        cancel_requested: true,
+        status: canceled ? "canceled" : job.status,
+        phase: canceled ? "canceled" : job.phase,
+        error: canceled ? { errorType: "job_canceled", message: "Job canceled before it started." } : job.error,
+        choices: canceled ? [] : job.choices,
+        updated_at: updatedAt,
+        completed_at: canceled ? updatedAt : job.completed_at,
+      };
+      await pg`
+        UPDATE jobs
+        SET status = ${next.status},
+            phase = ${next.phase || ""},
+            error_json = ${jsonString(next.error, null)},
+            choices_json = ${jsonString(next.choices, [])},
+            cancel_requested = ${1},
+            updated_at = ${timestampValue(next.updated_at)},
+            completed_at = ${timestampValue(next.completed_at)}
+        WHERE organization_id = ${organization}
+          AND id = ${id}
+          AND status NOT IN ('succeeded', 'failed', 'canceled')
+      `;
+      return this.getJobForOrganization(id, organization);
     },
 
     async isCancelRequested(id) {
@@ -993,13 +1055,14 @@ function createJsonProjectPersistence({ filePath }) {
   const normalizeStatus = value => ["queued", "running", "succeeded", "failed", "canceled"].includes(String(value || "")) ? String(value) : "queued";
   const normalizeJobRow = row => {
     if (!row) return null;
+    const input = sanitizeJobInput(row.input || {});
     const identity = normalizeJobIdentity({
       type: row.type,
       organizationId: row.organization_id,
       projectId: row.project_id,
       buildId: row.build_id,
       idempotencyKey: row.idempotency_key,
-      input: row.input || {},
+      input,
     });
     return {
       ...row,
@@ -1008,12 +1071,17 @@ function createJsonProjectPersistence({ filePath }) {
       project_id: identity.project_id,
       build_id: identity.build_id,
       idempotency_key: identity.idempotency_key,
-      input_digest: String(row.input_digest || digestJobInput(row.input || {})),
+      input_digest: String(row.input_digest || digestJobInput(input)),
+      input,
     };
   };
   return {
     async initSchema() {
-      await writeState(await readState());
+      const state = await readState();
+      for (let index = 0; index < state.jobs.length; index += 1) {
+        state.jobs[index] = normalizeJobRow(state.jobs[index]);
+      }
+      await writeState(state);
     },
     async markInterruptedRunningJobs() {
       return mutate(state => {
@@ -1189,13 +1257,14 @@ function createJsonProjectPersistence({ filePath }) {
     } = {}) {
       const ts = now();
       const safeStatus = normalizeStatus(status);
+      const safeInput = sanitizeJobInput(input);
       const identity = normalizeJobIdentity({
         type,
         organizationId: organizationId || organization_id,
         projectId: projectId || project_id,
         buildId: buildId || build_id,
         idempotencyKey: idempotencyKey || idempotency_key,
-        input,
+        input: safeInput,
       });
       const row = normalizeJobRow({
         id,
@@ -1208,8 +1277,8 @@ function createJsonProjectPersistence({ filePath }) {
         project_id: identity.project_id,
         build_id: identity.build_id,
         idempotency_key: identity.idempotency_key,
-        input_digest: String(inputDigest || input_digest || digestJobInput(input)),
-        input,
+        input_digest: String(inputDigest || input_digest || digestJobInput(safeInput)),
+        input: safeInput,
         output,
         error,
         choices: Array.isArray(choices) ? choices : [],
@@ -1236,8 +1305,9 @@ function createJsonProjectPersistence({ filePath }) {
       return normalized?.organization_id === String(organizationId || "").trim() ? normalized : null;
     },
     async createOrGetJob({ context, operation, idempotencyKey, input = {}, ...job } = {}) {
-      const identity = normalizeJobIdentity({ context, operation, idempotencyKey, input }, { requireOrganization: true });
-      const inputDigest = digestJobInput(input);
+      const safeInput = sanitizeJobInput(input);
+      const identity = normalizeJobIdentity({ context, operation, idempotencyKey, input: safeInput }, { requireOrganization: true });
+      const inputDigest = digestJobInput(safeInput);
       let result = null;
       await mutate(state => {
         const existing = identity.idempotency_key
@@ -1261,7 +1331,7 @@ function createJsonProjectPersistence({ filePath }) {
           build_id: identity.build_id,
           idempotency_key: identity.idempotency_key,
           input_digest: inputDigest,
-          input,
+          input: safeInput,
           output: job.output ?? null,
           error: job.error ?? null,
           choices: Array.isArray(job.choices) ? job.choices : [],
@@ -1300,6 +1370,19 @@ function createJsonProjectPersistence({ filePath }) {
       });
       return next;
     },
+    async claimJob(id) {
+      let claimed = null;
+      await mutate(state => {
+        const job = byId(state.jobs, id);
+        if (!job || job.status !== "queued" || job.cancel_requested) return;
+        job.status = "running";
+        job.phase = "starting";
+        job.updated_at = now();
+        if (!job.started_at) job.started_at = job.updated_at;
+        claimed = normalizeJobRow(job);
+      });
+      return claimed;
+    },
     async appendLog(id, message, data = {}, phase = "") {
       let next = null;
       await mutate(state => {
@@ -1316,6 +1399,30 @@ function createJsonProjectPersistence({ filePath }) {
       if (!job) throw new Error(`Job not found: ${id}`);
       if (["succeeded", "failed", "canceled"].includes(job.status)) return job;
       return this.transition(id, { cancel_requested: true, status: job.status === "queued" ? "canceled" : job.status, phase: job.status === "queued" ? "canceled" : job.phase });
+    },
+    async requestCancelForOrganization(id, organizationId) {
+      const organization = String(organizationId || "").trim();
+      let next = null;
+      await mutate(state => {
+        const job = byId(state.jobs, id);
+        const normalized = normalizeJobRow(job);
+        if (!normalized || normalized.organization_id !== organization) return;
+        if (["succeeded", "failed", "canceled"].includes(normalized.status)) {
+          next = normalized;
+          return;
+        }
+        job.cancel_requested = true;
+        if (job.status === "queued") {
+          job.status = "canceled";
+          job.phase = "canceled";
+          job.error = { errorType: "job_canceled", message: "Job canceled before it started." };
+          job.choices = [];
+          job.completed_at = now();
+        }
+        job.updated_at = now();
+        next = normalizeJobRow(job);
+      });
+      return next;
     },
     async isCancelRequested(id) {
       return Boolean((await this.getJob(id))?.cancel_requested);

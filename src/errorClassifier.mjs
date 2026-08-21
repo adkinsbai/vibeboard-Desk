@@ -27,6 +27,15 @@ export function createStructuredError(message, type, extra = {}) {
 }
 
 const ERROR_PROFILES = Object.freeze({
+  idempotency_conflict: {
+    label: "Request identity conflicts with an existing job",
+    stage: "intake",
+    userMessage: "同一个任务标识已经提交过，但这次请求内容与原任务不同。",
+    suggestion: "继续查询原任务，或者为新的操作生成一个新的 client_run_id。",
+    retryable: false,
+    statusCode: 409,
+    nextActions: ["查看原任务", "生成新的任务标识"],
+  },
   generate_busy: {
     label: "Another generation is already running",
     stage: "generate",

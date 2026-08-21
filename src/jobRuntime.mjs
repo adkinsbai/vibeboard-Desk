@@ -84,6 +84,9 @@ const DEFAULT_JOB_TIMEOUT_MS = 180000;
 export function createJobRuntime({ jobStore, classifyError, appendServerLog = async () => {}, timeoutMs = DEFAULT_JOB_TIMEOUT_MS } = {}) {
   if (!jobStore) throw new Error("jobStore is required");
   const handlers = new Map();
+  const runtimeInputs = new Map();
+  const scheduledJobs = new Set();
+  const activeRuns = new Map();
   let queue = Promise.resolve();
 
   function contextFor(jobId) {
@@ -111,9 +114,14 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
     };
   }
 
-  async function runExisting(jobId) {
-    const job = await jobStore.getJob(jobId);
-    if (!job || isFinal(job.status)) return job;
+  async function runExisting(jobId, runtimeInput = null) {
+    const queuedJob = await jobStore.getJob(jobId);
+    if (!queuedJob || isFinal(queuedJob.status)) return queuedJob;
+    if (queuedJob.status !== JOB_STATUS.QUEUED) return queuedJob;
+    const job = typeof jobStore.claimJob === "function"
+      ? await jobStore.claimJob(jobId)
+      : await jobStore.transition(jobId, { status: JOB_STATUS.RUNNING, phase: "starting" });
+    if (!job) return await jobStore.getJob(jobId);
     const handler = handlers.get(job.type);
     if (!handler) {
       await jobStore.transition(jobId, {
@@ -132,16 +140,16 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
       });
     }
 
-    await jobStore.transition(jobId, { status: JOB_STATUS.RUNNING, phase: "starting" });
     await jobStore.appendLog(jobId, "Job started.");
     await appendServerLog("job.start", { id: jobId, type: job.type, conversationId: job.conversation_id });
 
     try {
       const ctx = contextFor(jobId);
+      const executionInput = runtimeInput || job.input || {};
       await ctx.checkCanceled();
       const output = await withTimeout(
-        handler(job.input || {}, ctx, job),
-        Number(job.input?.job_timeout_ms || job.input?.timeout_ms || timeoutMs || DEFAULT_JOB_TIMEOUT_MS),
+        handler(executionInput, ctx, job),
+        Number(executionInput?.job_timeout_ms || executionInput?.timeout_ms || timeoutMs || DEFAULT_JOB_TIMEOUT_MS),
         job
       );
       const latest = await jobStore.getJob(jobId);
@@ -181,8 +189,51 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
   }
 
   function schedule(jobId) {
-    queue = queue.then(() => runExisting(jobId), () => runExisting(jobId));
+    if (scheduledJobs.has(jobId)) return queue;
+    scheduledJobs.add(jobId);
+    const run = () => runOnce(jobId, runtimeInputs.get(jobId) || null);
+    queue = queue.then(run, run).finally(() => {
+      scheduledJobs.delete(jobId);
+      runtimeInputs.delete(jobId);
+    });
     return queue;
+  }
+
+  async function createOrGetRuntimeJob(type, input, { conversationId = "", title = "", persistedInput = input } = {}) {
+    const organizationId = String(persistedInput?.organization_id || input?.organization_id || "").trim();
+    const idempotencyKey = String(persistedInput?.idempotency_key || input?.idempotency_key || "").trim();
+    const jobInput = {
+      type,
+      conversationId,
+      title: title || type,
+      input: persistedInput,
+      phase: "queued",
+    };
+    if (organizationId && idempotencyKey && typeof jobStore.createOrGetJob === "function") {
+      return await jobStore.createOrGetJob({
+        context: {
+          organizationId,
+          projectId: persistedInput?.project_id || input?.project_id || "",
+          buildId: persistedInput?.build_id || input?.build_id || "",
+          idempotencyKey,
+        },
+        operation: type,
+        idempotencyKey,
+        ...jobInput,
+      });
+    }
+    return await jobStore.createJob(jobInput);
+  }
+
+  async function runOnce(jobId, runtimeInput) {
+    if (activeRuns.has(jobId)) return activeRuns.get(jobId);
+    const run = (async () => {
+      const current = await jobStore.getJob(jobId);
+      if (!current || isFinal(current.status) || current.status !== JOB_STATUS.QUEUED) return current;
+      return await runExisting(jobId, runtimeInput);
+    })().finally(() => activeRuns.delete(jobId));
+    activeRuns.set(jobId, run);
+    return run;
   }
 
   return {
@@ -190,34 +241,24 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
       handlers.set(String(type || ""), handler);
     },
 
-    enqueue(type, input = {}, { conversationId = "", title = "" } = {}) {
-      const created = jobStore.createJob({
-        type,
-        conversationId,
-        title: title || type,
-        input,
-        phase: "queued",
-      });
+    enqueue(type, input = {}, { conversationId = "", title = "", persistedInput = input } = {}) {
+      const created = createOrGetRuntimeJob(type, input, { conversationId, title, persistedInput });
       if (isPromiseLike(created)) {
         return created.then(async job => {
+          if (!runtimeInputs.has(job.id)) runtimeInputs.set(job.id, input);
           schedule(job.id);
           return await jobStore.getJob(job.id);
         });
       }
       const job = created;
+      if (!runtimeInputs.has(job.id)) runtimeInputs.set(job.id, input);
       schedule(job.id);
       return jobStore.getJob(job.id);
     },
 
-    async runNow(type, input = {}, { conversationId = "", title = "" } = {}) {
-      const job = await jobStore.createJob({
-        type,
-        conversationId,
-        title: title || type,
-        input,
-        phase: "queued",
-      });
-      return await runExisting(job.id);
+    async runNow(type, input = {}, { conversationId = "", title = "", persistedInput = input } = {}) {
+      const job = await createOrGetRuntimeJob(type, input, { conversationId, title, persistedInput });
+      return await runOnce(job.id, input);
     },
 
     resumeQueuedJobs() {

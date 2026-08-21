@@ -2786,6 +2786,7 @@ async function enqueueBackgroundJob(type, body = {}) {
   return await jobRuntime.enqueue(type, input, {
     conversationId: String(input.conversation_id || ""),
     title: jobTitle(type, input),
+    persistedInput: withoutTransientModelCredentials(input),
   });
 }
 
@@ -2794,7 +2795,34 @@ async function runRequestBoundJob(type, body = {}) {
   return await jobRuntime.runNow(type, input, {
     conversationId: String(input.conversation_id || ""),
     title: jobTitle(type, input),
+    persistedInput: withoutTransientModelCredentials(input),
   });
+}
+
+function withoutTransientModelCredentials(body = {}) {
+  const settings = body?.modelSettings;
+  if (!settings || typeof settings !== "object") return body || {};
+  const { apiKey, ...safeSettings } = settings;
+  return {
+    ...(body || {}),
+    modelSettings: safeSettings,
+  };
+}
+
+function jobInputForRequest(req, user, type, body = {}) {
+  const input = { ...(body || {}), user_id: user?.id || "" };
+  if (!user?.id) return input;
+  const executionContext = executionContextFromRequest(req, user, { ...input, operation: type });
+  return {
+    ...input,
+    organization_id: executionContext.organizationId,
+    actor_id: executionContext.actorId,
+    project_id: executionContext.projectId,
+    application_id: executionContext.applicationId,
+    build_id: executionContext.buildId,
+    device_id: executionContext.deviceId,
+    idempotency_key: executionContext.idempotencyKey,
+  };
 }
 
 const jobRuntime = createJobRuntime({
@@ -3194,7 +3222,10 @@ async function route(req, res) {
       const jobId = decodeURIComponent(url.pathname.split("/")[3] || "");
       try {
         await ensureJobAccess(await getJobForRequest(jobId, requestUser), requestUser);
-        const job = await jobStore.requestCancel(jobId);
+        const job = PUBLIC_DEPLOYMENT && requestUser?.role !== "admin"
+          ? await jobStore.requestCancelForOrganization(jobId, organizationIdForUser(requestUser))
+          : await jobStore.requestCancel(jobId);
+        if (!job) throw httpError(404, "Job not found");
         await flushMutationSaves();
         json(res, 200, { ok: true, job });
       } catch (cancelErr) {
@@ -3260,7 +3291,7 @@ async function route(req, res) {
         action: body?.action || "message",
       });
       if (wantsBackgroundJob(body || {})) {
-        const jobInput = { ...(body || {}), user_id: requestUser?.id || "" };
+        const jobInput = jobInputForRequest(req, requestUser, "agent", body || {});
         const job = PUBLIC_DEPLOYMENT
           ? await runRequestBoundJob("agent", jobInput)
           : await enqueueBackgroundJob("agent", jobInput);
@@ -3331,7 +3362,7 @@ async function route(req, res) {
         if (body?.conversation_id) await ensureConversationAccess(body.conversation_id, requestUser);
         await ensureCreditsAvailable(requestUser);
         if (wantsBackgroundJob(body || {})) {
-          const jobInput = { ...(body || {}), user_id: requestUser?.id || "" };
+          const jobInput = jobInputForRequest(req, requestUser, "generate", body || {});
           const job = PUBLIC_DEPLOYMENT
             ? await runRequestBoundJob("generate", jobInput)
             : await enqueueBackgroundJob("generate", jobInput);
@@ -3415,7 +3446,7 @@ async function route(req, res) {
       try {
         const body = await readBody(req);
         if (wantsBackgroundJob(body || {})) {
-          const job = await enqueueBackgroundJob("deploy", body || {});
+          const job = await enqueueBackgroundJob("deploy", jobInputForRequest(req, requestUser, "deploy", body || {}));
           await flushMutationSaves();
           json(res, 202, { ok: true, job });
           return;

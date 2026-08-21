@@ -35,6 +35,9 @@ export function executionContextFromRequest(req = {}, user = null, body = {}) {
   const input = body && typeof body === "object" ? body : {};
   const actorId = requiredId(user?.id, "actor");
   const conversationId = optionalId(input.conversationId ?? input.conversation_id, "conversation");
+  const projectId = optionalId(input.projectId ?? input.project_id, "project")
+    || conversationId
+    || `personal-project:${actorId}`;
   const requestId = optionalId(
     input.requestId ?? input.request_id ?? req?.headers?.["x-request-id"] ?? normalizeIdempotencyKey(input),
     "request"
@@ -43,7 +46,7 @@ export function executionContextFromRequest(req = {}, user = null, body = {}) {
   return createExecutionContext({
     organizationId: user?.organizationId ?? user?.organization_id ?? `personal:${actorId}`,
     actorId,
-    projectId: input.projectId ?? input.project_id ?? conversationId ?? `personal-project:${actorId}`,
+    projectId,
     applicationId: input.applicationId ?? input.application_id,
     buildId: input.buildId ?? input.build_id,
     deviceId: input.deviceId ?? input.device_id,

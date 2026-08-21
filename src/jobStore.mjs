@@ -57,6 +57,7 @@ function normalizeStatus(status, fallback = JOB_STATUS.QUEUED) {
 
 function normalizeJob(row) {
   if (!row) return null;
+  const input = sanitizeJobInput(parseJson(row.input_json, {}));
   return {
     id: String(row.id || ""),
     type: String(row.type || ""),
@@ -69,7 +70,7 @@ function normalizeJob(row) {
     build_id: String(row.build_id || ""),
     idempotency_key: String(row.idempotency_key || ""),
     input_digest: String(row.input_digest || ""),
-    input: parseJson(row.input_json, {}),
+    input,
     output: parseJson(row.output_json, null),
     error: parseJson(row.error_json, null),
     choices: parseJson(row.choices_json, []),
@@ -82,39 +83,97 @@ function normalizeJob(row) {
   };
 }
 
-const SECRET_OR_VOLATILE_INPUT_KEYS = new Set([
-  "api_key",
+const SENSITIVE_INPUT_KEY_NAMES = new Set([
   "apikey",
+  "apisecret",
+  "accesstoken",
+  "accesskey",
   "authorization",
+  "authtoken",
+  "cookie",
+  "clientsecret",
+  "credential",
+  "credentials",
+  "databaseurl",
+  "dburl",
+  "idtoken",
+  "password",
+  "privatekey",
+  "refreshtoken",
+  "session",
+  "sessionid",
+  "secret",
+  "secretkey",
+  "token",
+]);
+
+const SENSITIVE_INPUT_KEY_SUFFIXES = [
+  "apikey",
+  "apisecret",
+  "accesskey",
+  "accesstoken",
+  "authorization",
+  "authtoken",
+  "clientsecret",
+  "connectionstring",
+  "credential",
+  "credentials",
+  "databaseurl",
+  "dburl",
+  "idtoken",
+  "password",
+  "privatekey",
+  "refreshtoken",
+  "secret",
+  "secretkey",
+  "session",
+  "sessionid",
+  "token",
+];
+
+const VOLATILE_INPUT_KEY_NAMES = new Set([
+  "asjob",
   "background",
   "client_run_id",
   "clientrunid",
-  "idempotency_key",
   "idempotencykey",
-  "request_id",
   "requestid",
-  "timeout_ms",
   "job_timeout_ms",
-  "as_job",
+  "jobtimeoutms",
+  "timeoutms",
 ]);
+
+function normalizedInputKey(key) {
+  return String(key || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function isSensitiveInputKey(key) {
+  const normalized = normalizedInputKey(key);
+  return SENSITIVE_INPUT_KEY_NAMES.has(normalized)
+    || SENSITIVE_INPUT_KEY_SUFFIXES.some(suffix => normalized.endsWith(suffix));
+}
+
+export function sanitizeJobInput(value) {
+  if (Array.isArray(value)) return value.map(sanitizeJobInput);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !isSensitiveInputKey(key))
+    .map(([key, child]) => [key, sanitizeJobInput(child)])
+  );
+}
 
 function canonicalInput(value) {
   if (Array.isArray(value)) return value.map(canonicalInput);
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(Object.keys(value)
     .sort()
-    .filter(key => {
-      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-      return !SECRET_OR_VOLATILE_INPUT_KEYS.has(key.toLowerCase())
-        && !SECRET_OR_VOLATILE_INPUT_KEYS.has(normalized)
-        && !/(secret|token|password|credential)/i.test(key);
-    })
+    .filter(key => !VOLATILE_INPUT_KEY_NAMES.has(normalizedInputKey(key)))
     .map(key => [key, canonicalInput(value[key])])
   );
 }
 
 export function digestJobInput(input = {}) {
-  return crypto.createHash("sha256").update(JSON.stringify(canonicalInput(input))).digest("hex");
+  return crypto.createHash("sha256").update(JSON.stringify(canonicalInput(sanitizeJobInput(input)))).digest("hex");
 }
 
 function stringValue(value) {
@@ -222,7 +281,8 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
     input_digest = "",
     ...identityInput
   } = {}) {
-    const identity = normalizeJobIdentity({ ...identityInput, type, input });
+    const safeInput = sanitizeJobInput(input);
+    const identity = normalizeJobIdentity({ ...identityInput, type, input: safeInput });
     const ts = isoNow(now);
     const safeStatus = normalizeStatus(status);
     return {
@@ -236,8 +296,8 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
       project_id: identity.project_id,
       build_id: identity.build_id,
       idempotency_key: identity.idempotency_key,
-      input_digest: String(inputDigest || input_digest || digestJobInput(input)),
-      input,
+      input_digest: String(inputDigest || input_digest || digestJobInput(safeInput)),
+      input: safeInput,
       output,
       error,
       choices: Array.isArray(choices) ? choices : [],
@@ -267,9 +327,13 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
     );
   }
 
-  function updateJob(id, patch = {}) {
-    const existing = getJob(id);
-    if (!existing) throw new Error(`Job not found: ${id}`);
+  function updateJob(id, patch = {}, organizationId = "") {
+    const scopedOrganization = stringValue(organizationId);
+    const existing = scopedOrganization ? getJobForOrganization(id, scopedOrganization) : getJob(id);
+    if (!existing) {
+      if (scopedOrganization) return null;
+      throw new Error(`Job not found: ${id}`);
+    }
     const next = {
       ...existing,
       ...patch,
@@ -284,7 +348,7 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
       `UPDATE jobs
        SET status = ?, phase = ?, output_json = ?, error_json = ?, choices_json = ?,
            logs_json = ?, cancel_requested = ?, updated_at = ?, started_at = ?, completed_at = ?
-       WHERE id = ?`,
+       WHERE id = ?${scopedOrganization ? " AND organization_id = ?" : ""}`,
       [
         next.status,
         next.phase || "",
@@ -297,9 +361,10 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
         next.started_at || "",
         next.completed_at || "",
         id,
+        ...(scopedOrganization ? [scopedOrganization] : []),
       ]
     );
-    return getJob(id);
+    return scopedOrganization ? getJobForOrganization(id, scopedOrganization) : getJob(id);
   }
 
   return {
@@ -336,10 +401,15 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
       const legacyRows = query(db, "SELECT id, input_json, organization_id, input_digest FROM jobs");
       for (const legacy of legacyRows) {
         const input = parseJson(legacy.input_json, {});
-        const organizationId = stringValue(legacy.organization_id) || legacyOrganizationId(input);
-        const inputDigest = stringValue(legacy.input_digest) || digestJobInput(input);
-        if (organizationId !== stringValue(legacy.organization_id) || inputDigest !== stringValue(legacy.input_digest)) {
-          db.run("UPDATE jobs SET organization_id = ?, input_digest = ? WHERE id = ?", [organizationId, inputDigest, legacy.id]);
+        const safeInput = sanitizeJobInput(input);
+        const organizationId = stringValue(legacy.organization_id) || legacyOrganizationId(safeInput);
+        const inputDigest = digestJobInput(safeInput);
+        if (
+          organizationId !== stringValue(legacy.organization_id)
+          || inputDigest !== stringValue(legacy.input_digest)
+          || stringifyJson(input, {}) !== stringifyJson(safeInput, {})
+        ) {
+          db.run("UPDATE jobs SET organization_id = ?, input_digest = ?, input_json = ? WHERE id = ?", [organizationId, inputDigest, stringifyJson(safeInput, {}), legacy.id]);
         }
       }
       db.run("CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at)");
@@ -458,6 +528,19 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
       return updateJob(id, patch);
     },
 
+    claimJob(id) {
+      const updatedAt = isoNow(now);
+      db.run(
+        `UPDATE jobs
+         SET status = ?, phase = ?, updated_at = ?, started_at = CASE WHEN COALESCE(started_at, '') = '' THEN ? ELSE started_at END
+         WHERE id = ? AND status = ? AND cancel_requested = 0`,
+        [JOB_STATUS.RUNNING, "starting", updatedAt, updatedAt, String(id || ""), JOB_STATUS.QUEUED]
+      );
+      if (Number(db.getRowsModified?.() || 0) < 1) return null;
+      saveDb();
+      return getJob(id);
+    },
+
     appendLog(id, message, data = {}, phase = "") {
       const job = getJob(id);
       if (!job) throw new Error(`Job not found: ${id}`);
@@ -484,6 +567,20 @@ export function createJobStore(db, saveDb = () => {}, options = {}) {
         error: canceled ? { errorType: "job_canceled", message: "Job canceled before it started." } : job.error,
         choices: canceled ? [] : job.choices,
       });
+    },
+
+    requestCancelForOrganization(id, organizationId) {
+      const job = getJobForOrganization(id, organizationId);
+      if (!job) return null;
+      if (FINAL_STATUSES.has(job.status)) return job;
+      const canceled = job.status === JOB_STATUS.QUEUED;
+      return updateJob(id, {
+        cancel_requested: true,
+        status: canceled ? JOB_STATUS.CANCELED : job.status,
+        phase: canceled ? "canceled" : job.phase,
+        error: canceled ? { errorType: "job_canceled", message: "Job canceled before it started." } : job.error,
+        choices: canceled ? [] : job.choices,
+      }, organizationId);
     },
 
     isCancelRequested(id) {
