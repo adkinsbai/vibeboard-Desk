@@ -1,0 +1,20 @@
+[Unit]
+Description=VibeBoard application service
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vibeboard
+Group=vibeboard
+WorkingDirectory=/home/lincaigui/vibeboard/app
+EnvironmentFile=/home/lincaigui/vibeboard/secrets/vibeboard.env
+ExecStart=/usr/local/lib/vibeboard/bin/node server.mjs
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

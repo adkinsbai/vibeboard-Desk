@@ -1,0 +1,8 @@
+[Unit]
+Description=VibeBoard PostgreSQL backup
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/lincaigui/vibeboard/app/deploy/backup-postgres.sh
