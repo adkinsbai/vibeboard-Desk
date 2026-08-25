@@ -1,3 +1,5 @@
+import { MODEL_WRITABLE_FILE_NAMES } from "./hardwareContractFirewall.mjs";
+
 const WRITABLE = new Set(["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"]);
 
 export function createAgentTaskContract(input = {}) {
@@ -7,12 +9,13 @@ export function createAgentTaskContract(input = {}) {
     80,
   );
   if (required.some(name => !WRITABLE.has(name))) {
-    throw new Error("agent task contract required_files contains a non-writable file");
+    throw new Error("agent task contract required_files contains a non-contract file");
   }
   return Object.freeze({
     schema_version: "agent-task-contract.v1",
     objective: bounded(input.objective, 1200),
     required_files: Object.freeze(required),
+    model_writable_files: Object.freeze([...MODEL_WRITABLE_FILE_NAMES]),
     acceptance_criteria: Object.freeze(uniqueStrings(input.acceptanceCriteria, 24, 240)),
     forbidden: Object.freeze(uniqueStrings(input.forbidden, 16, 180)),
     screen: Object.freeze({ width: 480, height: 360, touch: false }),
@@ -28,6 +31,8 @@ export function taskContractPrompt(contract) {
     `Schema: ${contract.schema_version}`,
     `Objective: ${contract.objective}`,
     `Required files: ${contract.required_files.join(", ")}`,
+    `Model writable files: ${contract.model_writable_files?.join(", ") || ""}`,
+    "System-owned files: hardware_app.py, manifest.json (the model must not create, edit, or delete them)",
     "Acceptance criteria:",
     ...contract.acceptance_criteria.map(item => `- ${item}`),
     "Forbidden:",

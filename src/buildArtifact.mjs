@@ -90,7 +90,8 @@ export async function loadGeneratedWorkspace(dir, generatedFileNames, fallbackSe
     dir,
     built: Boolean(manifest.id),
     deployed: false,
-    manifest
+    manifest,
+    contractHash: String(manifest.contractHash || manifest.contract_hash || "").trim(),
   };
 }
 

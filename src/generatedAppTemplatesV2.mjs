@@ -1985,6 +1985,14 @@ result = {
     "available_apis": ["/api/status", "./hardware-result.json", "/api/audio/status", "/api/audio/play", "/api/audio/record", "/api/audio/stop"]
 }
 
+try:
+    with open("hardware-result.json", "w", encoding="utf-8") as handle:
+        json.dump(result, handle, ensure_ascii=False, sort_keys=True)
+except OSError:
+    # The build runtime also materializes this artifact from stdout. Keep the
+    # direct Agent simulation tolerant of read-only execution directories.
+    pass
+
 print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 `;
 }

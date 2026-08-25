@@ -17,11 +17,16 @@ import http from "http";
 import { execFile } from "child_process";
 import {
   APP_CONTRACT_SNIPPETS,
-  AGENT_WRITABLE_FILE_NAMES,
   HARDWARE_CONTRACT_SNIPPETS,
   REQUIRED_RUNTIME_FILE_NAMES,
   validationRulesText,
 } from "./contracts.mjs";
+import {
+  filterDeployableFiles,
+  isAgentWritableFile,
+  validateDeployConfirmation,
+  MODEL_WRITABLE_FILE_NAMES,
+} from "./hardwareContractFirewall.mjs";
 import {
   executePythonRunner,
   isPythonRunnerTransportError,
@@ -29,6 +34,7 @@ import {
   resolvePythonRunnerConfig,
 } from "./pythonRunnerClient.mjs";
 import { createAgentTaskContract, taskContractPrompt } from "./agentTaskContract.mjs";
+import { generatedHardwareAppV2 } from "./generatedAppTemplatesV2.mjs";
 import { compactAgentMessages } from "./agentContextBudget.mjs";
 import { createAgentLoopGuard } from "./agentLoopGuard.mjs";
 import { createAgentRunTelemetry, publicAgentRunTelemetry } from "./agentRunTelemetry.mjs";
@@ -44,7 +50,7 @@ const MAX_HISTORY_MESSAGES = 20;
 const MAX_HISTORY_CONTENT_CHARS = 4000;
 const MAX_NO_TOOL_RESPONSES = 3;
 const REQUIRED_RUNTIME_FILES = [...REQUIRED_RUNTIME_FILE_NAMES];
-const AGENT_WRITABLE_FILES = new Set(AGENT_WRITABLE_FILE_NAMES);
+const MODEL_WRITABLE_FILES = new Set(MODEL_WRITABLE_FILE_NAMES);
 const GENERATION_TOOL_NAMES = new Set([
   "read_file",
   "list_files",
@@ -338,8 +344,8 @@ export function createToolExecutor(fileStore, hardware = null) {
         const filePath = String(args.path || "").trim();
         const oldText = typeof args.old_text === "string" ? args.old_text : null;
         const newText = typeof args.new_text === "string" ? args.new_text : null;
-        if (!isWritableAgentFile(filePath)) {
-          action.result = `错误：生成阶段只允许修改 ${[...AGENT_WRITABLE_FILES].join(", ")}，不能修改 ${filePath}`;
+        if (!isAgentWritableFile(filePath)) {
+          action.result = `错误：不能修改 ${filePath}；该文件由系统后处理，生成阶段只允许修改 ${[...MODEL_WRITABLE_FILES].join(", ")}`;
           action.args = { path: filePath, blocked: true };
           actions.push(action);
           return action.result;
@@ -383,8 +389,8 @@ export function createToolExecutor(fileStore, hardware = null) {
       case "create_file": {
         const filePath = String(args.path || "").trim();
         const content = typeof args.content === "string" ? args.content : null;
-        if (!isWritableAgentFile(filePath)) {
-          action.result = `错误：生成阶段只允许创建 ${[...AGENT_WRITABLE_FILES].join(", ")}，不能创建 ${filePath}`;
+        if (!isAgentWritableFile(filePath)) {
+          action.result = `错误：不能创建 ${filePath}；该文件由系统后处理，生成阶段只允许创建 ${[...MODEL_WRITABLE_FILES].join(", ")}`;
           action.args = { path: filePath, blocked: true };
           actions.push(action);
           return action.result;
@@ -790,14 +796,32 @@ export function createToolExecutor(fileStore, hardware = null) {
       }
 
       case "deploy_to_device": {
+        const confirmation = validateDeployConfirmation(args.confirmation || args.deployConfirmation || args);
+        const deployFiles = filterDeployableFiles(fileStore, {
+          generatedFileNames: [...REQUIRED_RUNTIME_FILES, "manifest.json"],
+        });
+        const files = Object.keys(deployFiles).filter(name => name !== "manifest.json");
+        if (!confirmation.ok) {
+          action.result = [
+            "❌ 部署确认被拒绝:",
+            ...confirmation.issues.map(issue => "- " + issue.message),
+          ].join("\n");
+          action.args = {
+            blocked: true,
+            issues: confirmation.issues,
+          };
+          actions.push(action);
+          return action.result;
+        }
+
         if (!hardware?.ssh || !hardware?.scp) {
-          const hwResult = fileStore["hardware_app.py"]
+          const hwResult = deployFiles["hardware_app.py"]
             ? await executeTool("run_hardware", {})
             : "⚠️ 未提供 hardware_app.py，跳过本地硬件脚本验证";
           action.result = [
             "⚠️ 硬件未配置，已使用模拟部署模式。",
             `模拟目标: /opt/vibeboard/current`,
-            `文件数量: ${Object.keys(fileStore).filter(f => f !== "manifest.json").length}`,
+            "文件数量: " + files.length,
             "",
             hwResult,
           ].join("\n");
@@ -806,7 +830,6 @@ export function createToolExecutor(fileStore, hardware = null) {
           return action.result;
         }
         try {
-          const files = Object.keys(fileStore).filter(f => f !== "manifest.json");
           if (files.length === 0) {
             action.result = "❌ 没有文件可部署";
             actions.push(action);
@@ -819,7 +842,8 @@ export function createToolExecutor(fileStore, hardware = null) {
 
           // 2. 写入文件
           for (const name of files) {
-            await fs.writeFile(path.join(tmpDir, name), fileStore[name], "utf-8");
+            await fs.mkdir(path.dirname(path.join(tmpDir, name)), { recursive: true });
+            await fs.writeFile(path.join(tmpDir, name), deployFiles[name], "utf-8");
           }
 
           // 3. SCP 上传到设备
@@ -832,7 +856,7 @@ export function createToolExecutor(fileStore, hardware = null) {
 
           // 4. 运行 hardware_app.py
           let runOutput = "";
-          if (fileStore["hardware_app.py"]) {
+          if (deployFiles["hardware_app.py"]) {
             try {
               runOutput = await hardware.ssh(`cd ${remoteDir} && python3 hardware_app.py 2>&1`, 15000);
             } catch (e) {
@@ -956,6 +980,7 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
   const { executeTool, actions, lessons: sessionLessons, getFileStore } = createToolExecutor(fileStore, hardware);
   const telemetry = createAgentRunTelemetry();
   const loopGuard = createAgentLoopGuard();
+  const routeProfile = normalizeRouteProfile(runOptions.routeProfile);
   const emitProgress = (type, detail = {}) => {
     if (typeof runOptions.onProgress !== "function") return;
     try {
@@ -972,7 +997,7 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
       elapsedMs: publicTelemetry.duration_ms,
       message: reason,
     });
-    return { ...result, telemetry: publicTelemetry };
+    return { ...result, telemetry: publicTelemetry, route_profile: routeProfile };
   };
   const isEditing = Object.keys(fileStore).length > 0;
 
@@ -1019,8 +1044,20 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
   });
 
   const configuredMaxIterations = Number(settings.maxIterations || process.env.VIBEBOARD_AGENT_MAX_ITERATIONS || DEFAULT_MAX_ITERATIONS);
-  const maxIterations = Math.max(1, Math.min(configuredMaxIterations, taskContract.max_model_turns));
-  const maxVerificationAttempts = Number(settings.maxVerificationAttempts || process.env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS || DEFAULT_MAX_VERIFICATION_ATTEMPTS);
+  const maxIterations = Math.max(1, Math.min(
+    configuredMaxIterations,
+    taskContract.max_model_turns,
+    routeProfile?.max_model_turns || Number.MAX_SAFE_INTEGER,
+  ));
+  const configuredVerificationAttempts = Number(
+    settings.maxVerificationAttempts ??
+    process.env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS ??
+    DEFAULT_MAX_VERIFICATION_ATTEMPTS,
+  );
+  const maxVerificationAttempts = Math.max(0, Math.min(
+    configuredVerificationAttempts,
+    routeProfile?.max_verification_attempts ?? Number.MAX_SAFE_INTEGER,
+  ));
   const agentTimeoutMs = Math.max(1000, Number(settings.timeoutMs || process.env.VIBEBOARD_AGENT_TIMEOUT_MS || AGENT_TIMEOUT_MS));
   const agentDeadlineAt = Date.now() + agentTimeoutMs;
   let summary = "";
@@ -1098,7 +1135,9 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
     const toolCalls = response.tool_calls || [];
 
     if (toolCalls.length === 0) {
-      const completionIssues = getCompletionIssues(getFileStore());
+      const completionFiles = getFileStore();
+      ensureSystemHardwareApp(completionFiles, prompt);
+      const completionIssues = getCompletionIssues(completionFiles);
       if (completionIssues.length > 0) {
         const noToolResponses = messages.filter(msg => msg.role === "user" && msg.content?.includes("请继续用工具完成代码生成")).length;
         if (noToolResponses >= MAX_NO_TOOL_RESPONSES) {
@@ -1263,6 +1302,7 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
 
         // 自动验证循环
         if (verificationAttempts < maxVerificationAttempts) {
+          ensureSystemHardwareApp(fileStore, prompt);
           lastVerifyResult = await runAutoVerify();
 
           if (!lastVerifyResult.ok) {
@@ -1315,6 +1355,7 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
   }
 
   const finalFiles = getFileStore();
+  ensureSystemHardwareApp(finalFiles, prompt);
   const finalIssues = getCompletionIssues(finalFiles);
   if (finalIssues.length === 0) {
     if (!lastVerifyResult?.ok && verificationAttempts < maxVerificationAttempts) {
@@ -1427,8 +1468,35 @@ function normalizeChatRole(role) {
   return null;
 }
 
-function isWritableAgentFile(filePath) {
-  return AGENT_WRITABLE_FILES.has(String(filePath || ""));
+function normalizeRouteProfile(value) {
+  if (!value || typeof value !== "object") return null;
+  const route = String(value.route || "").trim();
+  if (!route) return null;
+  return {
+    schema_version: String(value.schema_version || "task-route.v1"),
+    route,
+    score: Number.isFinite(Number(value.score)) ? Number(value.score) : 0,
+    confidence: Number.isFinite(Number(value.confidence)) ? Number(value.confidence) : 0,
+    max_model_turns: Number.isFinite(Number(value.max_model_turns)) ? Math.max(1, Math.floor(Number(value.max_model_turns))) : null,
+    max_verification_attempts: Number.isFinite(Number(value.max_verification_attempts)) ? Math.max(0, Math.floor(Number(value.max_verification_attempts))) : null,
+    repair_attempts: Number.isFinite(Number(value.repair_attempts)) ? Math.max(0, Math.floor(Number(value.repair_attempts))) : null,
+    reasons: Array.isArray(value.reasons) ? value.reasons.map(String).slice(0, 12) : [],
+    hard_gates: Array.isArray(value.hard_gates) ? value.hard_gates.map(String).slice(0, 12) : [],
+  };
+}
+
+function ensureSystemHardwareApp(fileStore, prompt = "") {
+  if (!fileStore || typeof fileStore !== "object") return false;
+  if (typeof fileStore["hardware_app.py"] === "string" && fileStore["hardware_app.py"].trim()) return false;
+  if (typeof fileStore["app.js"] !== "string" || !fileStore["app.js"].trim()) return false;
+  // The model never owns this file. Keep a deterministic system fallback for
+  // direct Agent callers; the normal generate runtime injects the same
+  // contract during finalization.
+  fileStore["hardware_app.py"] = generatedHardwareAppV2(
+    prompt,
+    `agent-system-${Date.now().toString(36)}`,
+  );
+  return true;
 }
 
 function getCompletionIssues(files = {}) {
@@ -1917,10 +1985,10 @@ function buildAgentSystemPrompt(isEditing, fileStore, userPreferences = {}, less
 
 ### Phase 2: 编码
 4. 用 create_file 或 edit_file 生成/修改代码
-   - 全新项目应在同一次回复中并行调用多个 create_file，一次生成 index.html、style.css、app.js、hardware_app.py
+   - 全新项目应在同一次回复中并行调用多个 create_file，一次生成 index.html、style.css、app.js
    - 独立的读取或写入应尽量在同一次回复中发出多个工具调用，减少模型往返
 5. 完成一组相关修改后用 verify_syntax 做轻量检查，不要每改一行都验证
-6. 生成阶段只能创建或修改 index.html、style.css、app.js、hardware_app.py。不要创建 _encode.py、_run.sh、test 文件或任何临时辅助文件
+6. 生成阶段只能创建或修改 index.html、style.css、app.js。hardware_app.py 和 manifest.json 由系统生成与锁定，不能通过工具创建、修改或删除。不要创建 _encode.py、_run.sh、test 文件或任何临时辅助文件
 
 ### Phase 3: 自我验证
 7. 主动调用 done 后，系统会自动执行语法、渲染和硬件脚本验证
@@ -1939,10 +2007,10 @@ function buildAgentSystemPrompt(isEditing, fileStore, userPreferences = {}, less
 - **实时记录**：发现陷阱或好模式时立即用 record_lesson 记录，不要等 done
 - **经验积累**：记录什么有效、什么失败
 - **硬件 SDK 只调用不重写**：window.VibeBoardHardware 由系统在 app.js 开头自动注入并锁定。你可以调用 getStatus()、getProgramResult()、getSnapshot() 和 audio.*，但不要重新定义、覆盖或删除 window.VibeBoardHardware。
-- **hardware_app.py 合同由系统兜底**：你可以让 hardware_app.py 输出业务 JSON，但系统会自动包装 build_id、runtime、hostname、available_apis。不要手写复杂硬件合同 wrapper，也不要删改合同字段。
+- **hardware_app.py 由系统管理**：不要创建、修改或删除它；系统会在完成和修复后注入硬件合同。硬件业务逻辑应通过受支持的 UI/硬件 API 调用表达。
 - **修复时最小改动**：如果验证提示硬件合同失败，优先修 UI 业务代码或业务 JSON 输出；不要大段重写硬件 SDK/function。
 
-${isEditing ? `## 当前项目\n项目已有 ${fileList.length} 个文件：${fileList.join(", ")}\n用户要求修改这个已有的项目。先读取相关文件，再做修改。` : `## 新项目\n用户要求创建一个新项目。用 create_file 创建所有需要的文件。\n必须创建：index.html, style.css, app.js, hardware_app.py`}
+${isEditing ? `## 当前项目\n项目已有 ${fileList.length} 个文件：${fileList.join(", ")}\n用户要求修改这个已有的项目。先读取相关文件，再做修改。系统会在完成后保留并重新注入硬件合同文件。` : `## 新项目\n用户要求创建一个新项目。用 create_file 创建 index.html、style.css、app.js；hardware_app.py 和 manifest.json 会由系统在完成后生成。`}
 
 ## 文件规范
 ${validationRulesText("zh").map(rule => `- ${rule}`).join("\n")}

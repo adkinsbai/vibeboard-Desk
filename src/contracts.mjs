@@ -14,7 +14,12 @@ export const GENERATED_FILES = Object.freeze([
 export const HARDWARE_RESULT_FILE = "hardware-result.json";
 export const GENERATED_WORKSPACE_DIR = "generated/current";
 export const REQUIRED_RUNTIME_FILE_NAMES = Object.freeze(GENERATED_FILES.filter(name => name !== "manifest.json"));
-export const AGENT_WRITABLE_FILE_NAMES = REQUIRED_RUNTIME_FILE_NAMES;
+export const MODEL_WRITABLE_FILE_NAMES = Object.freeze(["index.html", "style.css", "app.js"]);
+// Compatibility name retained for callers that use this export as the model
+// write allowlist. System-generated runtime files remain deployable, but are
+// not writable by the model.
+export const AGENT_WRITABLE_FILE_NAMES = MODEL_WRITABLE_FILE_NAMES;
+export const SYSTEM_GENERATED_FILE_NAMES = Object.freeze(["hardware_app.py", "manifest.json"]);
 export const CONVERSATION_SNAPSHOT_FILE_NAMES = Object.freeze([
   ...GENERATED_FILES,
   HARDWARE_RESULT_FILE,
@@ -65,7 +70,8 @@ export const HARDWARE_PROFILE = Object.freeze({
 export const HARDWARE_APP_CONTRACT = Object.freeze({
   generatedFiles: GENERATED_FILES,
   runtimeFiles: REQUIRED_RUNTIME_FILE_NAMES,
-  writableFiles: AGENT_WRITABLE_FILE_NAMES,
+  writableFiles: MODEL_WRITABLE_FILE_NAMES,
+  systemGeneratedFiles: SYSTEM_GENERATED_FILE_NAMES,
   snapshotFiles: CONVERSATION_SNAPSHOT_FILE_NAMES,
   hardwareResultFile: HARDWARE_RESULT_FILE,
   generatedWorkspaceDir: GENERATED_WORKSPACE_DIR,
@@ -142,7 +148,8 @@ export function hardwareContractPromptText(language = "zh") {
       `输入: ${SCREEN_CONTRACT.input.join(", ")} 物理按键`,
       `输出/运行时数据: ${REQUIRED_RUNTIME_APIS.join(", ")}`,
       `生成文件: ${GENERATED_FILES.join(", ")}`,
-      `生成阶段可写文件: ${AGENT_WRITABLE_FILE_NAMES.join(", ")}`,
+      `模型生成阶段可写文件: ${MODEL_WRITABLE_FILE_NAMES.join(", ")}`,
+      `系统生成文件: ${SYSTEM_GENERATED_FILE_NAMES.join(", ")}`,
       `硬件结果文件: ${GENERATED_WORKSPACE_DIR}/${HARDWARE_RESULT_FILE}`,
     ].join("\n");
   }
@@ -154,7 +161,8 @@ export function hardwareContractPromptText(language = "zh") {
     `Runtime data: ${REQUIRED_RUNTIME_APIS.join(", ")}`,
     `Generated files: ${GENERATED_FILES.join(", ")}`,
     `Optional assets: ${ASSET_CONTRACT.directory}/ only, declared in manifest.json assets[], no HTML/JS/CSS/EXE.`,
-    `Writable during generation: ${AGENT_WRITABLE_FILE_NAMES.join(", ")}`,
+    `Model-writable during generation: ${MODEL_WRITABLE_FILE_NAMES.join(", ")}`,
+    `System-generated files: ${SYSTEM_GENERATED_FILE_NAMES.join(", ")}`,
     `Hardware result: ${GENERATED_WORKSPACE_DIR}/${HARDWARE_RESULT_FILE}`,
   ].join("\n");
 }

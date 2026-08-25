@@ -15,6 +15,7 @@ import {
   transitionRun,
 } from "./agentStateMachine.mjs";
 import { writeGeneratedFiles } from "./buildArtifact.mjs";
+import { routeToExecutionProfile, scoreTaskRoute } from "./taskRoutePolicy.mjs";
 
 export const GENERATE_RUNTIME_DEFAULTS = Object.freeze({
   maxIterations: 18,
@@ -70,6 +71,7 @@ export function createGenerateRuntime(deps = {}) {
     setCurrentBuild,
     createBuildHandle = defaultCreateBuildHandle,
     projectWorkspace = null,
+    contextRetriever = null,
     formatMemoryForPrompt = formatProjectMemoryForPrompt,
     log = console,
   } = deps;
@@ -98,7 +100,7 @@ export function createGenerateRuntime(deps = {}) {
         ? await conversationStore.getProjectMemory(conversationId)
         : normalizeProjectMemory();
       const assetContext = conversationId && assetLibraryStore?.promptContext
-        ? assetLibraryStore.promptContext(conversationId)
+        ? assetLibraryStore.promptContext(conversationId, { query: rawPrompt, limit: 12, includeReferenceOnly: true })
         : "";
       const projectFilesContext = await formatProjectFilesContext(projectWorkspace, conversationId);
       const embeddedAssets = conversationId && assetLibraryStore?.generatedAssets
@@ -107,12 +109,30 @@ export function createGenerateRuntime(deps = {}) {
       const conversationFiles = conversationId
         ? (await conversationStore.loadConversationFiles(conversationId)).files
         : {};
+      const routeScore = scoreTaskRoute({
+        prompt: String(body.raw_user_prompt || rawPrompt),
+        action: body.action || "confirm_build",
+        projectFiles: Object.keys(conversationFiles).filter(name => name !== "manifest.json"),
+        projectMemory: projectMemoryForRouting(projectMemory),
+        assets: listAssetsForRouting(assetLibraryStore, conversationId),
+      });
+      const routeProfile = routeToExecutionProfile(routeScore.route, routeScore);
+      execution.routeProfile = routeProfile;
+      const retrievedContext = await loadRuntimeContext({
+        contextRetriever,
+        conversationId,
+        query: rawPrompt,
+        projectId: conversationId,
+        organizationId: body.organization_id || body.organizationId || "",
+        actorId: body.actor_id || body.actorId || body.user_id || "",
+      });
+      execution.contextRetrieval = retrievedContext.meta;
 
       const settings = normalizeModelSettings(modelSettings);
       const history = await compressHistory(normalizedHistory, settings);
       const userPreferences = memoryStore.getAll();
       const prompt = buildRefinedPrompt(
-        `${rawPrompt}${formatMemoryForPrompt(projectMemory)}${formatAgentModeForPrompt(agentMode)}${assetContext}${projectFilesContext}${formatEmbeddedAssetContext(embeddedAssets)}`,
+        `${rawPrompt}${formatMemoryForPrompt(projectMemory)}${retrievedContext.text}${formatAgentModeForPrompt(agentMode)}${assetContext}${projectFilesContext}${formatEmbeddedAssetContext(embeddedAssets)}`,
         clarifyAnswers,
         userPreferences,
       );
@@ -140,7 +160,7 @@ export function createGenerateRuntime(deps = {}) {
       const fileStore = { ...conversationFiles };
       const isEditing = Object.keys(fileStore).some(name => name !== "manifest.json");
       const agentStartedAt = Date.now();
-      const agentSettings = buildGenerateAgentSettings(settings, env, positiveInt, defaults);
+      const agentSettings = buildGenerateAgentSettings(settings, env, positiveInt, defaults, routeProfile);
 
       return await runBuildGraph({
         prompt,
@@ -156,6 +176,8 @@ export function createGenerateRuntime(deps = {}) {
         agentMode,
         embeddedAssets,
         taskContract,
+        routeProfile,
+        contextRetrieval: retrievedContext.meta,
       }, {
         agentGenerate: async () => runAgentGenerate({
           prompt,
@@ -169,6 +191,7 @@ export function createGenerateRuntime(deps = {}) {
           agentMode,
           embeddedAssets,
           taskContract,
+          routeProfile,
           agentStartedAt,
           execution,
         }),
@@ -178,6 +201,7 @@ export function createGenerateRuntime(deps = {}) {
           modelSettings,
           embeddedAssets,
           execution,
+          routeProfile,
         }),
         saveSnapshot: async state => saveSnapshot({ state, conversationId, embeddedAssets, rawPrompt }),
       });
@@ -207,6 +231,7 @@ export function createGenerateRuntime(deps = {}) {
     agentMode,
     embeddedAssets,
     taskContract,
+    routeProfile,
     agentStartedAt,
     execution,
   }) {
@@ -232,6 +257,7 @@ export function createGenerateRuntime(deps = {}) {
       maxIterations: agentSettings.maxIterations,
       maxVerificationAttempts: agentSettings.maxVerificationAttempts,
       repairAttempts: agentSettings.repairAttempts,
+      route: routeProfile?.route || "",
       timeoutMs: agentSettings.timeoutMs,
       llmTimeoutMs: agentSettings.llmTimeoutMs,
     });
@@ -248,6 +274,7 @@ export function createGenerateRuntime(deps = {}) {
         }).catch(() => {});
       }, userPreferences, experienceStore, { ssh, scp, board: getBoard() }, {
         taskContract,
+        routeProfile,
         onProgress: event => appendServerLog("generate.agent.progress", event).catch(() => {}),
       });
     } catch (agentErr) {
@@ -312,6 +339,8 @@ export function createGenerateRuntime(deps = {}) {
       deployed: false,
       manifest,
       conversationId,
+      routeProfile,
+      contextRetrieval: execution.contextRetrieval,
     });
     await writeGeneratedFiles(build.workspaceDir, agentFiles);
     let agentRun = transitionRun(createAgentRun({
@@ -350,6 +379,8 @@ export function createGenerateRuntime(deps = {}) {
       agentStartedAt,
       build,
       context: execution.context,
+      routeProfile,
+      taskContract,
     });
     agentFiles = repairReport.files || agentFiles;
     manifest = repairReport.manifest || manifest;
@@ -368,6 +399,10 @@ export function createGenerateRuntime(deps = {}) {
       repeatedActionBlocks: agentResult.telemetry?.repeated_action_blocks ?? 0,
       verificationAttempts: agentResult.telemetry?.verification_attempts ?? 0,
       durationMs: Date.now() - agentStartedAt,
+      routeScore: routeProfile?.score ?? null,
+      routeReasons: routeProfile?.reasons || [],
+      retrievalEntryCount: execution.contextRetrieval?.entryCount ?? null,
+      retrievalDegraded: execution.contextRetrieval?.degraded ?? false,
     });
 
     return {
@@ -386,6 +421,7 @@ export function createGenerateRuntime(deps = {}) {
       agentTelemetry: agentResult.telemetry || null,
       repairSummary: repairReport.summary || "",
       repairAttempts: repairReport.attempts || 0,
+      routeProfile,
       agentActions: (agentResult.actions || []).map(a => ({
         tool: a.tool,
         path: a.args?.path,
@@ -409,6 +445,8 @@ export function createGenerateRuntime(deps = {}) {
     agentStartedAt,
     build,
     context,
+    routeProfile,
+    taskContract,
   }) {
     let files = agentFiles;
     let currentManifest = manifest;
@@ -427,8 +465,8 @@ export function createGenerateRuntime(deps = {}) {
         }
         return {
           ok: true,
-          files,
-          manifest: currentManifest,
+          files: build.files && Object.keys(build.files).length ? build.files : files,
+          manifest: build.manifest || currentManifest,
           attempts: attempt,
           summary: attempt > 0 ? `Agent 自动修复 ${attempt} 轮后通过 L0-L3 验证。` : "",
         };
@@ -466,6 +504,8 @@ export function createGenerateRuntime(deps = {}) {
           userPreferences,
           embeddedAssets,
           agentResult,
+          routeProfile,
+          taskContract,
         });
         if (!repair.ok) {
           lastError = repair.error || buildErr;
@@ -533,6 +573,8 @@ export function createGenerateRuntime(deps = {}) {
     userPreferences,
     embeddedAssets,
     agentResult,
+    routeProfile,
+    taskContract,
   }) {
     const repairPrompt = buildRepairPrompt({
       prompt,
@@ -577,6 +619,8 @@ export function createGenerateRuntime(deps = {}) {
         experienceStore,
         { ssh, scp, board: getBoard() },
         {
+          routeProfile,
+          taskContract,
           onProgress: event => appendServerLog("generate.agent.progress", {
             ...event,
             repairAttempt: attempt,
@@ -646,13 +690,15 @@ export function createGenerateRuntime(deps = {}) {
     return { files: nextFiles, manifest: nextManifest };
   }
 
-  async function runTemplateGenerate({ prompt, displayPrompt = prompt, modelSettings, embeddedAssets, execution }) {
+  async function runTemplateGenerate({ prompt, displayPrompt = prompt, modelSettings, embeddedAssets, execution, routeProfile }) {
     requireFunction(writeGenerated, "writeGenerated");
     const build = await writeGenerated(prompt, modelSettings, [], embeddedAssets, {
       displayPrompt,
       context: execution.context,
       jobId: execution.jobId,
       conversationId: execution.conversationId,
+      routeProfile,
+      contextRetrieval: execution.contextRetrieval,
     });
     syncGeneratedManifestPrompt(build, displayPrompt);
     if (build?.agentRun?.spec && typeof build.agentRun.spec === "object") {
@@ -665,6 +711,7 @@ export function createGenerateRuntime(deps = {}) {
       files: embedded.files,
       manifest: embedded.manifest || build.manifest || null,
       source: "template",
+      routeProfile,
       spec: build.agentRun?.spec || null,
       evidence: formatRunEvidence(build.agentRun || {}),
       buildEvidence: build.buildEvidence || null,
@@ -841,6 +888,73 @@ function normalizeAgentMode(value) {
   return String(value || "").trim() === "codex" ? "codex" : "vibeboard";
 }
 
+function projectMemoryForRouting(memory = {}) {
+  const normalized = normalizeProjectMemory(memory);
+  return [
+    normalized.summary,
+    normalized.goal,
+    ...normalized.requirements,
+    ...normalized.constraints,
+    ...normalized.decisions,
+    ...normalized.open_questions,
+    normalized.build_prompt,
+  ].filter(Boolean);
+}
+
+function listAssetsForRouting(assetLibraryStore, conversationId = "") {
+  if (!conversationId || typeof assetLibraryStore?.listAssets !== "function") return [];
+  try {
+    return assetLibraryStore.listAssets(conversationId).slice(0, 80).map(asset => ({
+      name: asset.name,
+      kind: asset.kind,
+      usage: asset.usage,
+      category: asset.category,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function loadRuntimeContext({
+  contextRetriever,
+  conversationId = "",
+  projectId = "",
+  organizationId = "",
+  actorId = "",
+  query = "",
+} = {}) {
+  if (!contextRetriever?.loadMemoryContext) {
+    return { text: "", meta: { degraded: false, availableLayers: [], entryCount: 0, errors: [] } };
+  }
+  try {
+    const result = await contextRetriever.loadMemoryContext({
+      organizationId,
+      actorId,
+      projectId: projectId || conversationId,
+      conversationId,
+      query,
+      mode: "build",
+      limit: 18,
+    });
+    return {
+      text: contextRetriever.formatMemoryContext
+        ? `\n\n## Unified retrieved project context\n${contextRetriever.formatMemoryContext(result)}`
+        : "",
+      meta: {
+        degraded: Boolean(result.degraded),
+        availableLayers: result.availableLayers || [],
+        entryCount: Array.isArray(result.entries) ? result.entries.length : 0,
+        errors: (result.errors || []).slice(0, 6),
+      },
+    };
+  } catch (error) {
+    return {
+      text: "",
+      meta: { degraded: true, availableLayers: [], entryCount: 0, errors: [{ source: "contextRetriever", message: error.message }] },
+    };
+  }
+}
+
 function formatAgentModeForPrompt(agentMode = "vibeboard") {
   const mode = normalizeAgentMode(agentMode);
   return `\n\n## Agent execution mode\n${mode === "codex"
@@ -886,11 +1000,11 @@ function buildRepairPrompt({
     hardwareFixHints,
     "",
     "修复规则：",
-    "- 只修改 index.html、style.css、app.js、hardware_app.py、manifest.json。",
+    "- 只修改 index.html、style.css、app.js；hardware_app.py 和 manifest.json 由系统后处理并锁定。",
     "- 优先做最小修复，不要重写无关功能和视觉方向。",
     "- 必须保持 480x360 无滚动小屏合同。",
     "- 必须保持 window.VibeBoardHardware.getStatus/getProgramResult/getSnapshot。",
-    "- 必须保持 hardware_app.py 输出包含 build_id、runtime、available_apis 的 JSON。",
+    "- 不要重写 hardware_app.py；系统会在修复后重新注入 build_id、runtime、available_apis 合同。",
     "- 修复后调用 done；不要请求部署硬件。",
     assetContext,
   ].filter(Boolean).join("\n");
@@ -995,8 +1109,9 @@ export function buildGenerateAgentSettings(
   env = process.env,
   positiveInt = defaultPositiveInt,
   defaults = GENERATE_RUNTIME_DEFAULTS,
+  routeProfile = null,
 ) {
-  return {
+  const base = {
     ...settings,
     maxIterations: positiveInt(
       settings.max_iterations ?? settings.maxIterations ?? env.VIBEBOARD_AGENT_MAX_ITERATIONS,
@@ -1018,6 +1133,19 @@ export function buildGenerateAgentSettings(
       settings.llm_timeout_ms ?? settings.llmTimeoutMs ?? env.VIBEBOARD_AGENT_LLM_TIMEOUT_MS,
       defaults.llmTimeoutMs,
     ),
+  };
+  if (!routeProfile || typeof routeProfile !== "object") return base;
+  return {
+    ...base,
+    maxIterations: routeProfile.max_model_turns > 0
+      ? Math.min(base.maxIterations, Math.floor(routeProfile.max_model_turns))
+      : base.maxIterations,
+    maxVerificationAttempts: Number.isFinite(Number(routeProfile.max_verification_attempts))
+      ? Math.min(base.maxVerificationAttempts, Math.max(0, Math.floor(routeProfile.max_verification_attempts)))
+      : base.maxVerificationAttempts,
+    repairAttempts: Number.isFinite(Number(routeProfile.repair_attempts))
+      ? Math.min(base.repairAttempts, Math.max(0, Math.floor(routeProfile.repair_attempts)))
+      : base.repairAttempts,
   };
 }
 

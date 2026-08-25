@@ -35,6 +35,8 @@ import { chatCompletionsUrl, normalizeModelSettings } from "./src/modelSettings.
 import { createMemoryStore } from "./src/memoryStore.mjs";
 import { declaredAssetPathsFromFiles } from "./src/assetContract.mjs";
 import { createAssetLibraryStore } from "./src/assetLibrary.mjs";
+import { createAssetRelevanceIndex } from "./src/assetRelevanceIndex.mjs";
+import { createContextRetriever } from "./src/contextRetriever.mjs";
 import { createProjectWorkspace } from "./src/projectWorkspace.mjs";
 import { createDigitalLifeStore } from "./src/digitalLife.mjs";
 import { createDigitalLifeRoutes } from "./src/digitalLifeRoutes.mjs";
@@ -61,6 +63,10 @@ import {
   hardwareContractPromptText,
   validationRulesText
 } from "./src/contracts.mjs";
+import {
+  calculateContractHash,
+  validateDeployConfirmation,
+} from "./src/hardwareContractFirewall.mjs";
 import {
   AGENT_PHASES,
   buildInitialSpec,
@@ -435,8 +441,11 @@ if (!isDatabaseUnavailable()) {
   });
 }
 
-const assetLibraryStore = createAssetLibraryStore(sqliteDb, saveDb);
+const assetRelevanceIndex = createAssetRelevanceIndex(sqliteDb, saveDb);
+const assetLibraryStore = createAssetLibraryStore(sqliteDb, saveDb, { relevanceIndex: assetRelevanceIndex });
 assetLibraryStore.initSchema();
+assetRelevanceIndex.initSchema();
+assetRelevanceIndex.rebuild();
 
 const authStore = createAuthStore({ sqliteDb, saveSqlite: saveDb, pg, env: process.env });
 await authStore.initSchema().catch((error) => {
@@ -457,6 +466,86 @@ const projectWorkspace = createProjectWorkspace({
   env: process.env,
   conversationStore,
   assetLibraryStore,
+});
+
+const contextRetriever = createContextRetriever({
+  projectMemory: async input => {
+    if (!input.conversationId || typeof conversationStore.getProjectMemory !== "function") return [];
+    const memory = await conversationStore.getProjectMemory(input.conversationId);
+    return {
+      ...memory,
+      scope: {
+        organizationId: input.organizationId,
+        projectId: input.projectId || input.conversationId,
+        conversationId: input.conversationId,
+      },
+      provenance: { store: "project_persistence", conversation_id: input.conversationId },
+    };
+  },
+  recentMessages: async input => {
+    if (!input.conversationId || typeof conversationStore.listMessages !== "function") return [];
+    const messages = await conversationStore.listMessages(input.conversationId);
+    return messages.slice(-12).map(message => ({
+      content: `${message.role || "message"}: ${message.content || ""}`,
+      updated_at: message.created_at,
+      scope: {
+        organizationId: input.organizationId,
+        projectId: input.projectId || input.conversationId,
+        conversationId: input.conversationId,
+      },
+      provenance: { store: "project_persistence", message_id: message.id || "" },
+    }));
+  },
+  fileSummaries: async input => {
+    if (!input.conversationId || typeof projectWorkspace.listProjectFiles !== "function") return [];
+    const files = await projectWorkspace.listProjectFiles(input.conversationId);
+    return files.slice(0, 80).map(file => ({
+      content: `${file.path || file.name || "file"} (${file.size || 0} bytes)`,
+      updated_at: file.updated_at || file.modified_at,
+      scope: {
+        organizationId: input.organizationId,
+        projectId: input.projectId || input.conversationId,
+      },
+      provenance: { store: "project_workspace", path: file.path || file.name || "" },
+    }));
+  },
+  assetSummaries: async input => {
+    if (!input.conversationId) return [];
+    const ranked = assetLibraryStore.searchRelevantAssets?.(input.conversationId, input.query, {
+      limit: 12,
+      includeReferenceOnly: true,
+    }) || [];
+    return ranked.map(asset => ({
+      content: `${asset.name} ${asset.kind} ${asset.category} ${asset.usage} ${(asset.matched_facets || []).join(" ")}`,
+      confidence: Math.min(1, 0.45 + Number(asset.score || 0) / 200),
+      updated_at: asset.source?.updated_at,
+      scope: {
+        organizationId: input.organizationId,
+        projectId: input.projectId || input.conversationId,
+      },
+      provenance: { store: "asset_relevance_index", asset_id: asset.asset_id },
+    }));
+  },
+  preferences: async input => Object.entries(memoryStore.getAll?.() || {}).map(([key, value]) => ({
+    content: `${key}: ${Array.isArray(value) ? value.join(", ") : String(value)}`,
+    scope: { global: true },
+    provenance: { store: "memory_store", key },
+  })),
+  experiences: async input => {
+    const lessons = experienceStore.getLessons?.("general", 8) || {};
+    return [
+      ...(lessons.pitfalls || []).map(content => ({ content: `pitfall: ${content}`, scope: { global: true } })),
+      ...(lessons.patterns || []).map(content => ({ content: `pattern: ${content}`, scope: { global: true } })),
+      ...(lessons.fixes || []).map(content => ({ content: `fix: ${content}`, scope: { global: true } })),
+    ];
+  },
+  playbooks: async input => (playbookStore.findPlaybooks?.({ taskType: "general", limit: 8, minScore: 0 }) || []).map(playbook => ({
+    content: [playbook.title, playbook.root_cause, playbook.fix, ...(playbook.diagnosis_steps || [])].filter(Boolean).join(" | "),
+    confidence: Math.min(1, 0.3 + Number(playbook.score || 0) / 100),
+    updated_at: playbook.updated_at,
+    scope: { global: true },
+    provenance: { store: "playbook_store", signature: playbook.signature },
+  })),
 });
 
 let BOARD = createBoardConfig();
@@ -2367,6 +2456,8 @@ async function writeGenerated(prompt, modelSettings = {}, history = [], embedded
     built: false,
     deployed: false,
     conversationId: options.conversationId || "",
+    routeProfile: options.routeProfile || null,
+    contextRetrieval: options.contextRetrieval || null,
   });
   await appendServerLog("generate.template.start", { id, prompt: String(prompt || "").slice(0, 160) });
   const generated = await generateFilesForPrompt(prompt, id, modelSettings, history, displayPrompt);
@@ -2773,6 +2864,7 @@ const generateRuntime = createGenerateRuntime({
   setCurrentBuild,
   createBuildHandle: input => buildRegistry.createBuildHandle(input),
   projectWorkspace,
+  contextRetriever,
 });
 
 async function runGenerateRequest(body = {}) {
@@ -2910,6 +3002,7 @@ const { runAgentRequest } = createAgentOrchestrator({
   conversationStore,
   memoryStore,
   assetLibraryStore,
+  contextRetriever,
   recordAgentLearning,
   runGenerateRequest,
 });
@@ -2918,6 +3011,7 @@ async function runDeployRequest(body = {}) {
   const user = body.user_id ? await authStore.userCreditSummary(body.user_id).catch(() => null) : null;
   const resolvedBoard = await resolveRequestBoard(body || {}, user);
   const deviceId = resolvedBoard.id || deviceIdFrom(body || {}, BOARD.id);
+  const deviceSerial = String(body.device || body.serial || body.deviceSerial || "").trim();
   const requestedBuildId = String(body.build_id || body.buildId || "").trim();
   let targetBuild = requestedBuildId ? buildRegistry.getBuildById(requestedBuildId) : currentBuild;
   if (requestedBuildId && !targetBuild) {
@@ -2936,8 +3030,46 @@ async function runDeployRequest(body = {}) {
     await appendServerLog("deploy.skipped", { id: targetBuild?.id || "", mode: result.mode });
     return { ok: true, deviceId, ...result };
   }
+  if (!targetBuild) targetBuild = await loadGeneratedBuild();
+  if (targetBuild && (!targetBuild.built || !targetBuild.buildEvidence)) {
+    await buildCurrent({ build: targetBuild });
+  }
+  if (!targetBuild) {
+    const error = new Error("No generated app. Generate and verify a build before deployment.");
+    error.errorType = "build_not_found";
+    error.statusCode = 404;
+    throw error;
+  }
+  const expectedContractHash = calculateContractHash({
+    buildId: targetBuild.id,
+    files: targetBuild.files || {},
+  });
+  targetBuild.contractHash = expectedContractHash;
+  const deployConfirmation = validateDeployConfirmation({
+    ...(body || {}),
+    deviceId,
+    boundDeviceId: deviceSerial ? deviceId : "",
+    expectedContractHash,
+  });
+  if (!deployConfirmation.ok) {
+    const detail = deployConfirmation.issues.map(issue => issue.message).join(" ");
+    const error = new Error(`Deployment blocked: ${detail}`);
+    error.errorType = "deploy_contract_guard";
+    error.errorLabel = "Deployment confirmation or hardware contract validation failed";
+    error.userMessage = "部署已拦截：需要明确确认、已绑定设备和匹配的硬件契约。";
+    error.suggestion = "请从已绑定设备进入项目，重新点击部署，并使用当前构建重新生成页面。";
+    error.details = deployConfirmation.issues;
+    error.statusCode = 409;
+    throw error;
+  }
   console.log("[deploy] Starting deploy...");
-  await appendServerLog("deploy.start", { id: targetBuild?.id || "", deviceId });
+  await appendServerLog("deploy.start", {
+    id: targetBuild?.id || "",
+    deviceId,
+    deviceSerial: deviceSerial ? "provided" : "missing",
+    contractHash: expectedContractHash,
+    confirmation: "explicit",
+  });
   const result = await withDeployLock(() => withBoardConfig(resolvedBoard, () => deployCurrent(targetBuild, {
     organizationId: String(body.organization_id || body.organizationId || "").trim(),
     projectId: String(body.project_id || body.projectId || body.conversation_id || "").trim(),

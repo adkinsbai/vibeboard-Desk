@@ -1508,6 +1508,15 @@ function currentGeneratedBuildId() {
   }
 }
 
+function currentGeneratedContractHash() {
+  try {
+    const manifest = generatedFiles?.["manifest.json"] ? JSON.parse(generatedFiles["manifest.json"]) : {};
+    return String(manifest?.contractHash || manifest?.contract_hash || "").trim();
+  } catch {
+    return "";
+  }
+}
+
 function hasDeployableBuild() {
   return Boolean(
     generatedFiles &&
@@ -2555,6 +2564,9 @@ async function runDeployJob(buildId = currentGeneratedBuildId()) {
     background: true,
     conversation_id: currentConversationId || "",
     build_id: buildId || "",
+    confirmation: "deploy",
+    boundDeviceId: activeDeviceSerial ? activeDeviceId : "",
+    contractHash: currentGeneratedContractHash(),
   }), { timeout: 30000 });
   const jobId = started.job?.id;
   if (!jobId) throw new Error("Background deploy job was not created.");

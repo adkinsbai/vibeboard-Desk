@@ -79,8 +79,10 @@ export async function runAgentGraph(input = {}, steps = {}) {
 
   if (state.action === "confirm_build") {
     const prompt = String(input.buildPrompt || input.prompt || state.projectMemory.build_prompt || "").trim();
-    appendAgentGraphTrace(trace, AGENT_GRAPH_NODES.CONFIRM_GATE, prompt ? "passed" : "blocked", {
+    const routeNeedsClarification = input.routeProfile?.route === "clarify_or_block";
+    appendAgentGraphTrace(trace, AGENT_GRAPH_NODES.CONFIRM_GATE, prompt && !routeNeedsClarification ? "passed" : "blocked", {
       hasBuildPrompt: Boolean(prompt),
+      ...(routeNeedsClarification ? { reason: "route_requires_clarification", route: input.routeProfile.route } : {}),
     });
     if (!prompt) {
       appendAgentGraphTrace(trace, AGENT_GRAPH_NODES.RESPOND, "done", { mode: "clarify" });
@@ -92,6 +94,29 @@ export async function runAgentGraph(input = {}, steps = {}) {
         ready_to_build: false,
         build_prompt: "",
         project_memory: state.projectMemory,
+        agentGraph: trace,
+      };
+    }
+
+    if (routeNeedsClarification) {
+      appendAgentGraphTrace(trace, AGENT_GRAPH_NODES.RESPOND, "done", { mode: "clarify" });
+      return {
+        ok: true,
+        mode: "clarify",
+        intent: "clarify",
+        reply: "当前需求还不足以安全开始构建。请从下面选择一个方向，或补充具体的页面、功能和目标设备。",
+        understanding: [],
+        planned_changes: [],
+        ready_to_build: false,
+        build_prompt: "",
+        quick_replies: [
+          { label: "补充具体功能", value: "我想做一个具体的小屏应用，功能是：" },
+          { label: "基于当前项目修改", value: "请基于当前项目，明确修改这个页面/功能：" },
+          { label: "先查看项目现状", value: "先读取当前项目并告诉我现有文件、硬件能力和可修改范围。" },
+        ],
+        project_memory: state.projectMemory,
+        route_profile: input.routeProfile,
+        context_retrieval: input.context_retrieval || null,
         agentGraph: trace,
       };
     }

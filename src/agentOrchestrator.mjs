@@ -9,11 +9,13 @@ import {
 import { normalizeProjectMemory } from "./conversationStore.mjs";
 import { normalizeModelSettings } from "./modelSettings.mjs";
 import { createAgentTaskContract } from "./agentTaskContract.mjs";
+import { routeToExecutionProfile, scoreTaskRoute } from "./taskRoutePolicy.mjs";
 
 export function createAgentOrchestrator({
   conversationStore,
   memoryStore,
   assetLibraryStore,
+  contextRetriever = null,
   recordAgentLearning,
   runGenerateRequest,
   fetchImpl = globalThis.fetch,
@@ -28,10 +30,35 @@ export function createAgentOrchestrator({
     const projectMemory = conversationId
       ? await conversationStore.getProjectMemory(conversationId)
       : normalizeProjectMemory();
-    const assetContext = conversationId && assetLibraryStore?.promptContext
-      ? assetLibraryStore.promptContext(conversationId)
-      : "";
     const rawMessages = Array.isArray(body.messages) ? body.messages : [];
+    const query = body.action === "confirm_build"
+      ? String(body.build_prompt || body.prompt || projectMemory.build_prompt || lastUserMessage(rawMessages) || "").trim()
+      : (lastUserMessage(rawMessages) || String(body.build_prompt || body.prompt || "").trim());
+    const projectFiles = conversationId && typeof conversationStore.loadConversationFiles === "function"
+      ? Object.keys((await conversationStore.loadConversationFiles(conversationId))?.files || {}).filter(name => name !== "manifest.json")
+      : [];
+    const routeScore = scoreTaskRoute({
+      prompt: query,
+      action: body.action || "message",
+      projectFiles,
+      projectMemory: projectMemoryForRouting(projectMemory),
+      assets: conversationId && typeof assetLibraryStore?.listAssets === "function"
+        ? assetLibraryStore.listAssets(conversationId)
+        : [],
+    });
+    const routeProfile = routeToExecutionProfile(routeScore.route, routeScore);
+    const assetContext = conversationId && assetLibraryStore?.promptContext
+      ? assetLibraryStore.promptContext(conversationId, { query, limit: 12 })
+      : "";
+    const retrievedContext = await loadRetrievedContext({
+      contextRetriever,
+      query,
+      conversationId,
+      projectId: conversationId,
+      organizationId: body.organization_id || body.organizationId || "",
+      actorId: body.actor_id || body.actorId || body.user_id || "",
+    });
+    const unifiedContext = retrievedContext.text;
     const agentMode = normalizeAgentMode(body.agent_mode || body.agentMode);
     const modeBoundary = agentModeBoundary(agentMode);
     const codexBridge = agentMode === "codex"
@@ -46,6 +73,8 @@ export function createAgentOrchestrator({
       buildPrompt: body.build_prompt || body.prompt || "",
       agentMode,
       modeBoundary,
+      routeProfile,
+      context_retrieval: retrievedContext.meta,
     }, {
       planMessage: async () => {
         if (agentMode === "codex") {
@@ -98,7 +127,7 @@ export function createAgentOrchestrator({
               rawMessages,
               preferences: memoryStore.getAll(),
               projectMemory,
-              assetContext,
+              assetContext: `${assetContext}${unifiedContext}`,
               modeBoundary,
               fetchImpl: scopedFetch,
             })
@@ -107,7 +136,7 @@ export function createAgentOrchestrator({
               rawMessages,
               memoryStore.getAll(),
               projectMemory,
-              assetContext,
+              `${assetContext}${unifiedContext}`,
               agentMode,
               scopedFetch
           );
@@ -125,7 +154,7 @@ export function createAgentOrchestrator({
           agentMode,
           modeBoundary,
           codexBridge,
-          assetContext,
+          assetContext: `${assetContext}${unifiedContext}`,
         });
         return runGenerateRequest({
           prompt: executionPrompt,
@@ -136,6 +165,8 @@ export function createAgentOrchestrator({
           clarify_answers: Array.isArray(body.clarify_answers) ? body.clarify_answers : [],
           history: Array.isArray(body.history) ? body.history : rawMessages,
           codex_bridge: codexBridge,
+          route_profile: routeProfile,
+          context_retrieval: retrievedContext.meta,
           task_contract: taskContractForBuild(body.task_contract, prompt, projectMemory),
         });
       },
@@ -159,10 +190,62 @@ export function createAgentOrchestrator({
       agent_mode: agentMode,
       mode_boundary: modeBoundary,
       codex_bridge: result.codex_bridge || codexBridge,
+      route_profile: result.route_profile || routeProfile,
+      context_retrieval: result.context_retrieval || retrievedContext.meta,
     }));
   }
 
   return { runAgentRequest };
+}
+
+function lastUserMessage(messages = []) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") return String(messages[index].content || "").trim();
+  }
+  return "";
+}
+
+function projectMemoryForRouting(memory = {}) {
+  const normalized = normalizeProjectMemory(memory);
+  return [
+    normalized.summary,
+    normalized.goal,
+    ...normalized.requirements,
+    ...normalized.constraints,
+    ...normalized.decisions,
+    ...normalized.open_questions,
+    normalized.build_prompt,
+  ].filter(Boolean);
+}
+
+async function loadRetrievedContext({ contextRetriever, query, conversationId, projectId, organizationId, actorId } = {}) {
+  if (!contextRetriever?.loadMemoryContext) {
+    return { text: "", meta: { degraded: false, availableLayers: [], entryCount: 0, errors: [] } };
+  }
+  try {
+    const result = await contextRetriever.loadMemoryContext({
+      query,
+      conversationId,
+      projectId: projectId || conversationId,
+      organizationId,
+      actorId,
+      mode: "planning",
+      limit: 18,
+    });
+    return {
+      text: contextRetriever.formatMemoryContext
+        ? `\n\n## Unified retrieved project context\n${contextRetriever.formatMemoryContext(result)}`
+        : "",
+      meta: {
+        degraded: Boolean(result.degraded),
+        availableLayers: result.availableLayers || [],
+        entryCount: Array.isArray(result.entries) ? result.entries.length : 0,
+        errors: (result.errors || []).slice(0, 6),
+      },
+    };
+  } catch (error) {
+    return { text: "", meta: { degraded: true, availableLayers: [], entryCount: 0, errors: [{ source: "contextRetriever", message: error.message }] } };
+  }
 }
 
 function taskContractForBuild(raw = {}, prompt = "", projectMemory = {}) {

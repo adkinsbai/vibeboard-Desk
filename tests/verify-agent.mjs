@@ -825,7 +825,8 @@ await test("hardware app contract centralizes embedded rules", () => {
   assert(HARDWARE_APP_CONTRACT.hardware.touch === false, "hardware should be no-touch");
   assert(REQUIRED_RUNTIME_APIS.includes("/api/status"), "runtime APIs should include /api/status");
   assert(REQUIRED_RUNTIME_APIS.includes(`./${HARDWARE_RESULT_FILE}`), "runtime APIs should include hardware-result.json");
-  assert(AGENT_WRITABLE_FILE_NAMES.includes("hardware_app.py"), "agent writable files should include hardware_app.py");
+  assert(!AGENT_WRITABLE_FILE_NAMES.includes("hardware_app.py"), "hardware_app.py should be system-owned and read-only to the model");
+  assert(AGENT_WRITABLE_FILE_NAMES.includes("app.js"), "app.js should remain model-writable");
   assert(!AGENT_WRITABLE_FILE_NAMES.includes("_run.sh"), "agent writable files should reject helper scripts");
   assert(CONVERSATION_SNAPSHOT_FILE_NAMES.includes(HARDWARE_RESULT_FILE), "conversation snapshots should keep hardware result");
   const prompt = hardwareContractPromptText("en");
@@ -1508,6 +1509,9 @@ await test("build runtime runs local hardware build and records evidence", async
 
     assert(hardwareResult.build_id === "vb-test-valid", "build runtime should write matching hardware-result.json");
     assert(currentBuild.built === true, "build runtime should mark current build as built");
+    assert(/^[a-f0-9]{64}$/.test(currentBuild.contractHash || ""), "build runtime should derive a hardware contract hash");
+    assert(manifest.contractHash === currentBuild.contractHash, "manifest should expose the hardware contract hash");
+    assert(currentBuild.buildEvidence.evidence.contractHash === currentBuild.contractHash, "build evidence should expose the hardware contract hash");
     assert(currentBuild.buildEvidence.phase === "local_verify", "build evidence should record local verification phase");
     assert(currentBuild.buildEvidence.summary === "L0-L3 local verification passed", "build evidence should preserve L0-L3 summary");
     assert(currentBuild.buildEvidence.evidence.hardwareResult.endsWith(`/${HARDWARE_RESULT_FILE}`), "build evidence should point at hardware result");

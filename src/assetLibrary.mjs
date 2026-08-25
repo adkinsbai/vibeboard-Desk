@@ -54,7 +54,8 @@ const DEFAULT_ASSET_FOLDERS = Object.freeze([
   { id: "folder-other", name: "其他", category: "other", system: true },
 ]);
 
-export function createAssetLibraryStore(db, saveDb = () => {}) {
+export function createAssetLibraryStore(db, saveDb = () => {}, options = {}) {
+  const relevanceIndex = options && typeof options === "object" ? options.relevanceIndex : null;
   return {
     initSchema() {
       db.run(`
@@ -75,6 +76,7 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
       `);
+      try { relevanceIndex?.initSchema?.(); } catch {}
       ensureColumn(db, "asset_library", "usage", "TEXT DEFAULT 'auto'");
       ensureColumn(db, "asset_library", "folder_id", "TEXT");
       ensureColumn(db, "asset_library", "project_path", "TEXT");
@@ -257,6 +259,11 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
         rejected: normalized.rejected,
         summary: this.summarize(conversationId),
       };
+      for (const asset of normalized.assets) {
+        try {
+          relevanceIndex?.upsert?.({ ...asset, conversation_id: conversationId });
+        } catch {}
+      }
       Object.defineProperty(result, "persistence", {
         value: Promise.all(persistence),
         enumerable: false,
@@ -286,7 +293,11 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
       if (!updates.length) return this.getAsset(conversationId, assetId);
       params.push(assetId, conversationId);
       run(db, saveDb, `UPDATE asset_library SET ${updates.join(", ")} WHERE id = ? AND (conversation_id = ? OR conversation_id = '')`, params);
-      return this.getAsset(conversationId, assetId);
+      const result = this.getAsset(conversationId, assetId);
+      try {
+        if (result) relevanceIndex?.upsert?.(result);
+      } catch {}
+      return result;
     },
 
     getAsset(conversationId = "", assetId = "") {
@@ -300,14 +311,38 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
 
     deleteAsset(conversationId = "", assetId = "") {
       run(db, saveDb, "DELETE FROM asset_library WHERE id = ? AND (conversation_id = ? OR conversation_id = '')", [assetId, conversationId]);
+      try { relevanceIndex?.remove?.(conversationId, assetId); } catch {}
     },
 
     deleteConversationAssets(conversationId = "") {
       run(db, saveDb, "DELETE FROM asset_library WHERE conversation_id = ?", [conversationId]);
+      try { relevanceIndex?.rebuild?.(conversationId); } catch {}
     },
 
-    promptContext(conversationId = "") {
-      return formatAssetContext(this.listAssets(conversationId));
+    promptContext(conversationId = "", options = {}) {
+      let assets = this.listAssets(conversationId);
+      const queryText = typeof options === "string" ? options : options?.query;
+      if (queryText && relevanceIndex?.searchRelevantAssets) {
+        try {
+          const ranked = relevanceIndex.searchRelevantAssets(conversationId, queryText, {
+            limit: options?.limit || 12,
+            includeReferenceOnly: Boolean(options?.includeReferenceOnly),
+            selectedAssetIds: options?.selectedAssetIds || [],
+          });
+          const ids = new Set(ranked.map(item => String(item.asset_id || "")));
+          const scoped = assets.filter(asset => ids.has(String(asset.id || "")));
+          // An initialized index with zero matches should produce zero
+          // inferred assets. Only fall back to the legacy broad summary when
+          // the index itself is unavailable.
+          if (relevanceIndex.isReady?.() || scoped.length) assets = scoped;
+        } catch {}
+      }
+      return formatAssetContext(assets);
+    },
+
+    searchRelevantAssets(conversationId = "", queryText = "", filters = {}) {
+      if (!relevanceIndex?.searchRelevantAssets) return [];
+      try { return relevanceIndex.searchRelevantAssets(conversationId, queryText, filters); } catch { return []; }
     },
 
     generatedAssets(conversationId = "") {
@@ -344,6 +379,7 @@ export function createAssetLibraryStore(db, saveDb = () => {}) {
           }
         }
       });
+      try { relevanceIndex?.rebuild?.(conversationId); } catch {}
       return this.listBuildSnapshots(conversationId, buildId);
     },
 

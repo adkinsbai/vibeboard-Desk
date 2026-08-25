@@ -11,6 +11,7 @@
     "verify:agent": "node tests/database-quota-classification.mjs && node tests/model-provider-errors.mjs && node tests/verify-agent.mjs",
     "verify:agent-benchmark": "node tests/agent-benchmark.mjs",
     "verify:agent-quality": "node tests/agent-loop-quality.mjs",
+    "verify:context": "node tests/task-route-policy.mjs && node tests/hardware-contract-firewall.mjs && node tests/asset-relevance-index.mjs && node tests/context-retriever.mjs && node tests/context-routing-integration.mjs",
     "benchmark:agent:fixture": "node scripts/run-agent-benchmark.mjs --mode=fixture",
     "benchmark:agent:live": "node scripts/run-agent-benchmark.mjs --mode=live",
     "verify:offline": "node tests/offline-smoke.mjs",

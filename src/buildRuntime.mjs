@@ -15,6 +15,7 @@ import {
   AGENT_PHASES,
   appendEvidence,
 } from "./agentStateMachine.mjs";
+import { calculateContractHash } from "./hardwareContractFirewall.mjs";
 import { createBuildIntelligenceSummary } from "./buildIntelligence.mjs";
 import {
   executePythonRunner,
@@ -154,6 +155,13 @@ export function createBuildRuntime(deps = {}) {
       hardwareCompileOutput: hardwareCompile,
       targetStatic: getBoard().targetStatic,
     });
+    const contractFiles = await readGeneratedFiles(currentBuild.dir, HARDWARE_APP_CONTRACT.generatedFiles);
+    const contractHash = calculateContractHash({
+      buildId: currentBuild.id,
+      files: contractFiles,
+    });
+    manifest.contractHash = contractHash;
+    currentBuild.contractHash = contractHash;
     const manifestJson = JSON.stringify(manifest, null, 2);
     await fs.writeFile(manifestFile, manifestJson, "utf8");
     currentBuild.files["manifest.json"] = manifestJson;
@@ -194,6 +202,8 @@ export function createBuildRuntime(deps = {}) {
     currentBuild.buildEvidence = verification;
     currentBuild.buildEvidence.phase = AGENT_PHASES.LOCAL_VERIFY;
     currentBuild.buildEvidence.summary = "L0-L3 local verification passed";
+    currentBuild.buildEvidence.route_profile = currentBuild.routeProfile || null;
+    currentBuild.buildEvidence.context_retrieval = currentBuild.contextRetrieval || null;
     currentBuild.buildEvidence.evidence = {
       ...currentBuild.buildEvidence.evidence,
       nodeCheck: "passed",
@@ -201,7 +211,10 @@ export function createBuildRuntime(deps = {}) {
       hardwareRun: "passed",
       hardwareResult: `${HARDWARE_APP_CONTRACT.generatedWorkspaceDir}/${HARDWARE_RESULT_FILE}`,
       buildId: currentBuild.id,
+      contractHash,
       pythonBin,
+      route_profile: currentBuild.routeProfile || null,
+      context_retrieval: currentBuild.contextRetrieval || null,
     };
     currentBuild.intelligenceSummary = createBuildIntelligenceSummary({
       build: currentBuild,
@@ -220,6 +233,10 @@ export function createBuildRuntime(deps = {}) {
       issueCount: currentBuild.buildEvidence.issues?.length || 0,
       confidence: currentBuild.intelligenceSummary.confidence,
       nextBestAction: currentBuild.intelligenceSummary.nextBestAction,
+      route: currentBuild.routeProfile?.route || "",
+      routeScore: currentBuild.routeProfile?.score ?? null,
+      retrievalEntryCount: currentBuild.contextRetrieval?.entryCount ?? null,
+      retrievalDegraded: currentBuild.contextRetrieval?.degraded ?? false,
     });
     return manifest;
   }
