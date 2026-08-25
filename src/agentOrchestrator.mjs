@@ -8,6 +8,7 @@ import {
 } from "./codexHardwareAgent.mjs";
 import { normalizeProjectMemory } from "./conversationStore.mjs";
 import { normalizeModelSettings } from "./modelSettings.mjs";
+import { createAgentTaskContract } from "./agentTaskContract.mjs";
 
 export function createAgentOrchestrator({
   conversationStore,
@@ -118,22 +119,26 @@ export function createAgentOrchestrator({
           clearTimeout(timeout);
         }
       },
-      build: async (_state, prompt) => runGenerateRequest({
-        prompt: buildExecutionPrompt({
+      build: async (_state, prompt) => {
+        const executionPrompt = buildExecutionPrompt({
           prompt,
           agentMode,
           modeBoundary,
           codexBridge,
           assetContext,
-        }),
-        raw_user_prompt: prompt,
-        modelSettings: body.modelSettings || {},
-        conversation_id: conversationId,
-        agent_mode: agentMode,
-        clarify_answers: Array.isArray(body.clarify_answers) ? body.clarify_answers : [],
-        history: Array.isArray(body.history) ? body.history : rawMessages,
-        codex_bridge: codexBridge,
-      }),
+        });
+        return runGenerateRequest({
+          prompt: executionPrompt,
+          raw_user_prompt: prompt,
+          modelSettings: body.modelSettings || {},
+          conversation_id: conversationId,
+          agent_mode: agentMode,
+          clarify_answers: Array.isArray(body.clarify_answers) ? body.clarify_answers : [],
+          history: Array.isArray(body.history) ? body.history : rawMessages,
+          codex_bridge: codexBridge,
+          task_contract: taskContractForBuild(body.task_contract, prompt, projectMemory),
+        });
+      },
       reflect: async (state) => {
         if (typeof recordAgentLearning !== "function") return;
         const build = state.build || {};
@@ -158,6 +163,27 @@ export function createAgentOrchestrator({
   }
 
   return { runAgentRequest };
+}
+
+function taskContractForBuild(raw = {}, prompt = "", projectMemory = {}) {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const memory = normalizeProjectMemory(projectMemory);
+  return createAgentTaskContract({
+    objective: input.objective || prompt,
+    requiredFiles: input.required_files || input.requiredFiles,
+    acceptanceCriteria: input.acceptance_criteria || input.acceptanceCriteria || [
+      ...memory.requirements,
+      ...memory.constraints,
+      "All required generated files pass VibeBoard L0-L3 local verification.",
+      "The 480x360 screen is nonblank and has no overflow.",
+    ],
+    forbidden: input.forbidden || [
+      "automatic hardware deployment",
+      "credentials or model configuration in generated files",
+      "claims of hardware execution without board evidence",
+    ],
+    maxModelTurns: input.max_model_turns ?? input.maxModelTurns,
+  });
 }
 
 function normalizeAgentMode(value) {

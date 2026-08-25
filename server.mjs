@@ -7,11 +7,11 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import initSqlJs from "sql.js";
-import { neon } from "@neondatabase/serverless";
 import { createAuthStore, clearSessionCookie, httpError, sessionCookie } from "./src/authStore.mjs";
 import { createCloudSqliteSnapshot } from "./src/cloudSqliteSnapshot.mjs";
 import { createPhoneVerificationService } from "./src/phoneVerification.mjs";
 import { buildBoardCatalog } from "./src/boardCatalog.mjs";
+import { createDeviceBindingStore } from "./src/deviceBindingStore.mjs";
 import { createTelemetryStore } from "./src/telemetryStore.mjs";
 import { creditsForTokens, estimateTokensFromPayload, tokensFromModelResponse } from "./src/creditMeter.mjs";
 import {
@@ -44,6 +44,7 @@ import { createJobRuntime } from "./src/jobRuntime.mjs";
 import { executionContextFromRequest } from "./src/executionContext.mjs";
 import { verifyAllLocal } from "./src/verifiers/index.mjs";
 import { classifyError } from "./src/errorClassifier.mjs";
+import { createDatabaseClient } from "./src/databaseClient.mjs";
 import { analyzeAndClarify } from "./src/clarifyEngine.mjs";
 import { createAgentOrchestrator } from "./src/agentOrchestrator.mjs";
 import {
@@ -133,6 +134,7 @@ const RUNTIME_DIR = process.env.VIBEBOARD_RUNTIME_DIR
 const SERVER_LOG_PATH = path.join(RUNTIME_DIR, "server.log");
 const SERVER_LOG_STRING_LIMIT = 600;
 const SERVER_LOG_ARRAY_LIMIT = 20;
+let serverLogQueue = Promise.resolve();
 const MARKET_APPS_DIR = path.join(ROOT, "market-apps");
 const PORT = Number(process.env.PORT || process.env.VIBEBOARD_PORT || 8789);
 const HOST = process.env.VERCEL === "1" ? undefined : (process.env.VIBEBOARD_HOST || "127.0.0.1");
@@ -168,16 +170,99 @@ const BILLING_MODE = String(process.env.VIBEBOARD_BILLING_MODE || "free").toLowe
 const REQUIRE_PHONE_VERIFICATION = process.env.VIBEBOARD_REQUIRE_PHONE_VERIFICATION === "1";
 
 const TEST_CLOUD_SQLITE_FILE = process.env.VIBEBOARD_TEST_CLOUD_SQLITE_FILE || "";
-const pg = process.env.DATABASE_URL && !TEST_CLOUD_SQLITE_FILE ? neon(process.env.DATABASE_URL) : null;
+const ENABLE_LEGACY_SQLITE_MIGRATION = Boolean(TEST_CLOUD_SQLITE_FILE || process.env.VIBEBOARD_ENABLE_LEGACY_SQLITE_MIGRATION === "1");
+const pg = process.env.DATABASE_URL && !TEST_CLOUD_SQLITE_FILE
+  ? createDatabaseClient(process.env.DATABASE_URL, process.env)
+  : null;
 if (process.env.VERCEL === "1" && !pg && !TEST_CLOUD_SQLITE_FILE) {
   throw new Error("DATABASE_URL is required on Vercel public deployment.");
 }
-const cloudSqliteSnapshot = createCloudSqliteSnapshot({
-  pg,
-  key: process.env.VIBEBOARD_DB_SNAPSHOT_KEY || "vibeboard-main",
-  filePath: TEST_CLOUD_SQLITE_FILE,
-});
-if (cloudSqliteSnapshot) await cloudSqliteSnapshot.initSchema();
+const databaseStatus = {
+  ok: true,
+  errors: [],
+};
+
+function recordDatabaseStartupError(scope, error, { required = false } = {}) {
+  const privateMessage = summarizeStartupError(error);
+  const entry = {
+    scope,
+    required,
+    message: publicStartupErrorMessage(privateMessage),
+  };
+  databaseStatus.errors.push(entry);
+  if (required) databaseStatus.ok = false;
+  console.warn(`[db] ${scope} initialization failed${required ? " (database unavailable)" : ""}:`, privateMessage);
+}
+
+function summarizeStartupError(error) {
+  return String(error?.message || error || "Database initialization failed.").slice(0, 500);
+}
+
+function publicStartupErrorMessage(message = "") {
+  if (/exceeded[^.]*quota|HTTP status 402/i.test(message)) {
+    return "Database provider quota exceeded.";
+  }
+  return "Database initialization failed.";
+}
+
+function publicDatabaseStatus() {
+  return {
+    ok: databaseStatus.ok,
+    degraded: !databaseStatus.ok,
+    errors: databaseStatus.errors.map(error => ({
+      scope: error.scope,
+      required: error.required,
+      message: error.message,
+    })),
+  };
+}
+
+function databaseUnavailablePayload() {
+  const database = publicDatabaseStatus();
+  const quotaExceeded = hasDatabaseQuotaError(database);
+  return {
+    ok: false,
+    error: quotaExceeded ? "Database provider quota exceeded." : "Database temporarily unavailable.",
+    errorType: quotaExceeded ? "database_quota" : "database_unavailable",
+    errorLabel: quotaExceeded ? "Database provider quota is unavailable" : "Database is temporarily unavailable",
+    userTitle: quotaExceeded ? "数据库额度超限" : "数据库暂时不可用",
+    errorStage: "database",
+    userMessage: quotaExceeded
+      ? "数据库服务返回流量或额度超限，依赖数据库的登录、对话、项目保存和任务接口暂时不可用。"
+      : "数据库暂时不可用，依赖数据库的登录、对话、项目保存和任务接口暂时不可用。",
+    suggestion: quotaExceeded
+      ? "请升级或恢复 Neon 数据库额度，或等额度重置后再试；这不是 GLM 5.2 的 API Key 问题。"
+      : "请检查 DATABASE_URL、数据库网络连接和数据库服务状态，然后重试。",
+    retryable: !quotaExceeded,
+    statusCode: 503,
+    nextActions: quotaExceeded
+      ? ["检查 Neon 数据库用量", "升级数据库套餐", "恢复数据库额度"]
+      : ["检查 DATABASE_URL", "检查数据库服务", "稍后重试"],
+    technicalDetail: database.errors.map(error => `${error.scope}: ${error.message}`).join("; "),
+    database,
+  };
+}
+
+function hasDatabaseQuotaError(database) {
+  return (database?.errors || []).some(error => /quota|exceeded|HTTP status 402/i.test(`${error.scope || ""} ${error.message || ""}`));
+}
+
+function isDatabaseUnavailable() {
+  return !databaseStatus.ok;
+}
+
+const cloudSqliteSnapshot = ENABLE_LEGACY_SQLITE_MIGRATION
+  ? createCloudSqliteSnapshot({
+      pg,
+      key: process.env.VIBEBOARD_DB_SNAPSHOT_KEY || "vibeboard-main",
+      filePath: TEST_CLOUD_SQLITE_FILE,
+    })
+  : null;
+if (cloudSqliteSnapshot) {
+  await cloudSqliteSnapshot.initSchema().catch((error) => {
+    recordDatabaseStartupError("legacy_sqlite_snapshot", error, { required: false });
+  });
+}
 
 // Initialize SQLite database
 const SQL = await initSqlJs();
@@ -202,6 +287,7 @@ const sqliteDb = {
   prepare: (...args) => db.prepare(...args),
   run: (...args) => db.run(...args),
   exec: (...args) => db.exec(...args),
+  getRowsModified: (...args) => db.getRowsModified(...args),
   export: (...args) => db.export(...args),
 };
 
@@ -313,8 +399,10 @@ const projectPersistence = createProjectPersistence({
   saveSqlite: saveDb,
   env: process.env,
 });
-await projectPersistence.initSchema();
-if (PUBLIC_DEPLOYMENT && !TEST_CLOUD_SQLITE_FILE && cloudSqliteSnapshot && typeof projectPersistence.migrateLegacySqliteSnapshot === "function") {
+await projectPersistence.initSchema().catch((error) => {
+  recordDatabaseStartupError("project_persistence", error, { required: true });
+});
+if (!isDatabaseUnavailable() && PUBLIC_DEPLOYMENT && !TEST_CLOUD_SQLITE_FILE && cloudSqliteSnapshot && typeof projectPersistence.migrateLegacySqliteSnapshot === "function") {
   const legacyBuffer = await cloudSqliteSnapshot.load().catch((error) => {
     console.warn("[db] legacy sqlite snapshot migration load failed:", error.message);
     return null;
@@ -341,16 +429,28 @@ playbookStore.initSchema();
 experienceStore.setPlaybookStore?.(playbookStore);
 
 const jobStore = projectPersistence;
-await jobStore.markInterruptedRunningJobs();
+if (!isDatabaseUnavailable()) {
+  await jobStore.markInterruptedRunningJobs().catch((error) => {
+    recordDatabaseStartupError("jobs_resume", error, { required: true });
+  });
+}
 
 const assetLibraryStore = createAssetLibraryStore(sqliteDb, saveDb);
 assetLibraryStore.initSchema();
 
 const authStore = createAuthStore({ sqliteDb, saveSqlite: saveDb, pg, env: process.env });
-await authStore.initSchema();
+await authStore.initSchema().catch((error) => {
+  recordDatabaseStartupError("auth", error, { required: true });
+});
+const deviceBindingStore = createDeviceBindingStore({ sqliteDb, saveSqlite: saveDb, pg, env: process.env });
+await deviceBindingStore.initSchema().catch((error) => {
+  recordDatabaseStartupError("device_bindings", error, { required: true });
+});
 const phoneVerification = createPhoneVerificationService({ authStore, env: process.env });
 const telemetryStore = createTelemetryStore({ sqliteDb, saveSqlite: saveDb, pg, env: process.env });
-await telemetryStore.initSchema();
+await telemetryStore.initSchema().catch((error) => {
+  recordDatabaseStartupError("telemetry", error, { required: true });
+});
 
 const projectWorkspace = createProjectWorkspace({
   root: ROOT,
@@ -448,10 +548,16 @@ async function appendServerLog(event, detail = {}) {
     event,
     ...compactForLog(detail),
   });
-  try {
-    await fs.mkdir(RUNTIME_DIR, { recursive: true });
-    await fs.appendFile(SERVER_LOG_PATH, `${line}\n`, "utf8");
-  } catch {}
+  serverLogQueue = serverLogQueue
+    .catch(() => {})
+    .then(async () => {
+      await fs.mkdir(RUNTIME_DIR, { recursive: true });
+      await fs.appendFile(SERVER_LOG_PATH, `${line}\n`, "utf8");
+    });
+  await Promise.race([
+    serverLogQueue,
+    new Promise(resolve => setTimeout(resolve, 2000)),
+  ]).catch(() => {});
 }
 
 function positiveInt(value, fallback) {
@@ -512,6 +618,12 @@ function isPublicApi(pathname) {
     pathname === "/api/telemetry" ||
     pathname === "/api/health" ||
     pathname === "/healthz";
+}
+
+function isDatabaseIndependentApi(pathname) {
+  return pathname === "/api/health" ||
+    pathname === "/healthz" ||
+    pathname === "/api/board-catalog";
 }
 
 function shouldSyncSqliteSnapshot(pathname) {
@@ -583,6 +695,8 @@ function publicSafeModelSettings(input = {}) {
     provider: process.env.VIBEBOARD_LLM_PROVIDER || process.env.VIBEBOARD_MODEL_PROVIDER || input.provider || "deepseek",
     baseUrl: process.env.VIBEBOARD_LLM_BASE_URL || process.env.VIBEBOARD_MODEL_BASE_URL || input.baseUrl || "",
     model: process.env.VIBEBOARD_LLM_MODEL || process.env.VIBEBOARD_MODEL || input.model || "",
+    // The browser stores a per-user key locally. It is request-scoped here and never returned.
+    apiKey: String(input.apiKey || "").trim(),
     enabled: true,
   };
 }
@@ -658,6 +772,32 @@ function requirePublicAdmin(user, message = "Admin access required.") {
   if (PUBLIC_DEPLOYMENT && user?.role !== "admin") throw httpError(403, message);
 }
 
+async function resolveRequestBoard(input = {}, user = null) {
+  const serial = input.device || input.serial || input.deviceSerial || "";
+  if (serial) {
+    const device = await deviceBindingStore.resolveForUser({ userId: user?.id || "", serial });
+    const board = createBoardConfig(device.board_id || "taishan-gray");
+    const connection = device.connection || {};
+    return {
+      ...board,
+      id: device.board_id || board.id,
+      label: device.label || board.label,
+      host: connection.host || board.host,
+      port: connection.port || board.port,
+      frpHost: connection.host || board.frpHost,
+      frpPort: connection.port || board.frpPort,
+      user: connection.user || board.user,
+    };
+  }
+  const deviceId = deviceIdFrom(input, BOARD.id);
+  return createBoardConfig(deviceId);
+}
+
+async function withResolvedBoard(input = {}, user = null, task) {
+  const board = await resolveRequestBoard(input, user);
+  return withBoardConfig(board, task);
+}
+
 function staticCacheFor(filePath) {
   const relative = path.relative(ROOT, filePath).replaceAll(path.sep, "/");
   const ext = path.extname(filePath).toLowerCase();
@@ -718,10 +858,14 @@ async function previewFilesForConversation(conversationId) {
   };
 }
 
-async function filesWithHardwareResult(files = {}) {
+async function filesWithHardwareResult(files = {}, result = {}) {
   const savedFiles = { ...(files || {}) };
+  const workspaceDir = String(result?.workspaceDir || result?.workspace_dir || "").trim();
+  const hardwareResultPath = workspaceDir
+    ? path.join(workspaceDir, HARDWARE_RESULT_FILE)
+    : path.join(GENERATED_DIR, HARDWARE_RESULT_FILE);
   try {
-    savedFiles[HARDWARE_RESULT_FILE] = await fs.readFile(path.join(GENERATED_DIR, HARDWARE_RESULT_FILE), "utf8");
+    savedFiles[HARDWARE_RESULT_FILE] = await fs.readFile(hardwareResultPath, "utf8");
   } catch {}
   return savedFiles;
 }
@@ -812,6 +956,10 @@ function selectDevice(deviceId = "") {
 }
 
 async function withDevice(deviceId, task) {
+  return withBoardConfig(createBoardConfig(deviceIdFrom({ deviceId }, BOARD.id)), task);
+}
+
+async function withBoardConfig(board, task) {
   const previous = deviceContextQueue;
   let release;
   deviceContextQueue = new Promise(resolve => {
@@ -821,7 +969,9 @@ async function withDevice(deviceId, task) {
   const previousBoard = BOARD;
   const previousKnownHosts = knownHosts;
   const previousActiveEndpoint = activeEndpoint;
-  selectDevice(deviceId);
+  BOARD = board;
+  knownHosts = process.env.VIBEBOARD_KNOWN_HOSTS || path.join(os.tmpdir(), `${BOARD.id}_known_hosts`);
+  setActiveEndpoint(null);
   try {
     return await task();
   } finally {
@@ -1429,10 +1579,10 @@ async function audioStop() {
   return normalizeRemoteAudioResult(raw, "stop");
 }
 
-function buildOfflineDeployResult() {
-  const buildEvidence = currentBuild?.buildEvidence || null;
+function buildOfflineDeployResult(build = currentBuild) {
+  const buildEvidence = build?.buildEvidence || null;
   return {
-    id: currentBuild?.id || "",
+    id: build?.id || "",
     skipped: true,
     mode: "offline-simulated",
     deployed: false,
@@ -1444,8 +1594,8 @@ function buildOfflineDeployResult() {
     programPath: "generated/current/hardware-result.json",
     compilePath: "",
     buildEvidence,
-    intelligenceSummary: currentBuild?.intelligenceSummary || null,
-    goldenLoop: buildOfflineGoldenLoop(currentBuild?.id || ""),
+    intelligenceSummary: build?.intelligenceSummary || null,
+    goldenLoop: buildOfflineGoldenLoop(build?.id || ""),
   };
 }
 
@@ -1744,9 +1894,9 @@ function normalizeGeneratedFiles(raw, prompt, id, meta = {}) {
   return { files, manifest };
 }
 
-function templateGeneratedFiles(prompt, id, reason = "") {
-  const spec = createAppSpec(prompt, id);
-  const manifest = generatedManifestV2(prompt, id, spec, {
+function templateGeneratedFiles(prompt, id, reason = "", displayPrompt = prompt) {
+  const spec = createAppSpec(displayPrompt, id);
+  const manifest = generatedManifestV2(displayPrompt, id, spec, {
     source: "template",
     fallbackReason: reason,
     target: BOARD.targetStatic
@@ -1757,7 +1907,7 @@ function templateGeneratedFiles(prompt, id, reason = "") {
       "index.html": advanced?.["index.html"] || generatedIndexV2(prompt, id, spec),
       "style.css": advanced?.["style.css"] || generatedStyleV2(prompt, id, spec),
       "app.js": injectAppHardwareSdkContracts(advanced?.["app.js"] || generatedAppV2(prompt, id, spec), id),
-      "hardware_app.py": generatedHardwareAppV2(prompt, id, spec),
+      "hardware_app.py": generatedHardwareAppV2(displayPrompt, id, spec),
       "manifest.json": JSON.stringify(manifest, null, 2)
     },
     manifest
@@ -1913,10 +2063,10 @@ function buildExtractiveSummary(messages) {
   return parts.join("。") || "之前有一段对话";
 }
 
-async function generateFilesForPrompt(prompt, id, modelSettings = {}, history = []) {
+async function generateFilesForPrompt(prompt, id, modelSettings = {}, history = [], displayPrompt = prompt) {
   const settings = normalizeModelSettings(modelSettings);
   if (!settings.enabled) {
-    return templateGeneratedFiles(prompt, id, "model settings not configured");
+    return templateGeneratedFiles(prompt, id, "model settings not configured", displayPrompt);
   }
 
   try {
@@ -1931,7 +2081,7 @@ async function generateFilesForPrompt(prompt, id, modelSettings = {}, history = 
       // If editing and LLM fails, don't fall back to template - throw the error
       throw error;
     }
-    return templateGeneratedFiles(prompt, id, `model generation failed: ${error.message}`);
+    return templateGeneratedFiles(prompt, id, `model generation failed: ${error.message}`, displayPrompt);
   }
 }
 
@@ -2204,26 +2354,39 @@ print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 `;
 }
 
-async function writeGenerated(prompt, modelSettings = {}, history = [], embeddedAssets = null) {
+async function writeGenerated(prompt, modelSettings = {}, history = [], embeddedAssets = null, options = {}) {
   const id = buildId();
+  const displayPrompt = String(options.displayPrompt || prompt || "");
+  const build = buildRegistry.createBuildHandle({
+    context: options.context || {},
+    jobId: options.jobId || options.context?.requestId || `direct-${id}`,
+    buildId: id,
+    generatedRoot: GENERATED_DIR,
+    prompt: displayPrompt,
+    files: {},
+    built: false,
+    deployed: false,
+    conversationId: options.conversationId || "",
+  });
   await appendServerLog("generate.template.start", { id, prompt: String(prompt || "").slice(0, 160) });
-  const generated = await generateFilesForPrompt(prompt, id, modelSettings, history);
+  const generated = await generateFilesForPrompt(prompt, id, modelSettings, history, displayPrompt);
   const embedded = embedGeneratedAssetsInFiles(generated.files, embeddedAssets, generated.manifest);
   const files = embedded.files;
   const manifest = embedded.manifest || generated.manifest;
-  await writeGeneratedFiles(GENERATED_DIR, files);
+  await writeGeneratedFiles(build.workspaceDir, files);
   const agentRun = transitionRun(createAgentRun({
-    prompt,
+    prompt: displayPrompt,
     mode: "template",
     buildId: id,
     hardwareMode: boardPassword ? "real" : "simulated",
   }), AGENT_PHASES.CODE, {
-    spec: buildInitialSpec(prompt, { requireBoard: Boolean(boardPassword) }),
+    spec: buildInitialSpec(displayPrompt, { requireBoard: Boolean(boardPassword) }),
   });
-  setCurrentBuild({ id, prompt, files, dir: GENERATED_DIR, built: false, deployed: false, manifest, agentRun });
-  await buildCurrent();
+  Object.assign(build, { files, manifest, agentRun });
+  setCurrentBuild(build);
+  await buildCurrent({ build, context: options.context || null });
   await appendServerLog("generate.template.done", { id, files: Object.keys(files) });
-  return currentBuild;
+  return build;
 }
 
 async function loadGeneratedBuild() {
@@ -2278,8 +2441,8 @@ const previewRuntime = createPreviewRuntime({
   appendServerLog,
 });
 
-async function buildCurrent() {
-  return buildRuntime.buildCurrent();
+async function buildCurrent(options = {}) {
+  return buildRuntime.buildCurrent(options);
 }
 
 // Capture preview screenshot and return verification report
@@ -2309,42 +2472,45 @@ async function verifyGoldenLoop(expectedId = currentBuild?.id) {
   });
 }
 
-async function deployCurrent() {
+async function deployCurrent(build = null, context = null) {
   console.log("[deployCurrent] Starting...");
-  await loadGeneratedBuild();
-  if (!currentBuild) {
+  let targetBuild = build || currentBuild;
+  if (!targetBuild) {
+    targetBuild = await loadGeneratedBuild();
+  }
+  if (!targetBuild) {
     console.error("[deployCurrent] No currentBuild");
     throw new Error("No generated app. Generate first.");
   }
-  console.log("[deployCurrent] currentBuild.id:", currentBuild.id);
-  if (!currentBuild.built) {
+  console.log("[deployCurrent] build.id:", targetBuild.id);
+  if (!targetBuild.built) {
     console.log("[deployCurrent] Building...");
-    await buildCurrent();
+    await buildCurrent({ build: targetBuild, context });
   }
 
   const {
     release,
     compilePath,
     programPath
-  } = buildDeployPaths(BOARD, currentBuild.id);
+  } = buildDeployPaths(BOARD, targetBuild.id);
   console.log("[deployCurrent] Creating release dir:", release);
   await ssh(`mkdir -p ${shQuote(release)} ${shQuote(BOARD.backupRoot)}`, 45000);
   console.log("[deployCurrent] Uploading files...");
   await uploadBundle(buildDeployUploadEntries({
-    currentBuild,
+    currentBuild: targetBuild,
     board: BOARD,
     runtimeDir: RUNTIME_DIR
   }), 60000);
 
   const remote = buildDeployRemoteCommand({
     board: BOARD,
-    buildId: currentBuild.id
+    buildId: targetBuild.id
   });
 
   console.log("[deployCurrent] Executing remote commands...");
   const output = await ssh(remote, 45000);
   console.log("[deployCurrent] Remote execution completed");
-  currentBuild.deployed = true;
+  targetBuild.deployed = true;
   const { backup } = parseDeployOutput(output);
   let compileLog = "";
   let hardwareResultRaw = "";
@@ -2364,16 +2530,16 @@ async function deployCurrent() {
   } catch {}
   let goldenLoop = null;
   try {
-    goldenLoop = await verifyGoldenLoop(currentBuild.id);
+    goldenLoop = await verifyGoldenLoop(targetBuild.id);
   } catch (error) {
     goldenLoop = buildPostDeployVerificationFailure({
-      buildId: currentBuild.id,
+      buildId: targetBuild.id,
       route: activeEndpoint ? endpointLabel(activeEndpoint) : "",
       error
     });
   }
   setLastDeploy({
-    id: currentBuild.id,
+    id: targetBuild.id,
     backup,
     output,
     compileLog,
@@ -2381,7 +2547,7 @@ async function deployCurrent() {
     hardwareResultRaw,
     programPath,
     compilePath,
-    intelligenceSummary: currentBuild?.intelligenceSummary || null,
+    intelligenceSummary: targetBuild?.intelligenceSummary || null,
     goldenLoop
   });
   return lastDeploy;
@@ -2605,6 +2771,7 @@ const generateRuntime = createGenerateRuntime({
   generatedDir: GENERATED_DIR,
   getCurrentBuild: () => currentBuild,
   setCurrentBuild,
+  createBuildHandle: input => buildRegistry.createBuildHandle(input),
   projectWorkspace,
 });
 
@@ -2748,18 +2915,33 @@ const { runAgentRequest } = createAgentOrchestrator({
 });
 
 async function runDeployRequest(body = {}) {
-  const deviceId = deviceIdFrom(body || {}, BOARD.id);
+  const user = body.user_id ? await authStore.userCreditSummary(body.user_id).catch(() => null) : null;
+  const resolvedBoard = await resolveRequestBoard(body || {}, user);
+  const deviceId = resolvedBoard.id || deviceIdFrom(body || {}, BOARD.id);
+  const requestedBuildId = String(body.build_id || body.buildId || "").trim();
+  let targetBuild = requestedBuildId ? buildRegistry.getBuildById(requestedBuildId) : currentBuild;
+  if (requestedBuildId && !targetBuild) {
+    const error = new Error(`Build ${requestedBuildId} is not available in this server session.`);
+    error.errorType = "build_not_found";
+    error.statusCode = 404;
+    throw error;
+  }
   if (!hasBoardCredentials()) {
-    if (!currentBuild) await loadGeneratedBuild();
-    if (currentBuild && (!currentBuild.built || !currentBuild.buildEvidence)) await buildCurrent();
-    const result = buildOfflineDeployResult();
+    if (!targetBuild) targetBuild = await loadGeneratedBuild();
+    if (targetBuild && (!targetBuild.built || !targetBuild.buildEvidence)) {
+      await buildCurrent({ build: targetBuild });
+    }
+    const result = buildOfflineDeployResult(targetBuild);
     setLastDeploy(result);
-    await appendServerLog("deploy.skipped", { id: currentBuild?.id || "", mode: result.mode });
+    await appendServerLog("deploy.skipped", { id: targetBuild?.id || "", mode: result.mode });
     return { ok: true, deviceId, ...result };
   }
   console.log("[deploy] Starting deploy...");
-  await appendServerLog("deploy.start", { id: currentBuild?.id || "", deviceId });
-  const result = await withDeployLock(() => withDevice(deviceId, () => deployCurrent()));
+  await appendServerLog("deploy.start", { id: targetBuild?.id || "", deviceId });
+  const result = await withDeployLock(() => withBoardConfig(resolvedBoard, () => deployCurrent(targetBuild, {
+    organizationId: String(body.organization_id || body.organizationId || "").trim(),
+    projectId: String(body.project_id || body.projectId || body.conversation_id || "").trim(),
+  })));
   console.log("[deploy] Deploy completed successfully");
   await appendServerLog("deploy.done", { id: result.id, goldenLoopOk: result.goldenLoop?.ok });
   return { ok: true, deviceId, ...result };
@@ -2830,11 +3012,12 @@ const jobRuntime = createJobRuntime({
   classifyError,
   appendServerLog,
   timeoutMs: DEFAULT_JOB_TIMEOUT_MS,
+  maxConcurrency: positiveInt(process.env.VIBEBOARD_JOB_CONCURRENCY, 2),
 });
 
 jobRuntime.register("agent", async (body = {}, ctx) => {
   await ctx.phase("agent", "Agent request is running.");
-  const result = await runAgentRequest(withServerModelSettings(body || {}));
+  const result = await runAgentRequest(withServerModelSettings({ ...(body || {}), job_id: ctx.jobId }));
   const user = body.user_id ? await authStore.userCreditSummary(body.user_id).catch(() => null) : null;
   await chargeAiUsage({ user, body, result, reason: body.action === "confirm_build" ? "agent_build" : "agent" });
   await writeProjectMemorySafe(body.conversation_id, {
@@ -2848,7 +3031,7 @@ jobRuntime.register("agent", async (body = {}, ctx) => {
 
 jobRuntime.register("generate", async (body = {}, ctx) => {
   await ctx.phase("generate", "Code generation is running.");
-  const result = await runGenerateRequest(withServerModelSettings(body || {}));
+  const result = await runGenerateRequest(withServerModelSettings({ ...(body || {}), job_id: ctx.jobId }));
   const user = body.user_id ? await authStore.userCreditSummary(body.user_id).catch(() => null) : null;
   await chargeAiUsage({ user, body, result, reason: "generate" });
   await writeProjectMemorySafe(body.conversation_id, {
@@ -2873,7 +3056,11 @@ jobRuntime.register("deploy", async (body = {}, ctx) => {
   return result;
 });
 
-await jobRuntime.resumeQueuedJobs();
+if (!isDatabaseUnavailable()) {
+  await jobRuntime.resumeQueuedJobs().catch((error) => {
+    recordDatabaseStartupError("jobs_resume", error, { required: true });
+  });
+}
 
 async function route(req, res) {
   let url = null;
@@ -2888,7 +3075,35 @@ async function route(req, res) {
       return;
     }
     if (req.method === "GET" && (url.pathname === "/api/health" || url.pathname === "/healthz")) {
-      json(res, 200, { ok: true, publicDeployment: PUBLIC_DEPLOYMENT, auth: true, billingMode: BILLING_MODE, phoneVerificationRequired: REQUIRE_PHONE_VERIFICATION, db: pg ? "postgres" : "sqlite" });
+      json(res, 200, {
+        ok: true,
+        publicDeployment: PUBLIC_DEPLOYMENT,
+        auth: !isDatabaseUnavailable(),
+        billingMode: BILLING_MODE,
+        phoneVerificationRequired: REQUIRE_PHONE_VERIFICATION,
+        db: pg ? "postgres" : "sqlite",
+        database: publicDatabaseStatus(),
+      });
+      return;
+    }
+    if (isDatabaseUnavailable()) {
+      if (req.method === "GET" && PUBLIC_DEPLOYMENT && url.pathname === "/workbench") {
+        res.writeHead(302, { Location: "/", "Cache-Control": "no-store" });
+        res.end();
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/api/telemetry") {
+        json(res, 202, { ok: false, skipped: true, error: "Database temporarily unavailable.", database: publicDatabaseStatus() });
+        return;
+      }
+      if (req.url.startsWith("/api/") && !isDatabaseIndependentApi(url.pathname)) {
+        json(res, 503, databaseUnavailablePayload());
+        return;
+      }
+    }
+    if (req.method === "GET" && PUBLIC_DEPLOYMENT && url.pathname === "/workbench" && !(await currentUser(req))) {
+      res.writeHead(302, { Location: "/", "Cache-Control": "no-store" });
+      res.end();
       return;
     }
     if (req.url.startsWith("/api/") && shouldSyncSqliteSnapshot(url.pathname)) {
@@ -2968,6 +3183,19 @@ async function route(req, res) {
       });
       return;
     }
+    if (req.method === "GET" && url.pathname === "/api/my-devices") {
+      if (!requestUser) throw httpError(401, "Login required.");
+      json(res, 200, { ok: true, devices: await deviceBindingStore.listForUser(requestUser.id) });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/device-bindings") {
+      if (!requestUser) throw httpError(401, "Login required.");
+      const body = await readBody(req).catch(() => ({}));
+      const result = await deviceBindingStore.bindSerial({ userId: requestUser.id, serial: body.serial });
+      await flushMutationSaves();
+      json(res, 200, { ok: true, ...result });
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/api/admin/users") {
       await authStore.requireAdmin(req);
       json(res, 200, { ok: true, users: await authStore.listUsers({ limit: Number(url.searchParams.get("limit") || 200) }) });
@@ -3020,15 +3248,15 @@ async function route(req, res) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/board") {
-      requirePublicAdmin(requestUser);
-      const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
-      const status = await withDevice(deviceId, () => fastBoardStatus());
+      const params = Object.fromEntries(url.searchParams.entries());
+      if (!params.device) requirePublicAdmin(requestUser);
+      const status = await withResolvedBoard(params, requestUser, () => fastBoardStatus());
       json(res, 200, { ok: true, ...status });
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/board-config") {
-      const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
-      const boardConfig = await withDevice(deviceId, () => publicBoardConfig());
+      const params = Object.fromEntries(url.searchParams.entries());
+      const boardConfig = await withResolvedBoard(params, requestUser, () => publicBoardConfig());
       json(res, 200, { ok: true, boardConfig, devices: publicDeviceProfiles() });
       return;
     }
@@ -3058,15 +3286,15 @@ async function route(req, res) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/status") {
-      requirePublicAdmin(requestUser);
-      const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
-      json(res, 200, await withDevice(deviceId, () => fastRawBoardStatus()));
+      const params = Object.fromEntries(url.searchParams.entries());
+      if (!params.device) requirePublicAdmin(requestUser);
+      json(res, 200, await withResolvedBoard(params, requestUser, () => fastRawBoardStatus()));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/audio/status") {
-      requirePublicAdmin(requestUser);
-      const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
-      json(res, 200, await withDevice(deviceId, () => runAudioRoute("status", () => audioStatus())));
+      const params = Object.fromEntries(url.searchParams.entries());
+      if (!params.device) requirePublicAdmin(requestUser);
+      json(res, 200, await withResolvedBoard(params, requestUser, () => runAudioRoute("status", () => audioStatus())));
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/audio/play") {
@@ -3097,14 +3325,14 @@ async function route(req, res) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/verify") {
-      requirePublicAdmin(requestUser);
-      const deviceId = deviceIdFrom(Object.fromEntries(url.searchParams.entries()), BOARD.id);
+      const params = Object.fromEntries(url.searchParams.entries());
+      if (!params.device) requirePublicAdmin(requestUser);
       const id = url.searchParams.get("id") || currentBuild?.id || lastDeploy?.id || "";
       if (!hasBoardCredentials()) {
         json(res, 200, { ok: true, skipped: true, mode: "offline-simulated", goldenLoop: buildOfflineGoldenLoop(id) });
         return;
       }
-      const goldenLoop = await withDevice(deviceId, () => verifyGoldenLoop(id));
+      const goldenLoop = await withResolvedBoard(params, requestUser, () => verifyGoldenLoop(id));
       json(res, 200, { ok: true, goldenLoop });
       return;
     }
@@ -3261,9 +3489,7 @@ async function route(req, res) {
         idempotency_key: executionContext.idempotencyKey,
         user_id: requestUser?.id || "",
       };
-      const job = PUBLIC_DEPLOYMENT
-        ? await runRequestBoundJob(type, jobInput)
-        : await enqueueBackgroundJob(type, jobInput);
+      const job = await enqueueBackgroundJob(type, jobInput);
       await recordProductTelemetry({
         req,
         user: requestUser,
@@ -3274,7 +3500,7 @@ async function route(req, res) {
         extra: { job_id: job.id, job_type: type },
       });
       await flushMutationSaves();
-      json(res, PUBLIC_DEPLOYMENT ? 200 : 202, { ok: true, job });
+      json(res, 202, { ok: true, job, poll_url: `/api/jobs/${encodeURIComponent(job.id)}` });
       return;
     }
 
@@ -3292,9 +3518,7 @@ async function route(req, res) {
       });
       if (wantsBackgroundJob(body || {})) {
         const jobInput = jobInputForRequest(req, requestUser, "agent", body || {});
-        const job = PUBLIC_DEPLOYMENT
-          ? await runRequestBoundJob("agent", jobInput)
-          : await enqueueBackgroundJob("agent", jobInput);
+        const job = await enqueueBackgroundJob("agent", jobInput);
         await recordProductTelemetry({
           req,
           user: requestUser,
@@ -3305,7 +3529,7 @@ async function route(req, res) {
           extra: { job_id: job.id, job_type: "agent" },
         });
         await flushMutationSaves();
-        json(res, PUBLIC_DEPLOYMENT ? 200 : 202, { ok: true, job });
+        json(res, 202, { ok: true, job, poll_url: `/api/jobs/${encodeURIComponent(job.id)}` });
         return;
       }
       try {
@@ -3363,9 +3587,7 @@ async function route(req, res) {
         await ensureCreditsAvailable(requestUser);
         if (wantsBackgroundJob(body || {})) {
           const jobInput = jobInputForRequest(req, requestUser, "generate", body || {});
-          const job = PUBLIC_DEPLOYMENT
-            ? await runRequestBoundJob("generate", jobInput)
-            : await enqueueBackgroundJob("generate", jobInput);
+          const job = await enqueueBackgroundJob("generate", jobInput);
           await recordProductTelemetry({
             req,
             user: requestUser,
@@ -3376,7 +3598,7 @@ async function route(req, res) {
             extra: { job_id: job.id, job_type: "generate" },
           });
           await flushMutationSaves();
-          json(res, PUBLIC_DEPLOYMENT ? 200 : 202, { ok: true, job });
+          json(res, 202, { ok: true, job, poll_url: `/api/jobs/${encodeURIComponent(job.id)}` });
           return;
         }
         const result = await runGenerateRequest(body || {});
@@ -3451,7 +3673,7 @@ async function route(req, res) {
           json(res, 202, { ok: true, job });
           return;
         }
-        const result = await runDeployRequest(body || {});
+        const result = await runDeployRequest({ ...(body || {}), user_id: requestUser?.id || "" });
         await writeProjectMemorySafe(body?.conversation_id, {
           trigger: "deploy-confirmed",
           buildId: result?.id || currentBuild?.id || "",

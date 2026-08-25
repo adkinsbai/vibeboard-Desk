@@ -11,8 +11,32 @@ await withServer(async ({ baseUrl, json }) => {
   try {
     await page.goto(`${baseUrl}/workbench`, { waitUntil: "domcontentloaded" });
     await page.locator("#chatLog").waitFor({ timeout: 6000 });
+    const platformTheme = await page.evaluate(() => {
+      const styles = getComputedStyle(document.body);
+      const readToken = name => styles.getPropertyValue(name).trim();
+      const generateButton = getComputedStyle(document.querySelector("#generateBtn"));
+      return {
+        name: readToken("--vb-theme-name"),
+        black: readToken("--vb-black"),
+        white: readToken("--vb-white"),
+        lime: readToken("--vb-lime"),
+        purple: readToken("--vb-purple"),
+        bodyBackground: styles.backgroundColor,
+        primaryBackground: generateButton.backgroundColor,
+        primaryColor: generateButton.color,
+      };
+    });
+    assert(platformTheme.name === "Electric Glass", "workbench should expose the Electric Glass platform theme");
+    assert(platformTheme.black === "#010101", "platform theme should define the VibeBoard black token");
+    assert(platformTheme.white === "#F0F0F0", "platform theme should define the VibeBoard white token");
+    assert(platformTheme.lime === "#F0F0F0", "platform accent token should use VibeBoard white");
+    assert(platformTheme.purple === "#7E3BED", "platform theme should define the VibeBoard purple token");
+    assert(platformTheme.bodyBackground === "rgb(1, 1, 1)", "workbench shell should render on VibeBoard black");
+    assert(platformTheme.primaryBackground === "rgb(240, 240, 240)", "primary platform action should render in VibeBoard white");
+    assert(platformTheme.primaryColor === "rgb(1, 1, 1)", "white primary action should use black text for contrast");
     await page.evaluate(() => {
       window.__vibeboardTestEvents = [];
+      let backgroundPollCount = 0;
       const originalFetch = window.fetch.bind(window);
       window.fetch = (input, init = {}) => {
         const url = typeof input === "string" ? input : input?.url || "";
@@ -37,8 +61,8 @@ await withServer(async ({ baseUrl, json }) => {
             job: {
               id: "job-final-immediate",
               type: "generate",
-              status: "succeeded",
-              phase: "done",
+              status: "queued",
+              phase: "queued",
               input: { prompt: "Immediate final job" },
               output: {
                 ok: true,
@@ -58,17 +82,39 @@ await withServer(async ({ baseUrl, json }) => {
               choices: [{ label: "Open result", action: "open_result" }]
             }
           }), {
-            status: 200,
+            status: 202,
             headers: { "content-type": "application/json" }
           }));
         }
         if (url.includes("/api/jobs/job-final-immediate") && method === "GET") {
           window.__vibeboardTestEvents.push({ type: "job-detail-get" });
+          backgroundPollCount += 1;
+          const done = backgroundPollCount > 1;
           return Promise.resolve(new Response(JSON.stringify({
-            ok: false,
-            error: "Job not found"
+            ok: true,
+            job: {
+              id: "job-final-immediate",
+              type: "generate",
+              status: done ? "succeeded" : "running",
+              phase: done ? "done" : "generate",
+              output: done ? {
+                ok: true,
+                id: "vb-ui-final",
+                agentSummary: "Background final job restored after polling",
+                files: {
+                  "index.html": "<!doctype html><html><head><link rel=\"stylesheet\" href=\"style.css\"></head><body><main id=\"app\">Immediate final job</main><script src=\"app.js\"></script></body></html>",
+                  "style.css": "body{margin:0;background:#000;color:#fff;font:24px sans-serif}",
+                  "app.js": "document.getElementById('app').dataset.ready='true';",
+                  "hardware_app.py": "print('{\"build_id\":\"vb-ui-final\",\"runtime\":\"executed_on_board\",\"available_apis\":[\"/api/status\",\"./hardware-result.json\"]}')",
+                  "manifest.json": "{\"id\":\"vb-ui-final\",\"files\":[\"index.html\",\"style.css\",\"app.js\",\"hardware_app.py\",\"manifest.json\"]}"
+                },
+                buildEvidence: { ok: true, summary: "stubbed verification", evidence: {} },
+                evidence: [],
+                verification: { ok: true }
+              } : null,
+            }
           }), {
-            status: 404,
+            status: 200,
             headers: { "content-type": "application/json" }
           }));
         }
@@ -215,33 +261,9 @@ await withServer(async ({ baseUrl, json }) => {
     await page.locator("#closeStatusDrawer").click();
     await page.waitForFunction(() => !document.querySelector("#statusDrawer")?.classList.contains("open"));
 
-    await page.locator("#accountBtn").click();
-    await page.locator("#authModal.open").waitFor({ timeout: 3000 });
-    const authStyle = await page.locator(".auth-panel").evaluate(node => {
-      const visibleInputs = [...node.querySelectorAll(".auth-form:not(.hidden) .auth-field input")];
-      const submit = node.querySelector(".auth-form:not(.hidden) button[type='submit']");
-      const activeTab = node.querySelector(".auth-tab.active");
-      const rect = el => {
-        const box = el.getBoundingClientRect();
-        return { x: Math.round(box.x), width: Math.round(box.width), height: Math.round(box.height) };
-      };
-      return {
-        panelBackground: getComputedStyle(node).backgroundColor,
-        panelColor: getComputedStyle(node).color,
-        panelBorder: getComputedStyle(node).borderColor,
-        inputRects: visibleInputs.map(rect),
-        inputBorders: visibleInputs.map(el => getComputedStyle(el).borderColor),
-        submitRect: rect(submit),
-        submitBackground: getComputedStyle(submit).backgroundColor,
-        activeTabBackground: getComputedStyle(activeTab).backgroundColor,
-      };
-    });
-    assert(authStyle.panelBackground === "rgb(255, 255, 255)", "auth panel should use a clean white surface");
-    assert(authStyle.panelBorder === "rgb(17, 17, 17)", "auth panel should use a black border");
-    assert(authStyle.inputBorders.every(color => color === "rgb(17, 17, 17)"), "auth inputs should use black borders");
-    assert(authStyle.inputRects.every(rect => rect.x === authStyle.submitRect.x && rect.width === authStyle.submitRect.width), "auth fields and submit button should align");
-    assert(authStyle.submitBackground === "rgb(31, 143, 58)", "auth submit button should use the green action color");
-    assert(authStyle.activeTabBackground === "rgb(31, 143, 58)", "active auth tab should use the green selected color");
+    assert(await page.locator("#authModal").count() === 0, "workbench should not include its own login/register modal");
+    assert(await page.locator("#loginForm").count() === 0, "workbench should not include a login form");
+    assert(await page.locator("#registerForm").count() === 0, "workbench should not include a register form");
     assert(await page.locator("#creditChip").count() === 1, "usage action should live in the account menu");
     const usageSurface = await page.locator("#usageDrawer").evaluate(node => ({
       open: node.classList.contains("open"),
@@ -250,17 +272,17 @@ await withServer(async ({ baseUrl, json }) => {
       hasLedger: Boolean(document.querySelector("#usageLedger")),
     }));
     assert(!usageSurface.open && usageSurface.hasToolbar && usageSurface.hasSummary && usageSurface.hasLedger, "usage drawer should be available but require login before opening");
-    await page.locator("#closeAuthModal").click();
-    await page.waitForFunction(() => !document.querySelector("#authModal")?.classList.contains("open"));
 
     await page.locator("#assetManagerBtn").click();
     await page.locator("#assetManagerDrawer.open").waitFor({ timeout: 3000 });
     const assetSurface = await page.locator("#assetManagerDrawer").evaluate(node => ({
       background: getComputedStyle(node).backgroundColor,
       color: getComputedStyle(node).color,
+      themeName: getComputedStyle(document.body).getPropertyValue("--vb-theme-name").trim(),
     }));
-    assert(!assetSurface.background.includes("248, 250, 252") && !assetSurface.background.includes("255, 255, 255"), "asset manager should use the app dark surface");
-    assert(!assetSurface.color.includes("15, 23, 42"), "asset manager text should not use the old light-theme foreground");
+    assert(assetSurface.themeName === "Electric Glass", "workbench should enable the Electric Glass platform theme");
+    assert(assetSurface.background.includes("9, 9, 11") || assetSurface.background.includes("13, 13, 16"), "asset manager should use an Electric Glass dark surface");
+    assert(assetSurface.color.includes("240, 240, 240"), "asset manager text should use the Electric Glass foreground");
     await page.locator(".asset-project-item").first().waitFor({ timeout: 3000 });
     await page.locator(".asset-folder-tile").first().waitFor({ timeout: 3000 });
     const folderCount = await page.locator(".asset-folder-tile").count();
@@ -279,6 +301,8 @@ await withServer(async ({ baseUrl, json }) => {
     assert(propertiesText.includes("ui-smoke.png") && propertiesText.includes("image/png"), "asset properties should show file name and MIME type");
     await page.locator("#closeAssetPropertiesModal").click();
     await page.waitForFunction(() => !document.querySelector("#assetPropertiesModal")?.classList.contains("open"));
+    await page.locator("#closeAssetManagerDrawer").click();
+    await page.waitForFunction(() => !document.querySelector("#assetManagerDrawer")?.classList.contains("open"));
 
     await page.evaluate(async () => {
       window.__vibeboardTestEvents = [];
@@ -288,9 +312,22 @@ await withServer(async ({ baseUrl, json }) => {
     const lastBuildState = await page.locator("#lastBuildState").textContent();
     const codePreviewText = await page.locator("#codePreview").textContent();
     assert(finalJobEvents.some(item => item.type === "generate-post"), "runFlow should start generation through /api/generate");
-    assert(!finalJobEvents.some(item => item.type === "job-detail-get"), "runFlow should not poll a request-bound final job after /api/generate already returned it");
-    assert(lastBuildState === "vb-ui-final", `request-bound final job should restore the generated build, got ${lastBuildState}`);
-    assert(codePreviewText.includes("Immediate final job"), "request-bound final job should render generated files");
+    assert(finalJobEvents.some(item => item.type === "job-detail-get"), "runFlow should poll the queued background job");
+    assert(finalJobEvents.filter(item => item.type === "job-detail-get").length >= 2, "runFlow should observe running and final job states");
+    assert(lastBuildState === "vb-ui-final", `background final job should restore the generated build, got ${lastBuildState}`);
+    assert(codePreviewText.includes("Immediate final job"), "background final job should render generated files");
+
+    await page.evaluate(async () => {
+      window.__vibeboardTestEvents = [];
+      await Promise.all([
+        window.runFlow("Duplicate guard job", [], ""),
+        window.runFlow("Duplicate guard job", [], ""),
+      ]);
+    });
+    const duplicateGuardPosts = await page.evaluate(() => (
+      window.__vibeboardTestEvents || []
+    ).filter(item => item.type === "generate-post").length);
+    assert(duplicateGuardPosts === 1, `overlapping build triggers should post once, got ${duplicateGuardPosts}`);
 
     await page.evaluate(() => window.setBusy(false));
     await page.locator("#promptInput").fill("Enter should submit from the main composer");
@@ -298,6 +335,55 @@ await withServer(async ({ baseUrl, json }) => {
     await page.waitForFunction(() => (window.__vibeboardTestEvents || []).some(item => item.type === "agent-post"));
     const submitted = await page.evaluate(() => window.__vibeboardTestEvents.length);
     assert(submitted >= 1, "Enter should submit the main composer");
+
+    await page.evaluate(() => {
+      document.querySelectorAll(".drawer.open, .modal.open").forEach(node => window.setLayerOpen(node, false));
+      window.syncScrim();
+    });
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await page.waitForFunction(() => document.querySelector("#sidebar")?.classList.contains("collapsed"));
+    const compactDesktopLayout = await page.evaluate(() => {
+      const box = selector => document.querySelector(selector)?.getBoundingClientRect();
+      const actionButtons = [...document.querySelectorAll(".top-actions > *")];
+      return {
+        shellWidth: box(".shell")?.width || 0,
+        sidebarPosition: getComputedStyle(document.querySelector("#sidebar")).position,
+        agentWidth: box(".agent-panel")?.width || 0,
+        hardwareWidth: box(".hardware-panel")?.width || 0,
+        wrappedActions: actionButtons.some(node => node.getBoundingClientRect().height > 42),
+        scrollWidth: document.documentElement.scrollWidth,
+      };
+    });
+    assert(compactDesktopLayout.sidebarPosition === "fixed", "compact desktop sidebar should be a fixed overlay");
+    assert(compactDesktopLayout.shellWidth >= 1023, "compact desktop workbench should use the full viewport width");
+    assert(compactDesktopLayout.agentWidth >= 350, "compact desktop agent panel should remain usable");
+    assert(compactDesktopLayout.hardwareWidth >= 600, "compact desktop preview should remain the primary surface");
+    assert(!compactDesktopLayout.wrappedActions, "compact desktop top actions should not wrap into tall buttons");
+    assert(compactDesktopLayout.scrollWidth <= 1024, "compact desktop workbench should not scroll horizontally");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForFunction(() => document.querySelector("#sidebar")?.classList.contains("collapsed"));
+    const mobileLayout = await page.evaluate(() => ({
+      bodyWidth: document.body.getBoundingClientRect().width,
+      shellWidth: document.querySelector(".shell")?.getBoundingClientRect().width || 0,
+      sidebarCollapsed: document.querySelector("#sidebar")?.classList.contains("collapsed"),
+      sidebarExpanded: document.querySelector("#sidebarToggle")?.getAttribute("aria-expanded"),
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    assert(mobileLayout.sidebarCollapsed, "mobile workbench should start with the project sidebar collapsed");
+    assert(mobileLayout.sidebarExpanded === "false", "mobile sidebar button should expose its collapsed state");
+    assert(mobileLayout.shellWidth >= mobileLayout.bodyWidth - 1, "mobile workbench should keep the shell at full viewport width");
+    assert(mobileLayout.scrollWidth <= 390, "mobile workbench should not introduce horizontal page scrolling");
+    await page.locator("#sidebarToggle").click();
+    const openedMobileSidebar = await page.locator("#sidebar").evaluate(node => ({
+      collapsed: node.classList.contains("collapsed"),
+      position: getComputedStyle(node).position,
+      width: node.getBoundingClientRect().width,
+      shellWidth: document.querySelector(".shell")?.getBoundingClientRect().width || 0,
+    }));
+    assert(!openedMobileSidebar.collapsed && openedMobileSidebar.position === "fixed", "mobile sidebar should open as a fixed overlay");
+    assert(openedMobileSidebar.width > 240, "mobile sidebar overlay should remain usable");
+    assert(openedMobileSidebar.shellWidth >= mobileLayout.bodyWidth - 1, "opening the mobile sidebar must not squeeze the workbench");
 
     console.log(JSON.stringify({ ok: true, activeId, beforeCreate, afterCreate, submitted }, null, 2));
   } finally {

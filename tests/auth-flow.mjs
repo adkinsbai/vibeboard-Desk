@@ -7,6 +7,9 @@ const PASSWORD = "correct-horse-42";
 await withServer(async ({ baseUrl }) => {
   const unauthenticated = await raw(baseUrl, "/api/conversations");
   assert(unauthenticated.status === 401, "public deployment should require login for conversations");
+  const unauthenticatedWorkbench = await raw(baseUrl, "/workbench", { redirect: "manual", headers: { accept: "text/html" } });
+  assert(unauthenticatedWorkbench.status === 302, "public deployment should redirect unauthenticated workbench visits");
+  assert(unauthenticatedWorkbench.response.headers.get("location") === "/", "workbench redirect should return to the VibeBoard portal");
 
   const register = await raw(baseUrl, "/api/auth/register", {
     method: "POST",
@@ -40,6 +43,26 @@ await withServer(async ({ baseUrl }) => {
   const regularCookie = await registerUser(baseUrl, USER_PHONE, PASSWORD);
   const regularMe = await getJson(baseUrl, "/api/me", regularCookie);
   assert(regularMe.user?.role === "user", "non-admin phone should register as a regular user");
+
+  const boundDevice = await postJson(baseUrl, "/api/device-bindings", { serial: "WHITEBOX2026" }, regularCookie);
+  assert(boundDevice.device?.serial === "WHITEBOX2026", "regular user should bind an inventory device by serial");
+  assert(boundDevice.devices?.some(device => device.serial === "WHITEBOX2026"), "bound device should be listed after binding");
+  const boundBoardConfig = await getJson(baseUrl, "/api/board-config?device=WHITEBOX2026", regularCookie);
+  assert(boundBoardConfig.boardConfig?.label === "白色版小电脑", "bound device serial should resolve to the user's board config");
+  const secondCookie = await registerUser(baseUrl, "+15550001111", PASSWORD);
+  const blockedBoundBoard = await raw(baseUrl, "/api/board-config?device=WHITEBOX2026", {
+    headers: { cookie: secondCookie },
+  });
+  assert(blockedBoundBoard.status === 403, "another user should not access a device bound to someone else");
+  const duplicateBind = await raw(baseUrl, "/api/device-bindings", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie: secondCookie,
+    },
+    body: JSON.stringify({ serial: "WHITEBOX2026" }),
+  });
+  assert(duplicateBind.status === 409, "a hardware serial should only bind to one user");
 
   const blockedAdmin = await raw(baseUrl, "/api/admin/users", {
     headers: { cookie: regularCookie },

@@ -6,7 +6,7 @@
   <title>VibeBoard Linux MVP</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
-<body>
+<body class="calm-consumer-shell">
   <div class="app-layout">
     <!-- Sidebar: Conversation List -->
     <aside class="sidebar" id="sidebar">
@@ -15,7 +15,7 @@
           <div class="mark" aria-hidden="true"><span></span><span></span><span></span></div>
           <span class="brand-name">VibeBoard</span>
         </div>
-        <button class="ghost-btn" id="newConversationBtn" type="button">+ 新建</button>
+        <button class="ghost-btn" id="newConversationBtn" type="button">新建项目</button>
       </div>
       <div class="conversation-list" id="conversationList">
         <!-- Conversations will be loaded here -->
@@ -52,8 +52,8 @@
           <button class="icon-btn" id="sidebarToggle" type="button" aria-label="Toggle sidebar">☰</button>
           <div class="brand">
             <div>
-              <p>VibeBoard Linux</p>
-              <h1 id="currentConversationTitle">Hardware Vibe Coding MVP</h1>
+              <p>VibeBoard</p>
+              <h1 id="currentConversationTitle">我的项目</h1>
             </div>
           </div>
         </div>
@@ -81,7 +81,7 @@
         <section class="agent-panel">
           <div class="panel-head">
             <div>
-              <p class="kicker">Agent Chat</p>
+              <p class="kicker">我的创作空间</p>
               <h2>和 Agent 对话</h2>
             </div>
             <span class="pill" id="agentState">idle</span>
@@ -117,7 +117,7 @@
                 </select>
               </label>
             </div>
-            <button class="primary-btn wide" id="generateBtn" type="submit">发送</button>
+            <button class="primary-btn wide" id="generateBtn" type="submit">开始创作</button>
           </form>
         </section>
 
@@ -126,8 +126,8 @@
             <div class="device-card">
               <div class="device-toolbar">
                 <div>
-                  <p class="kicker">Live Hardware Preview</p>
-                  <h2>小屏效果</h2>
+                  <p class="kicker">我的设备</p>
+                  <h2>预览</h2>
                 </div>
                 <div class="device-actions">
                   <select id="deviceSelect" class="device-select" aria-label="选择设备">
@@ -385,51 +385,6 @@
     </div>
   </section>
 
-  <section class="modal auth-modal" id="authModal" aria-hidden="true" role="dialog" aria-labelledby="authModalTitle">
-    <div class="modal-panel auth-panel">
-      <button class="auth-close" id="closeAuthModal" type="button" aria-label="Close account dialog">x</button>
-      <div class="auth-heading">
-        <p class="auth-product">VibeBoard</p>
-        <h2 id="authModalTitle">Sign in to your account</h2>
-        <p class="auth-subtitle" id="authModalSubtitle">Use your phone number and password to continue.</p>
-      </div>
-      <div class="auth-tabs" role="tablist">
-        <button class="auth-tab active" id="authLoginTab" type="button" aria-selected="true">Sign in</button>
-        <button class="auth-tab" id="authRegisterTab" type="button" aria-selected="false">Sign up</button>
-      </div>
-      <form class="auth-form" id="loginForm">
-        <label class="auth-field">
-          <span>Phone number</span>
-          <input id="loginPhone" type="tel" autocomplete="tel" placeholder="19851622265" required>
-        </label>
-        <label class="auth-field">
-          <span>Password</span>
-          <input id="loginPassword" type="password" autocomplete="current-password" required>
-        </label>
-        <button class="primary-btn wide" type="submit">Sign in</button>
-      </form>
-      <form class="auth-form hidden" id="registerForm">
-        <label class="auth-field">
-          <span>Phone number</span>
-          <input id="registerPhone" type="tel" autocomplete="tel" placeholder="19851622265" required>
-        </label>
-        <div class="auth-code-row hidden">
-          <label class="auth-field">
-            <span>Verification code</span>
-            <input id="registerCode" type="text" inputmode="numeric" autocomplete="one-time-code">
-          </label>
-          <button class="ghost-btn" id="sendCodeBtn" type="button">发送验证码</button>
-        </div>
-        <label class="auth-field">
-          <span>Password</span>
-          <input id="registerPassword" type="password" autocomplete="new-password" minlength="8" required>
-        </label>
-        <button class="primary-btn wide" type="submit">Sign up</button>
-      </form>
-      <p class="auth-message" id="authMessage"></p>
-    </div>
-  </section>
-
   <section class="modal" id="modelModal" aria-hidden="true" role="dialog" aria-labelledby="modelModalTitle">
     <div class="modal-panel">
       <div class="drawer-head">
@@ -445,6 +400,7 @@
           <select id="modelProvider">
             <option value="deepseek">DeepSeek</option>
             <option value="minimax">MiniMax</option>
+            <option value="glm">GLM 5.2</option>
             <option value="custom">Custom OpenAI-compatible</option>
           </select>
         </label>

@@ -97,7 +97,16 @@ ${recentContext ? `## 最近对话\n${recentContext}` : ""}
     });
     clearTimeout(timeout);
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const providerMessage = providerErrorMessage(data) || `HTTP ${res.status}`;
+      const error = new Error(`LLM_CALL_FAILED: HTTP ${res.status}; provider=${providerMessage}`);
+      error.type = "llm_failed";
+      error.code = "LLM_CALL_FAILED";
+      error.status = res.status;
+      error.providerMessage = providerMessage;
+      throw error;
+    }
 
     const data = await res.json().catch(() => ({}));
     const content = data.choices?.[0]?.message?.content || "";
@@ -129,9 +138,20 @@ ${recentContext ? `## 最近对话\n${recentContext}` : ""}
       reasoning: parsed.reasoning || "",
     };
   } catch (err) {
+    if (err?.code === "LLM_CALL_FAILED" || err?.type === "llm_failed") throw err;
     console.error("[clarify] LLM analysis failed:", err.message);
     return null; // 失败时跳过 clarify，直接生成
   }
+}
+
+function providerErrorMessage(data) {
+  if (!data || typeof data !== "object") return "";
+  const error = data.error;
+  if (typeof error === "string") return error;
+  if (error?.message) return String(error.message);
+  if (data.message) return String(data.message);
+  if (data.base_resp?.status_msg) return String(data.base_resp.status_msg);
+  return "";
 }
 
 /**

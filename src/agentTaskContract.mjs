@@ -35,6 +35,8 @@ export function taskContractPrompt(contract) {
     `Screen: ${contract.screen.width}x${contract.screen.height}; touch=${contract.screen.touch}`,
     `Controls: ${contract.controls.join(", ")}`,
     `Model-turn budget: ${contract.max_model_turns}`,
+    "Before calling done, inspect the generated files against every acceptance criterion and forbidden item. Missing behavior is unfinished work even when syntax passes.",
+    "Use the remaining model turns for focused contract repairs; do not spend them rereading unchanged files unless a verifier points to a specific location.",
     "Treat this contract as completion evidence, not as permission to deploy.",
   ].join("\n");
 }

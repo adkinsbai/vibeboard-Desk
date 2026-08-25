@@ -66,6 +66,7 @@ function execFileP(command, args, options = {}) {
       timeout: options.timeout || 15000,
       windowsHide: true,
       maxBuffer: 1024 * 1024,
+      env: options.env || process.env,
     }, (error, stdout, stderr) => {
       if (error) {
         error.stdout = stdout;
@@ -177,31 +178,33 @@ function templateFilesForPrompt(prompt, id = "vb-template-test") {
   };
 }
 
-await test("template routes paid fishing salary calculators away from hardware control", () => {
+await test("fallback spec is neutral and never classifies product intent from prompt text", () => {
   const prompt = [
-    "做一个带薪摸鱼计算器",
-    "点击开始就计算薪资，点击暂停停止",
-    "我的时薪是150",
-    "要有一个大按钮",
-  ].join("，");
+    "Build a salary calculator with black background and white text.",
+    "Current project memory: Goal: weather dashboard status panel.",
+    "Asset context mentions carousel, voice, GPIO, timer, control, and server monitoring.",
+  ].join("\n");
   const spec = createAppSpec(prompt, "vb-wage-template");
-  assert(spec.mode === "wage", `expected wage mode, got ${spec.mode}`);
+  assert(spec.mode === "fallback", `expected neutral fallback mode, got ${spec.mode}`);
+  assert(spec.title === "VibeBoard Generated App", `expected neutral fallback title, got ${spec.title}`);
+  assert(spec.prompt === prompt, "fallback spec should preserve the prompt without design reinterpretation");
+  assert(spec.hourlyRate === undefined, "fallback spec should not infer wage-specific fields");
+  assert(spec.widgets.length === 4, "fallback spec should keep a stable generic widget skeleton");
+
   const files = templateFilesForPrompt(prompt, "vb-wage-template");
   const joined = Object.values(files).join("\n");
-  assert(joined.includes("带薪摸鱼计算器"), "wage template should keep the calculator title");
-  assert(joined.includes("150元/小时"), "wage template should display the hourly wage");
-  assert(joined.includes("开始摸鱼"), "wage template should include a start button label");
-  assert(joined.includes("暂停摸鱼"), "wage template should include a pause button label");
-  assert(files["app.js"].includes("const PROMPT = SPEC.prompt;"), "wage template app.js should preserve the generated-file PROMPT contract");
-  assert(/setInterval|requestAnimationFrame/.test(files["app.js"]), "wage template should update live over time");
-  assert(/HOURLY_RATE\s*\/\s*3600/.test(files["app.js"]), "wage template should calculate salary per second from the hourly rate");
-  assert(!/Relay Command|Hardware Control|Toggle A|GPIO/.test(joined), "wage template must not fall back to the hardware control panel");
+  assert(joined.includes("VibeBoard Generated App"), "fallback template should use the neutral product shell");
+  assert(!/System Nebula|Device Dashboard|带薪摸鱼|天气|Weather|Relay Command|Hardware Control|Focus Reactor|Voice Spectrum/.test(joined), "fallback template must not inject classified app designs");
 
-  const englishSpec = createAppSpec("salary timer with start button, hourly wage 150 RMB/hour", "vb-wage-english");
-  assert(englishSpec.mode === "wage", `expected English salary timer prompt to stay wage mode, got ${englishSpec.mode}`);
-
-  const salaryTimerSpec = createAppSpec("salary timer, hourly wage 150 RMB/hour", "vb-wage-timer");
-  assert(salaryTimerSpec.mode === "wage", `expected salary timer prompt to stay wage mode, got ${salaryTimerSpec.mode}`);
+  for (const text of [
+    "salary timer with start button, hourly wage 150 RMB/hour",
+    "make a weather dashboard",
+    "fullscreen clock with white text",
+    "GPIO relay control panel",
+  ]) {
+    const candidate = createAppSpec(text, "vb-neutral");
+    assert(candidate.mode === "fallback", `expected no prompt classification for ${text}, got ${candidate.mode}`);
+  }
 });
 
 function makeZip(entries = []) {
@@ -607,8 +610,10 @@ async function withMockChatServer(responses, fn) {
       requestBodies.push({});
     }
 
-    const message = responses[Math.min(index, responses.length - 1)];
+    const responseItem = responses[Math.min(index, responses.length - 1)];
     index += 1;
+    if (responseItem?.__delayMs) await new Promise(resolve => setTimeout(resolve, responseItem.__delayMs));
+    const message = responseItem?.message || responseItem;
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ choices: [{ message }] }));
   });
@@ -1598,8 +1603,14 @@ sys.exit(0)
     const output = JSON.parse(result.stdout.trim());
 
     assert(output.build_id === "vb-wrapper-exit-ok", "wrapper should replace source build id");
-    assert(output.runtime === "executed_on_board", "wrapper should normalize runtime");
+    assert(output.runtime === "simulated", "local wrapper runs must remain explicitly simulated");
     assert(output.available_apis.includes("./hardware-result.json"), "wrapper should preserve hardware result API contract");
+
+    const boardResult = await execFileP(PYTHON_BIN, [scriptPath], {
+      cwd: dir,
+      env: { ...process.env, VIBEBOARD_RUNTIME: "executed_on_board" },
+    });
+    assert(JSON.parse(boardResult.stdout.trim()).runtime === "executed_on_board", "board wrapper runs must require an explicit board marker");
   });
 });
 
@@ -1713,7 +1724,7 @@ await test("audio record failures include actionable hardware diagnostics", asyn
 await test("main UI keeps navigation usable during running tasks", async () => {
   const html = await fs.readFile(path.join(ROOT, "index.html"), "utf8");
   const js = await fs.readFile(path.join(ROOT, "app.js"), "utf8");
-  assert(html.includes('id="generateBtn" type="submit">发送</button>'), "main composer button should be labeled send");
+  assert(html.includes('id="generateBtn" type="submit">开始创作</button>'), "main composer button should use the approved creation label");
   assert(js.includes('promptInput?.addEventListener("keydown"'), "main composer should handle keyboard submission");
   assert(js.includes('event.key !== "Enter" || event.shiftKey || event.isComposing'), "Enter handling should preserve shift-enter and IME composition");
   assert(!js.includes("generateBtn.disabled = value"), "running state should not disable the send button");
@@ -1772,13 +1783,13 @@ await test("job runtime queues work and turns failures into choices", async () =
     return { ok: true, files: { "index.html": "<!doctype html>" } };
   });
 
-  const okJob = runtime.enqueue("generate", { prompt: "ok" }, { title: "ok" });
+  const okJob = await runtime.enqueue("generate", { prompt: "ok" }, { title: "ok" });
   await new Promise(resolve => setTimeout(resolve, 20));
   const ok = store.getJob(okJob.id);
   assert(ok.status === "succeeded", `expected succeeded, got ${ok.status}`);
   assert(ok.choices.some(choice => choice.action === "open_result"), "successful generate job should expose open result choice");
 
-  const failJob = runtime.enqueue("generate", { fail: true }, { title: "fail" });
+  const failJob = await runtime.enqueue("generate", { fail: true }, { title: "fail" });
   await new Promise(resolve => setTimeout(resolve, 20));
   const failed = store.getJob(failJob.id);
   assert(failed.status === "failed", `expected failed, got ${failed.status}`);
@@ -1796,7 +1807,7 @@ await test("job runtime times out stuck work with retry choices", async () => {
     return { ok: true };
   });
 
-  const job = runtime.enqueue("agent", { prompt: "slow" }, { title: "slow" });
+  const job = await runtime.enqueue("agent", { prompt: "slow" }, { title: "slow" });
   await new Promise(resolve => setTimeout(resolve, 1200));
   const timedOut = store.getJob(job.id);
   assert(timedOut.status === "failed", `expected timeout failure, got ${timedOut.status}`);
@@ -2821,16 +2832,13 @@ await test("generate runtime runs template path and saves snapshot", async () =>
   assert(savedSnapshot?.files?.[HARDWARE_RESULT_FILE], "snapshot should include hardware result file");
 });
 
-await test("generate runtime rejects overlapping generation requests with actionable error", async () => {
+await test("generate runtime accepts overlapping generation requests without shared state", async () => {
   const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
-  let releaseFirst;
-  const firstStarted = new Promise(resolve => {
-    releaseFirst = resolve;
-  });
-  let allowFirstToFinish;
-  const firstCanFinish = new Promise(resolve => {
-    allowFirstToFinish = resolve;
-  });
+  let started = 0;
+  let releaseBoth;
+  const bothCanFinish = new Promise(resolve => { releaseBoth = resolve; });
+  let markBothStarted;
+  const bothStarted = new Promise(resolve => { markBothStarted = resolve; });
   const runtime = createGenerateRuntime({
     conversationStore: {
       getProjectMemory: () => ({}),
@@ -2842,14 +2850,16 @@ await test("generate runtime rejects overlapping generation requests with action
       set: () => {},
     },
     appendServerLog: async () => {},
-    writeGenerated: async () => {
-      releaseFirst();
-      await firstCanFinish;
+    writeGenerated: async prompt => {
+      started += 1;
+      if (started === 2) markBothStarted();
+      await bothCanFinish;
+      const id = prompt.includes("first long") ? "vb-runtime-first" : "vb-runtime-second";
       return {
         ok: true,
-        id: "vb-runtime-lock",
-        files: { "index.html": "<html></html>" },
-        manifest: { id: "vb-runtime-lock" },
+        id,
+        files: { "index.html": `<html>${id}</html>` },
+        manifest: { id },
         agentRun: { spec: {}, evidence: [] },
         buildEvidence: { ok: true, issues: [] },
         intelligenceSummary: { confidence: "local_verified" },
@@ -2862,25 +2872,18 @@ await test("generate runtime rejects overlapping generation requests with action
     prompt: "first long running task",
     modelSettings: { enabled: false },
   });
-  await firstStarted;
+  const second = runtime.runGenerateRequest({
+    prompt: "second task while first is active",
+    modelSettings: { enabled: false },
+  });
+  await bothStarted;
+  releaseBoth();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
 
-  let overlapError = null;
-  try {
-    await runtime.runGenerateRequest({
-      prompt: "second task while first is active",
-      modelSettings: { enabled: false },
-    });
-  } catch (error) {
-    overlapError = error;
-  } finally {
-    allowFirstToFinish();
-  }
-  const firstResult = await first;
-
-  assert(firstResult.ok === true, "first generation should finish after the lock is released");
-  assert(overlapError?.errorType === "generate_busy", `expected generate_busy, got ${overlapError?.message} ${JSON.stringify(overlapError)}`);
-  assert(overlapError?.statusCode === 409, "overlapping generation should be reported as HTTP 409");
-  assert(overlapError?.userMessage?.includes("当前已经有一个生成任务"), "busy error should be user-actionable");
+  assert(firstResult.ok === true && secondResult.ok === true, "both generations should finish");
+  assert(firstResult.id !== secondResult.id, "overlapping generations should keep separate build ids");
+  assert(firstResult.files["index.html"].includes(firstResult.id), "first response should keep first files");
+  assert(secondResult.files["index.html"].includes(secondResult.id), "second response should keep second files");
 });
 
 await test("generate runtime embeds uploaded passive assets into template builds", async () => {
@@ -2953,6 +2956,8 @@ await test("generate runtime embeds uploaded passive assets into template builds
   assert(result.files["assets/uploaded/hero.png"].equals(embeddedPng), "embedded asset bytes should be preserved");
   assert(manifest.assets.includes("assets/uploaded/hero.png"), "manifest assets[] should declare embedded asset");
   assert(manifest.files.includes("assets/uploaded/hero.png"), "manifest files[] should include embedded asset");
+  assert(manifest.prompt === "Build a product display with my uploaded hero image.", "manifest should preserve the raw user prompt");
+  assert(!result.files["manifest.json"].includes("Embedded uploaded assets"), "manifest file should not persist internal asset prompt context");
   assert(savedSnapshot?.files?.["assets/uploaded/hero.png"], "conversation snapshot should save embedded asset");
 });
 
@@ -3428,6 +3433,9 @@ await test("agent orchestrator routes confirmed build through generator", async 
   assert(receivedBody?.prompt === "Build the confirmed village simulator.", "confirmed prompt should reach generator");
   assert(receivedBody?.conversation_id === "conv-agent-orchestrator", "conversation id should reach generator");
   assert(Array.isArray(receivedBody?.history) && receivedBody.history.length === 1, "history should reach generator");
+  assert(receivedBody?.task_contract?.schema_version === "agent-task-contract.v1", "confirmed build should receive a bounded task contract");
+  assert(receivedBody.task_contract.objective === "Build the confirmed village simulator.", "task contract should preserve confirmed objective");
+  assert(receivedBody.task_contract.forbidden.includes("automatic hardware deployment"), "task contract should preserve deploy boundary");
 });
 
 await test("agent orchestrator returns choice-based guidance when model is missing", async () => {
@@ -4161,6 +4169,190 @@ if (!verifier) {
     assert(result.issues.some(issue => issue.code === "INTERACTIVE_TARGET_SMALL" && issue.severity === "warning"), `expected INTERACTIVE_TARGET_SMALL warning, got ${JSON.stringify(result.issues)}`);
   });
 }
+
+await test("agent task contract is bounded and preserves acceptance criteria", async () => {
+  const { createAgentTaskContract, taskContractPrompt } = await import(pathToFileURL(path.join(ROOT, "src", "agentTaskContract.mjs")).href);
+  const contract = createAgentTaskContract({
+    objective: "Build a physical companion simulator",
+    requiredFiles: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"],
+    acceptanceCriteria: ["first screen is expressive", "three skins", "no external APIs"],
+    forbidden: ["automatic deploy", "credentials"],
+    maxModelTurns: 14,
+  });
+  assert(contract.schema_version === "agent-task-contract.v1", "contract schema should be versioned");
+  assert(contract.required_files.length === 5, "contract should preserve required files");
+  assert(contract.max_model_turns === 14, "contract should preserve model-turn budget");
+  assert(taskContractPrompt(contract).includes("first screen is expressive"), "contract prompt should preserve acceptance criteria");
+  assert(!taskContractPrompt(contract).includes("undefined"), "contract prompt should not serialize missing values");
+});
+
+await test("agent task contract rejects unknown writable files", async () => {
+  const { createAgentTaskContract } = await import(pathToFileURL(path.join(ROOT, "src", "agentTaskContract.mjs")).href);
+  let rejected = false;
+  try {
+    createAgentTaskContract({ objective: "x", requiredFiles: ["server.mjs"] });
+  } catch (error) {
+    rejected = /required_files/.test(error.message);
+  }
+  assert(rejected, "task contract should reject server.mjs as a generated app file");
+});
+
+await test("agent receives one bounded task contract without leaking credentials", async () => {
+  const { runAgent } = await import(pathToFileURL(path.join(ROOT, "src", "agent.mjs")).href);
+  const { createAgentTaskContract } = await import(pathToFileURL(path.join(ROOT, "src", "agentTaskContract.mjs")).href);
+  const files = validGeneratedFiles();
+  await withMockChatServer([
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        createFileToolCall("contract-index", "index.html", files["index.html"]),
+        createFileToolCall("contract-style", "style.css", files["style.css"]),
+        createFileToolCall("contract-app", "app.js", files["app.js"]),
+        createFileToolCall("contract-hardware", "hardware_app.py", files["hardware_app.py"]),
+      ],
+    },
+    { role: "assistant", content: "done" },
+  ], async mock => {
+    const taskContract = createAgentTaskContract({
+      objective: "Build the confirmed companion",
+      acceptanceCriteria: ["first screen is expressive", "three skins"],
+      forbidden: ["automatic hardware deployment"],
+      maxModelTurns: 4,
+    });
+    const progressEvents = [];
+    const result = await runAgent({
+      baseUrl: mock.baseUrl,
+      apiKey: "test-key-not-in-body",
+      model: "mock-tools",
+      maxIterations: 8,
+      maxVerificationAttempts: 1,
+      llmTimeoutMs: 10000,
+    }, "Build the confirmed companion", {}, [], null, {}, null, null, {
+      taskContract,
+      onProgress: event => progressEvents.push(event),
+    });
+    assert(result.success === true, `expected contract-backed run to succeed: ${JSON.stringify(result)}`);
+    const body = mock.requestBodies()[0];
+    const system = body.messages?.[0]?.content || "";
+    assert((system.match(/agent-task-contract\.v1/g) || []).length === 1, "system prompt should contain exactly one task contract");
+    assert(system.includes("first screen is expressive") && system.includes("three skins"), "system prompt should contain acceptance criteria");
+    assert(system.includes("automatic hardware deployment"), "system prompt should preserve forbidden behavior");
+    assert(system.includes("同一次回复中并行调用多个 create_file"), "system prompt should tell high-latency models to batch independent file tools");
+    assert(system.includes("inspect the generated files against every acceptance criterion"), "system prompt should require a completion audit against the task contract");
+    assert(!JSON.stringify(body).includes("test-key-not-in-body"), "request body should not contain API credentials");
+    assert(mock.calls() === 2, `expected 2 model calls, got ${mock.calls()}`);
+    assert(progressEvents[0]?.type === "agent.run.started", "progress should begin with run start");
+    assert(progressEvents.some(event => event.type === "agent.model.started"), "progress should include model start");
+    assert(progressEvents.some(event => event.type === "agent.tool.completed"), "progress should include completed tools");
+    assert(progressEvents.some(event => event.type === "agent.verification.completed" && event.ok === true), "progress should include successful verification");
+    assert(progressEvents.at(-1)?.type === "agent.run.completed", "progress should end with run completion");
+    assert(progressEvents.filter(event => /agent\.run\.(?:completed|failed)/.test(event.type)).length === 1, "progress should emit exactly one terminal event");
+  });
+});
+
+await test("agent enforces its configured total execution budget", async () => {
+  const { runAgent } = await import(pathToFileURL(path.join(ROOT, "src", "agent.mjs")).href);
+  await withMockChatServer([{
+    __delayMs: 1500,
+    message: { role: "assistant", content: "late response" },
+  }], async mock => {
+    const startedAt = Date.now();
+    const result = await runAgent({
+      baseUrl: mock.baseUrl,
+      apiKey: "test-key",
+      model: "mock-tools",
+      maxIterations: 4,
+      maxVerificationAttempts: 0,
+      timeoutMs: 1000,
+      llmTimeoutMs: 10000,
+    }, "build within a bounded budget", {}, []);
+    assert(result.success === false, "expired agent budget should fail explicitly");
+    assert(result.telemetry.completion_reason === "timeout", `expected timeout telemetry: ${JSON.stringify(result.telemetry)}`);
+    assert(Date.now() - startedAt < 1400, "agent should stop at its own deadline instead of the outer request timeout");
+  });
+});
+
+await test("agent recovers from incomplete model tool arguments", async () => {
+  const { runAgent } = await import(pathToFileURL(path.join(ROOT, "src", "agent.mjs")).href);
+  const files = validGeneratedFiles();
+  await withMockChatServer([
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [{
+        id: "invalid-create",
+        type: "function",
+        function: { name: "create_file", arguments: '{"path":"index.html"}' },
+      }],
+    },
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        createFileToolCall("recover-index", "index.html", files["index.html"]),
+        createFileToolCall("recover-style", "style.css", files["style.css"]),
+        createFileToolCall("recover-app", "app.js", files["app.js"]),
+        createFileToolCall("recover-hardware", "hardware_app.py", files["hardware_app.py"]),
+      ],
+    },
+    { role: "assistant", content: "done" },
+  ], async mock => {
+    const result = await runAgent({
+      baseUrl: mock.baseUrl,
+      apiKey: "test-key",
+      model: "mock-tools",
+      maxIterations: 4,
+      maxVerificationAttempts: 1,
+      timeoutMs: 10000,
+      llmTimeoutMs: 5000,
+    }, "build despite one incomplete tool call", {}, []);
+    assert(result.success === true, `incomplete tool arguments should be recoverable: ${JSON.stringify(result)}`);
+    assert(result.actions.some(action => action.args?.invalid_arguments === true), "invalid tool arguments should be returned to the model as evidence");
+    assert(mock.calls() === 3, `expected recovery in the next model turn: ${mock.calls()}`);
+  });
+});
+
+await test("agent blocks repeated tool loops and recovers within the model-turn budget", async () => {
+  const { runAgent } = await import(pathToFileURL(path.join(ROOT, "src", "agent.mjs")).href);
+  const files = validGeneratedFiles();
+  const listFilesCall = id => ({
+    role: "assistant",
+    content: null,
+    tool_calls: [{ id, type: "function", function: { name: "list_files", arguments: "{}" } }],
+  });
+  await withMockChatServer([
+    listFilesCall("loop-list-1"),
+    listFilesCall("loop-list-2"),
+    listFilesCall("loop-list-3"),
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        createFileToolCall("loop-index", "index.html", files["index.html"]),
+        createFileToolCall("loop-style", "style.css", files["style.css"]),
+        createFileToolCall("loop-app", "app.js", files["app.js"]),
+        createFileToolCall("loop-hardware", "hardware_app.py", files["hardware_app.py"]),
+      ],
+    },
+    { role: "assistant", content: "done" },
+  ], async mock => {
+    const result = await runAgent({
+      baseUrl: mock.baseUrl,
+      apiKey: "test-key",
+      model: "mock-tools",
+      maxIterations: 6,
+      maxVerificationAttempts: 1,
+      llmTimeoutMs: 10000,
+    }, "build a compact companion", {}, []);
+    assert(result.success === true, `loop recovery should still complete: ${JSON.stringify(result)}`);
+    assert(result.telemetry.repeated_action_blocks === 1, `expected one repeated action block: ${JSON.stringify(result.telemetry)}`);
+    assert(result.telemetry.model_turns === 5, `expected five model turns: ${JSON.stringify(result.telemetry)}`);
+    assert(result.actions.filter(action => action.tool === "list_files" && action.blocked).length === 1, "third repeated list_files should be blocked");
+    assert(JSON.stringify(mock.requestBodies()[3]).includes("duplicate_action_without_progress"), "model should receive recovery guidance after blocked loop");
+    assert(!Object.keys(result.telemetry).some(key => /prompt|message|content|api.?key|reasoning/i.test(key)), "public telemetry should expose no sensitive fields");
+  });
+});
 
 const failed = results.filter(result => result.status === "FAIL");
 const passed = results.filter(result => result.status === "PASS");

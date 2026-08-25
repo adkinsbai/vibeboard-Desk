@@ -9,6 +9,11 @@ export const MODEL_PROVIDERS = {
     baseUrl: "https://api.minimaxi.com/v1",
     model: "MiniMax-M2.7"
   },
+  glm: {
+    label: "GLM 5.2",
+    baseUrl: "https://maas-openapi.wanjiedata.com/api/v1",
+    model: "glm-5.2"
+  },
   custom: {
     label: "Custom",
     baseUrl: "",
@@ -40,6 +45,7 @@ function envApiKeyFor(providerId, baseUrl) {
   if (process.env.VIBEBOARD_LLM_API_KEY) return process.env.VIBEBOARD_LLM_API_KEY;
   if (process.env.VIBEBOARD_MODEL_API_KEY) return process.env.VIBEBOARD_MODEL_API_KEY;
   if (providerId === "deepseek" || /deepseek/i.test(baseUrl)) return process.env.DEEPSEEK_API_KEY || "";
+  if (providerId === "glm" || /wanjiedata|wjark|maas-openapi/i.test(baseUrl)) return process.env.GLM_API_KEY || process.env.VIBEBOARD_GLM_API_KEY || "";
   if (/openai/i.test(baseUrl)) return process.env.OPENAI_API_KEY || "";
   return "";
 }

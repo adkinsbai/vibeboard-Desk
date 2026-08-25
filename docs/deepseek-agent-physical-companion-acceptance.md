@@ -103,3 +103,23 @@ A deterministic delayed-provider regression proves the internal deadline. No fou
 ## Remaining Blocker
 
 One gated DeepSeek rerun is required to prove that batching plus the enforced internal deadline produces a complete accepted simulator within 180 seconds. Until that run passes, the platform improvement is locally validated but the requested live DeepSeek acceptance remains incomplete.
+
+## Extended-Wait Follow-up
+
+After the owner explicitly approved waiting beyond the original performance budget, the benchmark was changed to preserve the original 180-second score while allowing a 30-minute execution window.
+
+The follow-up established:
+
+- Node's built-in `fetch` control request terminated near 300 seconds even with a longer AbortSignal. Replacing the loopback control request with `http.request` removed that hidden connection limit.
+- A 14-turn DeepSeek run completed in 476,863 ms and scored 60. It generated a recognizable companion face with all 14 expression labels, three skins, memory projection data, and key declarations, but failed focused behavior and local readability checks.
+- A 30-turn DeepSeek run completed in 426,883 ms and also scored 60. More turns did not improve convergence; the model continued rewriting and introduced an external-dependency violation.
+- The Agent now validates complete files even when the model-turn limit is reached, instead of treating file presence as success.
+- Incomplete `create_file` and `edit_file` arguments now become recoverable tool results instead of uncaught TypeErrors.
+- A targeted repair pass was added so scenario and L0-L3 failure codes can be applied to the existing generated files rather than starting over.
+- The next online attempt was rejected immediately with HTTP 402 (`llm_failed`). This is an external billing/quota condition, so the targeted repair pass could not be live-verified.
+
+The latest usable live screenshot is:
+
+- `runtime/benchmarks/screenshots/live-digital-life-physical-companion-480x360.png`
+
+Current conclusion: DeepSeek connectivity and real tool-driven generation are proven. Unlimited waiting is not sufficient by itself; the remaining work is blocked by provider billing/quota, and the last successful long runs demonstrate a convergence problem rather than a timeout-only problem.

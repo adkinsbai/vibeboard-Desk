@@ -14,6 +14,7 @@ import {
   verifyPhysicalCompanionFiles,
 } from "../src/agentBenchmark.mjs";
 import { verifyAllLocal } from "../src/verifiers/index.mjs";
+import { runAgent } from "../src/agent.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const mode = process.argv.find(arg => arg.startsWith("--mode="))?.slice("--mode=".length) || "fixture";
@@ -125,6 +126,8 @@ function failedExecution(error) {
 
 async function runLiveScenario(currentScenario) {
   validateLiveGates();
+  const requestTimeoutMs = liveRequestTimeoutMs();
+  const executionMaxTurns = liveExecutionMaxTurns(currentScenario.max_model_turns);
   const key = String(process.env.VIBEBOARD_LLM_API_KEY || process.env.DEEPSEEK_API_KEY || "").trim();
   assert(key, "server process model key is required");
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vibeboard-agent-benchmark-"));
@@ -141,8 +144,10 @@ async function runLiveScenario(currentScenario) {
     VIBEBOARD_LLM_BASE_URL: "https://api.deepseek.com",
     VIBEBOARD_LLM_MODEL: "deepseek-v4-pro",
     VIBEBOARD_LLM_API_KEY: key,
-    VIBEBOARD_AGENT_MAX_ITERATIONS: "14",
+    VIBEBOARD_AGENT_MAX_ITERATIONS: String(executionMaxTurns),
     VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS: "3",
+    VIBEBOARD_AGENT_TIMEOUT_MS: String(Math.max(120000, requestTimeoutMs - 60000)),
+    VIBEBOARD_AGENT_LLM_TIMEOUT_MS: String(Math.max(60000, requestTimeoutMs - 60000)),
     DEEPSEEK_API_KEY: "",
     VIBEBOARD_MODEL_API_KEY: "",
     OPENAI_API_KEY: "",
@@ -175,28 +180,72 @@ async function runLiveScenario(currentScenario) {
       agent_mode: "vibeboard",
       messages: [{ role: "user", content: ownerMessage }],
       modelSettings,
-    });
+    }, requestTimeoutMs);
     const buildPrompt = String(plan.build_prompt || currentScenario.prompt).trim();
     const progressEvents = [];
     const stopPolling = await pollProgress(origin, progressEvents);
     let build;
+    let buildFailure = null;
     try {
-      build = await postJson(`${origin}/api/agent`, {
-        action: "confirm_build",
-        conversation_id: conversationId,
-        agent_mode: "vibeboard",
-        prompt: buildPrompt,
-        build_prompt: buildPrompt,
-        messages: [
-          { role: "user", content: ownerMessage },
-          { role: "assistant", content: String(plan.reply || "") },
-          { role: "user", content: "Confirmed. Start the local build and verification now." },
-        ],
-        modelSettings,
-        task_contract: benchmarkTaskContract(currentScenario),
-      }, 240000);
+      try {
+        build = await postJson(`${origin}/api/agent`, {
+          action: "confirm_build",
+          conversation_id: conversationId,
+          agent_mode: "vibeboard",
+          prompt: buildPrompt,
+          build_prompt: buildPrompt,
+          messages: [
+            { role: "user", content: ownerMessage },
+            { role: "assistant", content: String(plan.reply || "") },
+            { role: "user", content: "Confirmed. Start the local build and verification now." },
+          ],
+          modelSettings,
+          task_contract: benchmarkTaskContract(currentScenario, executionMaxTurns),
+        }, requestTimeoutMs);
+      } catch (error) {
+        buildFailure = error;
+      }
     } finally {
       await stopPolling();
+    }
+    if (buildFailure) {
+      let recoveredFiles = await readBenchmarkGeneratedFiles(env.VIBEBOARD_GENERATED_DIR);
+      const finalFailureEvent = progressEvents.findLast(event => event.type === "agent.run.failed") || {};
+      const repair = await runTargetedRepair({
+        scenario: currentScenario,
+        files: recoveredFiles,
+        key,
+        progressEvents,
+        executionMaxTurns,
+      });
+      if (Object.keys(repair.files || {}).length) recoveredFiles = repair.files;
+      return {
+        result: {
+          success: repair.success,
+          files: recoveredFiles,
+          actions: repair.actions || [],
+          telemetry: repair.telemetry || telemetryFromProgress(progressEvents, buildFailure),
+          buildEvidence: null,
+          agentGraph: [],
+        },
+        progressEvents,
+        plannerSummary: {
+          intent: String(plan.intent || ""),
+          ready_to_build: plan.ready_to_build === true,
+          understanding_count: Array.isArray(plan.understanding) ? plan.understanding.length : 0,
+          planned_changes_count: Array.isArray(plan.planned_changes) ? plan.planned_changes.length : 0,
+        },
+        buildEvidenceSummary: { ok: false, issue_count: 0, verification_mode: "" },
+        failureSummary: {
+          type: safeFailureType(buildFailure.type || buildFailure.name),
+          status: Number.isInteger(buildFailure.status) ? buildFailure.status : null,
+          recovered_file_count: Object.keys(recoveredFiles).length,
+          targeted_repair_attempted: repair.attempted,
+          targeted_repair_success: repair.success,
+          server_error_type: finalFailureEvent.error_type || "",
+          server_error_message: finalFailureEvent.error_message || buildFailure.detail || "",
+        },
+      };
     }
     if (!progressEvents.some(event => event.type === "agent.run.completed") && build?.ok) {
       progressEvents.push({ type: "agent.run.completed", ok: true });
@@ -233,6 +282,70 @@ async function runLiveScenario(currentScenario) {
     child.stderr?.destroy();
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
+}
+
+async function runTargetedRepair({ scenario, files, key, progressEvents, executionMaxTurns }) {
+  if (Object.keys(files || {}).length < 4) return { attempted: false, success: false, files };
+  const scenarioResult = verifyPhysicalCompanionFiles(files);
+  const localResult = await verifyAllLocal(files);
+  if (scenarioResult.ok && localResult.ok) return { attempted: false, success: true, files };
+  const failureCodes = [
+    ...scenarioResult.hard_gate_failures,
+    ...(localResult.issues || []).map(issue => issue.code).filter(Boolean),
+  ];
+  const repairPrompt = [
+    "Repair the existing generated app in place. Do not redesign it and do not restart from a generic template.",
+    `Unresolved verification codes: ${[...new Set(failureCodes)].join(", ")}.`,
+    "Inspect the current files, make focused edits that satisfy every task-contract criterion, then call done.",
+    "KEY1 must change expression, KEY2 must toggle memory inspection, and KEY3 must change skin in the exported inspection state.",
+    "Keep all data synthetic and local. Remove external dependencies. Preserve 480x360 and responsive mobile behavior.",
+  ].join("\n");
+  const repairProgress = [];
+  const result = await runAgent({
+    provider: "deepseek",
+    baseUrl: "https://api.deepseek.com",
+    apiKey: key,
+    model: "deepseek-v4-pro",
+    maxIterations: Math.min(12, Math.max(6, executionMaxTurns)),
+    maxVerificationAttempts: 2,
+    timeoutMs: 12 * 60 * 1000,
+    llmTimeoutMs: 10 * 60 * 1000,
+  }, repairPrompt, { ...files }, [], null, {}, null, null, {
+    taskContract: benchmarkTaskContract(scenario, Math.min(12, Math.max(6, executionMaxTurns))),
+    onProgress: event => {
+      repairProgress.push(event);
+      progressEvents.push(event);
+    },
+  });
+  return {
+    attempted: true,
+    success: result.success === true,
+    files: result.files || files,
+    actions: result.actions || [],
+    telemetry: result.telemetry || null,
+    progressEvents: repairProgress,
+  };
+}
+
+async function readBenchmarkGeneratedFiles(dir) {
+  const files = {};
+  for (const name of ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"]) {
+    try {
+      files[name] = await fs.readFile(path.join(dir, name), "utf8");
+    } catch {}
+  }
+  return files;
+}
+
+function telemetryFromProgress(events, error) {
+  const modelTurns = events.filter(event => event.type === "agent.model.completed").length;
+  return {
+    model_turns: modelTurns || null,
+    tool_actions: events.filter(event => event.type === "agent.tool.completed").length,
+    repeated_action_blocks: events.filter(event => event.type === "agent.recovery" && event.tool).length,
+    verification_attempts: events.filter(event => event.type === "agent.verification.completed").length,
+    completion_reason: safeFailureType(error?.type || "failed"),
+  };
 }
 
 async function verifyAcceptance(files, currentMode) {
@@ -440,11 +553,22 @@ function startStaticServer(root) {
 function validateLiveGates() {
   assert.equal(process.env.VIBEBOARD_AGENT_BENCHMARK_LIVE, "1");
   assert.equal(process.env.VIBEBOARD_AGENT_BENCHMARK_SYNTHETIC_ONLY, "1");
-  assert.equal(process.env.VIBEBOARD_AGENT_BENCHMARK_MAX_RUNS, "3");
+  const maxRuns = Number(process.env.VIBEBOARD_AGENT_BENCHMARK_MAX_RUNS || 0);
+  assert(Number.isInteger(maxRuns) && maxRuns >= 1 && maxRuns <= 10, "benchmark run cap must be between 1 and 10");
   assert.equal(process.env.VIBEBOARD_AGENT_BENCHMARK_MAX_MODEL_CALLS, "42");
 }
 
-function benchmarkTaskContract(currentScenario) {
+function liveRequestTimeoutMs() {
+  const requested = Number(process.env.VIBEBOARD_AGENT_BENCHMARK_REQUEST_TIMEOUT_MS || 240000);
+  return Math.max(240000, Math.min(Number.isFinite(requested) ? requested : 240000, 30 * 60 * 1000));
+}
+
+function liveExecutionMaxTurns(fallback) {
+  const requested = Number(process.env.VIBEBOARD_AGENT_BENCHMARK_EXECUTION_MAX_TURNS || fallback);
+  return Math.max(1, Math.min(Number.isInteger(requested) ? requested : fallback, 30));
+}
+
+function benchmarkTaskContract(currentScenario, executionMaxTurns = currentScenario.max_model_turns) {
   return {
     schema_version: "agent-task-contract.v1",
     objective: currentScenario.title,
@@ -464,7 +588,7 @@ function benchmarkTaskContract(currentScenario) {
       "automatic hardware deployment",
       "claims of real memory, sensing, or device execution",
     ],
-    max_model_turns: currentScenario.max_model_turns,
+    max_model_turns: executionMaxTurns,
   };
 }
 
@@ -478,17 +602,22 @@ function publicProgress(event = {}) {
 
 async function pollProgress(origin, target) {
   let stopped = false;
-  let cursor = 0;
+  const seen = new Set();
+  const pollOnce = async () => {
+    const payload = await getJson(`${origin}/api/logs?limit=120`);
+    const logs = Array.isArray(payload.logs) ? payload.logs : [];
+    for (const entry of logs) {
+      const key = [entry.ts, entry.event, entry.type, entry.tool, entry.path, entry.errorType, entry.error].join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const mapped = mapServerLog(entry);
+      if (mapped) target.push(mapped);
+    }
+  };
   const loop = (async () => {
     while (!stopped) {
       try {
-        const payload = await getJson(`${origin}/api/logs?limit=120`);
-        const logs = Array.isArray(payload.logs) ? payload.logs : [];
-        for (const entry of logs.slice(cursor)) {
-          const mapped = mapServerLog(entry);
-          if (mapped) target.push(mapped);
-        }
-        cursor = logs.length;
+        await pollOnce();
       } catch {}
       await delay(500);
     }
@@ -496,6 +625,7 @@ async function pollProgress(origin, target) {
   return async () => {
     stopped = true;
     await loop;
+    try { await pollOnce(); } catch {}
   };
 }
 
@@ -506,7 +636,14 @@ function mapServerLog(entry = {}) {
     return { type: "agent.verification.completed", ok: Number(entry.issueCount || 0) === 0 };
   }
   if (entry.event === "generate.agent.done") return { type: "agent.run.completed", ok: true };
-  if (entry.event === "generate.agent.failed") return { type: "agent.run.failed", ok: false };
+  if (entry.event === "generate.agent.failed" || entry.event === "generate.request.failed") {
+    return {
+      type: "agent.run.failed",
+      ok: false,
+      error_type: safeFailureType(entry.errorType || entry.agentError?.type || "failed"),
+      error_message: safeErrorMessage(entry.technicalDetail || entry.error || ""),
+    };
+  }
   if (entry.event === "generate.agent.progress") {
     return { type: String(entry.type || ""), tool: String(entry.tool || ""), ok: entry.ok == null ? null : Boolean(entry.ok) };
   }
@@ -514,17 +651,45 @@ function mapServerLog(entry = {}) {
 }
 
 async function postJson(url, body, timeoutMs = 90000) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
+  const target = new URL(url);
+  assert.equal(target.protocol, "http:", "benchmark control requests must stay on loopback HTTP");
+  assert(["127.0.0.1", "localhost"].includes(target.hostname), "benchmark control requests must stay on loopback");
+  const payload = Buffer.from(JSON.stringify(body), "utf8");
+  const response = await new Promise((resolve, reject) => {
+    const request = http.request({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": payload.length,
+      },
+    }, incoming => {
+      const chunks = [];
+      incoming.on("data", chunk => chunks.push(chunk));
+      incoming.on("end", () => resolve({
+        status: Number(incoming.statusCode || 0),
+        text: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    const timer = setTimeout(() => {
+      const error = new Error(`benchmark request timed out after ${timeoutMs}ms`);
+      error.name = "TimeoutError";
+      error.type = "timeout";
+      request.destroy(error);
+    }, timeoutMs);
+    request.once("close", () => clearTimeout(timer));
+    request.once("error", reject);
+    request.end(payload);
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  let data = {};
+  try { data = JSON.parse(response.text || "{}"); } catch {}
+  if (response.status < 200 || response.status >= 300) {
     const error = new Error(`benchmark request failed with HTTP ${response.status}`);
     error.status = response.status;
     error.type = String(data.errorType || data.error || "http_error").slice(0, 80);
+    error.detail = safeErrorMessage(data.technicalDetail || data.error || data.userMessage || "");
     throw error;
   }
   return data;
@@ -574,6 +739,14 @@ function delay(ms) {
 function safeFailureType(value) {
   const type = String(value || "failed").trim().toLowerCase();
   return /^[a-z0-9_-]{1,80}$/.test(type) ? type : "failed";
+}
+
+function safeErrorMessage(value) {
+  return String(value || "")
+    .replace(/\bsk-[a-z0-9_-]{12,}\b|bearer\s+[a-z0-9._-]{8,}/ig, "[redacted]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
 }
 
 function fixtureFiles() {

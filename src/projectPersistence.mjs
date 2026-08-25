@@ -271,37 +271,37 @@ function wrapStores(conversationStore, jobStore) {
     async setProjectMemory(conversationId, memory = {}) {
       return conversationStore.setProjectMemory(conversationId, memory);
     },
-    async createJob(input = {}) {
+    createJob(input = {}) {
       return jobStore.createJob(input);
     },
-    async getJob(id) {
+    getJob(id) {
       return jobStore.getJob(id);
     },
-    async getJobForOrganization(id, organizationId) {
+    getJobForOrganization(id, organizationId) {
       return jobStore.getJobForOrganization(id, organizationId);
     },
-    async createOrGetJob(input = {}) {
+    createOrGetJob(input = {}) {
       return jobStore.createOrGetJob(input);
     },
-    async listJobs(filters = {}) {
+    listJobs(filters = {}) {
       return jobStore.listJobs(filters);
     },
-    async transition(id, patch = {}) {
+    transition(id, patch = {}) {
       return jobStore.transition(id, patch);
     },
-    async claimJob(id) {
+    claimJob(id) {
       return jobStore.claimJob(id);
     },
-    async appendLog(id, message, data = {}, phase = "") {
+    appendLog(id, message, data = {}, phase = "") {
       return jobStore.appendLog(id, message, data, phase);
     },
-    async requestCancel(id) {
+    requestCancel(id) {
       return jobStore.requestCancel(id);
     },
-    async requestCancelForOrganization(id, organizationId) {
+    requestCancelForOrganization(id, organizationId) {
       return jobStore.requestCancelForOrganization(id, organizationId);
     },
-    async isCancelRequested(id) {
+    isCancelRequested(id) {
       return jobStore.isCancelRequested(id);
     },
   };

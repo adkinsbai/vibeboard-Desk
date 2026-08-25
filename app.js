@@ -101,21 +101,6 @@ const accountIdentity = el("accountIdentity");
 const accountLogoutBtn = el("accountLogoutBtn");
 const adminLink = el("adminLink");
 const creditChip = el("creditChip");
-const authModal = el("authModal");
-const closeAuthModal = el("closeAuthModal");
-const authLoginTab = el("authLoginTab");
-const authRegisterTab = el("authRegisterTab");
-const authModalTitle = el("authModalTitle");
-const authModalSubtitle = el("authModalSubtitle");
-const loginForm = el("loginForm");
-const registerForm = el("registerForm");
-const loginPhone = el("loginPhone");
-const loginPassword = el("loginPassword");
-const registerPhone = el("registerPhone");
-const registerCode = el("registerCode");
-const registerPassword = el("registerPassword");
-const sendCodeBtn = el("sendCodeBtn");
-const authMessage = el("authMessage");
 
 let generatedFiles = {};
 let activeFile = "";
@@ -124,6 +109,8 @@ let previewLoadToken = 0;
 let previewReadyTimer = null;
 let foregroundTaskCount = 0;
 let conversationInitPromise = null;
+const activeRunFlows = new Map();
+let messagePersistChain = Promise.resolve();
 let conversationLoadToken = 0;
 let jobsPollTimer = null;
 let activeJobWaiters = new Set();
@@ -138,6 +125,7 @@ let registerVerificationToken = "";
 
 const MODEL_STORAGE_KEY = "vibeboard-linux-model-settings";
 const DEVICE_STORAGE_KEY = "vibeboard-active-device";
+const BOUND_DEVICE_STORAGE_KEY = "vibeboard-bound-device";
 const CONVERSATION_STORAGE_KEY = "vibeboard-current-conversation";
 const AGENT_MODE_STORAGE_KEY = "vibeboard-agent-mode";
 const BLANK_DEVICE_FRAME_HTML = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;}*{box-sizing:border-box;}</style></head><body></body></html>';
@@ -177,7 +165,20 @@ function getActiveDeviceId() {
   return "taishan-gray";
 }
 
+function getActiveDeviceSerial() {
+  const params = new URLSearchParams(window.location.search);
+  const fromUrl = params.get("device") || "";
+  if (fromUrl) return fromUrl;
+  try {
+    const saved = JSON.parse(localStorage.getItem(BOUND_DEVICE_STORAGE_KEY) || "{}");
+    return saved?.board_id === activeDeviceId ? String(saved.serial || "") : "";
+  } catch {
+    return "";
+  }
+}
+
 let activeDeviceId = getActiveDeviceId();
+let activeDeviceSerial = getActiveDeviceSerial();
 let currentAssetSummary = { count: 0, totalBytes: 0, byKind: {}, items: [] };
 let conversationCache = [];
 let optimisticConversations = [];
@@ -204,6 +205,12 @@ const providerPresets = {
     baseUrl: "https://api.minimaxi.com/v1",
     model: "MiniMax-M2.7",
     help: "MiniMax OpenAI-compatible endpoint. 国内默认 minimaxi.com，国际账户可改成 api.minimax.io。"
+  },
+  glm: {
+    label: "GLM 5.2",
+    baseUrl: "https://maas-openapi.wanjiedata.com/api/v1",
+    model: "glm-5.2",
+    help: "GLM 5.2 OpenAI-compatible endpoint. Use the WanjieData MAAS API key."
   },
   custom: {
     label: "Custom",
@@ -341,10 +348,15 @@ const FRIENDLY_ERRORS = {
     detail: "还没有设置 AI 模型的 API Key，将使用本地模板生成。",
     suggestion: "点击右上角「Model」按钮配置 DeepSeek 或其他模型"
   },
+  database_quota: {
+    title: "数据库额度超限",
+    detail: "Neon 数据库返回流量或额度超限，登录、对话、项目保存和任务接口会暂时不可用。",
+    suggestion: "请升级或恢复 Neon 数据库额度，或等额度重置后再试；这不是 GLM 5.2 的 API Key 问题。"
+  },
   llm_quota: {
     title: "模型额度不可用",
     detail: "模型服务返回额度、余额或配额不足，代码生成在部署设备前已经停止。",
-    suggestion: "请检查模型账号余额和限额，或切换到另一个可用模型。"
+    suggestion: "请给模型账号充值、提高额度，或在 Model 设置里切换到另一个可用 API Key 后重试。"
   },
   llm_rate_limited: {
     title: "模型请求被限流",
@@ -611,6 +623,19 @@ function formatElapsed(ms) {
 
 function describeGenerateLog(entry = {}) {
   const event = entry.event || "";
+  if (event === "generate.agent.progress") {
+    if (entry.type === "agent.run.started") return entry.message || "Agent planning started";
+    if (entry.type === "agent.model.started") return entry.message || "Agent is reasoning";
+    if (entry.type === "agent.model.completed") return `${entry.message || "Reasoning finished"}${entry.elapsed_ms ? ` (${formatElapsed(entry.elapsed_ms)})` : ""}`;
+    if (entry.type === "agent.tool.started") return entry.path ? `${entry.tool || "tool"}: ${entry.path}` : `Running ${entry.tool || "tool"}`;
+    if (entry.type === "agent.tool.completed") return `${entry.tool || "Tool"} ${entry.ok === false ? "failed" : "finished"}`;
+    if (entry.type === "agent.verification.started") return "Checking generated app";
+    if (entry.type === "agent.verification.completed") return entry.ok === false ? "Generated app needs repair" : "Generated app checks passed";
+    if (entry.type === "agent.recovery") return entry.message || "Agent is correcting its approach";
+    if (entry.type === "agent.run.completed") return "Agent work completed";
+    if (entry.type === "agent.run.failed") return "Agent work failed";
+    return entry.message || "Agent progress updated";
+  }
   if (event === "generate.agent.start") {
     return `Agent started: ${entry.model || entry.provider || "model"}`;
   }
@@ -663,6 +688,7 @@ function createGenerateLogPoller(progress) {
 
   const usefulEvents = new Set([
     "generate.agent.start",
+    "generate.agent.progress",
     "generate.agent.action",
     "generate.agent.auto_verify",
     "generate.agent.failed",
@@ -685,6 +711,8 @@ function createGenerateLogPoller(progress) {
       entry.path || "",
       entry.query || "",
       entry.summary || "",
+      entry.type || "",
+      entry.message || "",
       entry.id || ""
     ].join("|");
     if (seen.has(key)) return false;
@@ -745,11 +773,16 @@ function createGenerateLogPoller(progress) {
 function withDeviceQuery(url) {
   const href = new URL(url, window.location.origin);
   href.searchParams.set("deviceId", activeDeviceId);
+  if (activeDeviceSerial) href.searchParams.set("device", activeDeviceSerial);
   return `${href.pathname}${href.search}`;
 }
 
 function withDevicePayload(payload = {}) {
-  return { ...payload, deviceId: activeDeviceId };
+  return {
+    ...payload,
+    deviceId: activeDeviceId,
+    ...(activeDeviceSerial ? { device: activeDeviceSerial } : {}),
+  };
 }
 
 async function authFetch(url, payload = {}, { method = "POST" } = {}) {
@@ -795,28 +828,8 @@ function setAccountMenu(open) {
   accountBtn.setAttribute("aria-expanded", String(shouldOpen));
 }
 
-function setAuthModal(open) {
-  if (!authModal) return;
-  setLayerOpen(authModal, open);
-  if (open) setTimeout(() => loginPhone?.focus(), 40);
-  syncScrim();
-}
-
-function setAuthMode(mode) {
-  const register = mode === "register";
-  authLoginTab?.classList.toggle("active", !register);
-  authRegisterTab?.classList.toggle("active", register);
-  authLoginTab?.setAttribute("aria-selected", String(!register));
-  authRegisterTab?.setAttribute("aria-selected", String(register));
-  if (authModalTitle) authModalTitle.textContent = register ? "Create your account" : "Sign in to your account";
-  if (authModalSubtitle) {
-    authModalSubtitle.textContent = register
-      ? "Start with your phone number and a password."
-      : "Use your phone number and password to continue.";
-  }
-  loginForm?.classList.toggle("hidden", register);
-  registerForm?.classList.toggle("hidden", !register);
-  if (authMessage) authMessage.textContent = "";
+function goPortalForAuth() {
+  window.location.href = "/";
 }
 
 function formatCredits(value) {
@@ -833,9 +846,7 @@ function formatCompactNumber(value) {
 async function loadUsage() {
   if (!usageSummary || !usageLedger) return;
   if (!currentUser) {
-    usageSummary.innerHTML = `<div class="usage-empty">Login to view usage.</div>`;
-    usageLedger.innerHTML = "";
-    setAuthModal(true);
+    goPortalForAuth();
     return;
   }
   try {
@@ -1261,7 +1272,6 @@ function syncScrim() {
     isOpen(assetPropertiesModal) ||
     isOpen(projectCreateModal) ||
     isOpen(assetImportModal) ||
-    isOpen(authModal) ||
     isOpen(modelModal) ||
     isOpen(el("deployMarketModal"))
   );
@@ -2178,9 +2188,14 @@ function addBuildPromptAction(buildPrompt, plan = {}) {
       <button class="btn btn-ghost" type="button" data-action="revise">继续补充或调整</button>
     </div>
   `;
-  body.querySelector('[data-action="confirm"]')?.addEventListener("click", () => {
+  body.querySelector('[data-action="confirm"]')?.addEventListener("click", event => {
+    const button = event.currentTarget;
+    if (button?.disabled) return;
+    if (button) button.disabled = true;
+    const buildPrompt = pendingGeneratePrompt;
+    pendingGeneratePrompt = null;
     article.remove();
-    startBuild(pendingGeneratePrompt);
+    startBuild(buildPrompt);
   });
   body.querySelector('[data-action="revise"]')?.addEventListener("click", () => {
     promptInput.value = "我还想再调整一下方案";
@@ -2349,12 +2364,23 @@ async function startBuild(originalPrompt) {
   // 收集完整的对话上下文
   const history = buildChatMessages();
   await runFlow(originalPrompt, history, currentConversationId);
+}
 
-  // 调用原有的代码生成流程
-  await runFlow(originalPrompt, history, currentConversationId);
+function runFlowKey(prompt, conversationId) {
+  return `${String(conversationId || "")}::${String(prompt || "").trim()}`;
 }
 
 async function runFlow(prompt, history = [], conversationId = currentConversationId, overrides = {}) {
+  const key = runFlowKey(prompt, conversationId);
+  if (activeRunFlows.has(key)) return activeRunFlows.get(key);
+  const promise = runFlowOnce(prompt, history, conversationId, overrides).finally(() => {
+    activeRunFlows.delete(key);
+  });
+  activeRunFlows.set(key, promise);
+  return promise;
+}
+
+async function runFlowOnce(prompt, history = [], conversationId = currentConversationId, overrides = {}) {
   setBusy(true);
   deployState.textContent = labels.preparing;
   const progress = addStageCard();
@@ -2524,11 +2550,12 @@ function addDeployButton(prompt) {
   appendChatNode(article);
 }
 
-async function runDeployJob() {
-  const started = await postJson(api.deploy, {
+async function runDeployJob(buildId = currentGeneratedBuildId()) {
+  const started = await postJson(api.deploy, withDevicePayload({
     background: true,
     conversation_id: currentConversationId || "",
-  }, { timeout: 30000 });
+    build_id: buildId || "",
+  }), { timeout: 30000 });
   const jobId = started.job?.id;
   if (!jobId) throw new Error("Background deploy job was not created.");
   setJobDrawer(true);
@@ -2549,7 +2576,7 @@ async function doDeploy(prompt) {
   addMarkdownMessage("agent", `🚀 **正在部署到 ${profile.label}...**`);
 
   try {
-    const deployed = await runDeployJob();
+    const deployed = await runDeployJob(currentGeneratedBuildId());
     renderHardwareRun(deployed);
     if (deployed.skipped) {
       deployState.textContent = "hardware skipped";
@@ -2576,7 +2603,7 @@ async function runDeploy(btn) {
   deployState.textContent = labels.deploying;
 
   try {
-    const deployed = await runDeployJob();
+    const deployed = await runDeployJob(currentGeneratedBuildId());
     renderHardwareRun(deployed);
     if (deployed.skipped) {
       deployState.textContent = "hardware skipped";
@@ -2687,7 +2714,9 @@ projectCreateForm?.addEventListener("submit", event => {
 });
 deviceSelect?.addEventListener("change", () => {
   activeDeviceId = deviceProfiles[deviceSelect.value] ? deviceSelect.value : "taishan-gray";
+  activeDeviceSerial = "";
   localStorage.setItem(DEVICE_STORAGE_KEY, activeDeviceId);
+  localStorage.removeItem(BOUND_DEVICE_STORAGE_KEY);
   deployState.textContent = "device changed";
   applyDeviceProfile();
 });
@@ -2705,7 +2734,7 @@ modelForm?.addEventListener("submit", event => {
 accountBtn?.addEventListener("click", event => {
   event.stopPropagation();
   if (!currentUser) {
-    setAuthModal(true);
+    goPortalForAuth();
     return;
   }
   setAccountMenu(accountMenu?.hidden);
@@ -2719,60 +2748,13 @@ accountLogoutBtn?.addEventListener("click", async event => {
 });
 creditChip?.addEventListener("click", () => {
   if (!currentUser) {
-    setAuthModal(true);
+    goPortalForAuth();
     return;
   }
   setUsageDrawer(true);
 });
 closeUsageDrawer?.addEventListener("click", () => setUsageDrawer(false));
 refreshUsageBtn?.addEventListener("click", () => loadUsage());
-closeAuthModal?.addEventListener("click", () => setAuthModal(false));
-authLoginTab?.addEventListener("click", () => setAuthMode("login"));
-authRegisterTab?.addEventListener("click", () => setAuthMode("register"));
-sendCodeBtn?.addEventListener("click", async () => {
-  try {
-    sendCodeBtn.disabled = true;
-    authMessage.textContent = "正在发送验证码...";
-    const data = await authFetch("/api/auth/send-code", { phone: registerPhone.value.trim() });
-    authMessage.textContent = data.dev_code ? `开发环境验证码：${data.dev_code}` : "验证码已发送，请查收短信。";
-  } catch (error) {
-    authMessage.textContent = error.message;
-  } finally {
-    sendCodeBtn.disabled = false;
-  }
-});
-registerForm?.addEventListener("submit", async event => {
-  event.preventDefault();
-  try {
-    authMessage.textContent = "Creating account...";
-    await authFetch("/api/auth/register", {
-      phone: registerPhone.value.trim(),
-      password: registerPassword.value,
-    });
-    window.VibeTelemetry?.track("auth.register", { category: "auth" });
-    await refreshAccountState();
-    setAuthModal(false);
-    await loadConversations();
-  } catch (error) {
-    authMessage.textContent = error.message;
-  }
-});
-loginForm?.addEventListener("submit", async event => {
-  event.preventDefault();
-  try {
-    authMessage.textContent = "正在登录...";
-    await authFetch("/api/auth/login", {
-      phone: loginPhone.value.trim(),
-      password: loginPassword.value,
-    });
-    window.VibeTelemetry?.track("auth.login", { category: "auth" });
-    await refreshAccountState();
-    setAuthModal(false);
-    await loadConversations();
-  } catch (error) {
-    authMessage.textContent = error.message;
-  }
-});
 clearModelSettings?.addEventListener("click", () => {
   localStorage.removeItem(MODEL_STORAGE_KEY);
   modelSettings = loadModelSettings();
@@ -3379,10 +3361,24 @@ function rememberedConversationId() {
 // Sidebar toggle
 const sidebarToggle = document.getElementById("sidebarToggle");
 const sidebar = document.getElementById("sidebar");
+const compactSidebarQuery = window.matchMedia("(max-width: 1120px)");
 
 if (sidebarToggle && sidebar) {
+  const syncSidebarToggleState = () => {
+    sidebarToggle.setAttribute("aria-expanded", String(!sidebar.classList.contains("collapsed")));
+  };
+
+  const syncSidebarForViewport = event => {
+    sidebar.classList.toggle("collapsed", event.matches);
+    syncSidebarToggleState();
+  };
+
+  syncSidebarForViewport(compactSidebarQuery);
+  compactSidebarQuery.addEventListener?.("change", syncSidebarForViewport);
+
   sidebarToggle.addEventListener("click", () => {
     sidebar.classList.toggle("collapsed");
+    syncSidebarToggleState();
   });
 }
 
@@ -3403,7 +3399,7 @@ async function loadConversations() {
       else syncDeviceFrameFromCurrent();
     }
   } catch (err) {
-    if (/Login required|401/i.test(err.message || "")) setAuthModal(true);
+    if (/Login required|401/i.test(err.message || "")) goPortalForAuth();
     console.error("Failed to load conversations:", err);
   }
 }
@@ -3701,25 +3697,40 @@ async function saveMessage(role, content, buildId = null, conversationId = curre
   }
   if (!conversationId) return;
 
-  try {
-    await fetch(`${API_BASE}/api/conversations/${conversationId}/messages`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ role, content, build_id: buildId })
-    });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(`${API_BASE}/api/conversations/${conversationId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role, content, build_id: buildId })
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-    // Refresh conversation list to update title
-    await loadConversations();
-  } catch (err) {
-    console.error("Failed to save message:", err);
+      // Refresh conversation list to update title
+      await loadConversations();
+      return;
+    } catch (err) {
+      if (attempt >= 2) {
+        console.error("Failed to save message:", err);
+        throw err;
+      }
+      await new Promise(resolve => window.setTimeout(resolve, 300 * (attempt + 1)));
+    }
   }
 }
 
 function persistMessage(role, content, buildId = null, conversationId = currentConversationId) {
-  saveMessage(role, content, buildId, conversationId).catch(err => {
+  const task = () => saveMessage(role, content, buildId, conversationId);
+  messagePersistChain = messagePersistChain.then(task, task).catch(err => {
     console.error("Failed to persist message:", err);
   });
+  return messagePersistChain;
 }
+
+async function flushPersistedMessages() {
+  await messagePersistChain;
+}
+window.flushPersistedMessages = flushPersistedMessages;
 
 // New conversation button
 const newConvBtn = document.getElementById("newConversationBtn");
@@ -3806,7 +3817,6 @@ function formatTime(dateStr) {
   assetPropertiesModal,
   projectCreateModal,
   assetImportModal,
-  authModal,
   modelModal,
   el("deployMarketModal"),
 ].forEach(node => setLayerOpen(node, isOpen(node)));
