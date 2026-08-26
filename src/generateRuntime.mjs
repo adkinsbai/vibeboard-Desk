@@ -996,27 +996,31 @@ export function buildGenerateAgentSettings(
   positiveInt = defaultPositiveInt,
   defaults = GENERATE_RUNTIME_DEFAULTS,
 ) {
+  const resolvedDefaults = {
+    ...GENERATE_RUNTIME_DEFAULTS,
+    ...(defaults || {}),
+  };
   return {
     ...settings,
     maxIterations: positiveInt(
       settings.max_iterations ?? settings.maxIterations ?? env.VIBEBOARD_AGENT_MAX_ITERATIONS,
-      defaults.maxIterations,
+      resolvedDefaults.maxIterations,
     ),
     maxVerificationAttempts: nonNegativeInt(
       settings.max_verification_attempts ?? settings.maxVerificationAttempts ?? env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS,
-      defaults.maxVerificationAttempts,
+      resolvedDefaults.maxVerificationAttempts,
     ),
     repairAttempts: nonNegativeInt(
       settings.repair_attempts ?? settings.repairAttempts ?? env.VIBEBOARD_AGENT_REPAIR_ATTEMPTS,
-      defaults.repairAttempts,
+      resolvedDefaults.repairAttempts,
     ),
     timeoutMs: positiveInt(
       settings.timeout_ms ?? settings.timeoutMs ?? env.VIBEBOARD_AGENT_TIMEOUT_MS,
-      defaults.timeoutMs,
+      resolvedDefaults.timeoutMs,
     ),
     llmTimeoutMs: positiveInt(
       settings.llm_timeout_ms ?? settings.llmTimeoutMs ?? env.VIBEBOARD_AGENT_LLM_TIMEOUT_MS,
-      defaults.llmTimeoutMs,
+      resolvedDefaults.llmTimeoutMs,
     ),
   };
 }
