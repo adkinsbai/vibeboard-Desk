@@ -81,8 +81,6 @@ import {
   parseDeployOutput
 } from "./src/deskDeployer.mjs";
 import {
-  ensureGeneratedWorkspace,
-  loadGeneratedWorkspace,
   readGeneratedFiles,
   writeGeneratedFiles
 } from "./src/buildArtifact.mjs";
@@ -168,6 +166,9 @@ await loadLocalEnv();
 
 const BILLING_MODE = String(process.env.VIBEBOARD_BILLING_MODE || "free").toLowerCase() === "credits" ? "credits" : "free";
 const REQUIRE_PHONE_VERIFICATION = process.env.VIBEBOARD_REQUIRE_PHONE_VERIFICATION === "1";
+// Template generation is a test fixture only. A real deployment must either
+// reach the configured model or return a clear configuration error.
+const TEMPLATE_GENERATION_ENABLED = !PUBLIC_DEPLOYMENT && process.env.VIBEBOARD_ALLOW_TEMPLATE_GENERATION === "1";
 
 const TEST_CLOUD_SQLITE_FILE = process.env.VIBEBOARD_TEST_CLOUD_SQLITE_FILE || "";
 const ENABLE_LEGACY_SQLITE_MIGRATION = Boolean(TEST_CLOUD_SQLITE_FILE || process.env.VIBEBOARD_ENABLE_LEGACY_SQLITE_MIGRATION === "1");
@@ -2397,33 +2398,15 @@ async function writeGenerated(prompt, modelSettings = {}, history = [], embedded
 }
 
 async function loadGeneratedBuild() {
-  setCurrentBuild(await loadGeneratedWorkspace(GENERATED_DIR, GENERATED_FILE_NAMES, {
-    id: "preview",
-    prompt: "Waiting for generation"
-  }));
-  return currentBuild;
+  // Shared generated/current is intentionally not a source of truth. Builds
+  // are created by a request and restored from the conversation snapshot.
+  return null;
 }
 
 async function ensureInitialGenerated() {
-  setCurrentBuild(await ensureGeneratedWorkspace({
-    dir: GENERATED_DIR,
-    generatedFileNames: GENERATED_FILE_NAMES,
-    fallbackSeed: {
-      id: "preview",
-      prompt: "Waiting for generation. This preview will show the 480x360 VibeBoard kiosk app before it is deployed to hardware."
-    },
-    bootstrapFile: "index.html",
-    makeFiles: ({ id, prompt }) => {
-      const spec = createAppSpec(prompt, id);
-      return {
-        "index.html": generatedIndexV2(prompt, id, spec),
-        "style.css": generatedStyleV2(prompt, id, spec),
-        "app.js": injectAppHardwareSdkContracts(generatedAppV2(prompt, id, spec), id),
-        "hardware_app.py": generatedHardwareAppV2(prompt, id, spec),
-        "manifest.json": JSON.stringify(generatedManifestV2(prompt, id, spec), null, 2)
-      };
-    }
-  }));
+  // Do not create or adopt a default app at startup. The preview becomes
+  // meaningful only after a user-scoped conversation produces a build.
+  setCurrentBuild(null);
 }
 
 const buildRuntime = createBuildRuntime({
@@ -2443,6 +2426,7 @@ const buildRuntime = createBuildRuntime({
 const previewRuntime = createPreviewRuntime({
   rootDir: ROOT,
   previewsDir: PREVIEWS_DIR,
+  generatedDir: GENERATED_DIR,
   port: PORT,
   nodeBin: process.execPath,
   appendServerLog,
@@ -2783,7 +2767,20 @@ const generateRuntime = createGenerateRuntime({
 });
 
 async function runGenerateRequest(body = {}) {
-  return generateRuntime.runGenerateRequest(withServerModelSettings(body));
+  const normalizedBody = withServerModelSettings(body);
+  const settings = normalizeModelSettings(normalizedBody.modelSettings || {});
+  if (!settings.enabled && !TEMPLATE_GENERATION_ENABLED) {
+    const error = new Error("A model provider, model, and API key are required before generating an application.");
+    Object.assign(error, {
+      errorType: "missing_model_config",
+      statusCode: 400,
+      userMessage: "还没有配置可用的 AI 模型，暂时不会生成预置应用。",
+      suggestion: "打开模型设置，填写 Provider、模型名称和 API Key 后再试。",
+      retryable: false,
+    });
+    throw error;
+  }
+  return generateRuntime.runGenerateRequest(normalizedBody);
 }
 
 async function chargeAiUsage({ user, body = {}, result = {}, reason = "ai_call" } = {}) {
@@ -3498,7 +3495,7 @@ async function route(req, res) {
       if (payload?.conversation_id) await ensureConversationAccess(payload.conversation_id, requestUser);
       if (type === "agent" || type === "generate") await ensureCreditsAvailable(requestUser);
       const normalizedPayload = type === "generate"
-        ? withServerModelSettings(payload || {}, { forceTemplate: PUBLIC_DEPLOYMENT && payload?.agent_full !== true && payload?.agentFull !== true })
+        ? withServerModelSettings(payload || {})
         : { ...(payload || {}) };
       const jobInput = {
         ...normalizedPayload,
@@ -3602,9 +3599,7 @@ async function route(req, res) {
       let body = {};
       try {
         const rawBody = await readBody(req);
-        body = withServerModelSettings(rawBody, {
-          forceTemplate: PUBLIC_DEPLOYMENT && rawBody?.agent_full !== true && rawBody?.agentFull !== true,
-        });
+        body = withServerModelSettings(rawBody);
         if (body?.conversation_id) await ensureConversationAccess(body.conversation_id, requestUser);
         await ensureCreditsAvailable(requestUser);
         if (wantsBackgroundJob(body || {})) {

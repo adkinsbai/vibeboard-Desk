@@ -145,6 +145,7 @@ export async function textFetch(baseUrl, path, options = {}) {
 
 function offlineEnv() {
   return {
+    VIBEBOARD_ALLOW_TEMPLATE_GENERATION: "1",
     VIBEBOARD_FORCE_OFFLINE: "1",
     VIBEBOARD_FORCE_REAL_BOARD: "0",
     VIBEBOARD_BOARD_PASSWORD: "",

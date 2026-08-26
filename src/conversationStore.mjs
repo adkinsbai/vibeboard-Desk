@@ -144,7 +144,7 @@ export function createConversationStore(db, saveDb = () => {}) {
     },
 
     listMessages(conversationId) {
-      return query(db, "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC", [conversationId]);
+      return query(db, "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, id ASC", [conversationId]);
     },
 
     appendMessage(conversationId, message = {}) {

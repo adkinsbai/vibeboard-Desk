@@ -5,6 +5,7 @@ import { spawn as defaultSpawn } from "node:child_process";
 export function createPreviewRuntime({
   rootDir,
   previewsDir,
+  generatedDir = "",
   port,
   nodeBin = process.execPath,
   screenshotScript = "",
@@ -26,8 +27,21 @@ export function createPreviewRuntime({
       previewPath: path.join(previewsDir, `${buildId}.png`),
       reportPath: path.join(previewsDir, `${buildId}.json`),
       previewUrl: previewUrlForBuild(buildId),
-      pageUrl: `http://127.0.0.1:${port}/generated/current/index.html`,
+      pageUrl: pageUrlForBuild(build),
     };
+  }
+
+  function pageUrlForBuild(build = {}) {
+    const workspaceDir = String(build.workspaceDir || build.dir || "").trim();
+    const root = String(generatedDir || "").trim();
+    if (workspaceDir && root) {
+      const relative = path.relative(path.resolve(root), path.resolve(workspaceDir));
+      if (relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+        const suffix = relative.split(path.sep).map(encodeURIComponent).join("/");
+        return `http://127.0.0.1:${port}/generated/current/${suffix}/index.html`;
+      }
+    }
+    return `http://127.0.0.1:${port}/generated/current/index.html`;
   }
 
   function previewUrlForBuild(buildOrId = "") {

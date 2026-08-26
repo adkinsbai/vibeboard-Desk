@@ -596,7 +596,7 @@ export function createPostgresProjectPersistence({ pg } = {}) {
     },
 
     async listMessages(conversationId) {
-      return rowsOf(await pg`SELECT * FROM messages WHERE conversation_id = ${conversationId} ORDER BY created_at ASC`);
+      return rowsOf(await pg`SELECT * FROM messages WHERE conversation_id = ${conversationId} ORDER BY created_at ASC, id ASC`);
     },
 
     async appendMessage(conversationId, message = {}) {
@@ -1161,7 +1161,11 @@ function createJsonProjectPersistence({ filePath }) {
     },
     async listMessages(conversationId) {
       const state = await readState();
-      return state.messages.filter(row => row.conversation_id === conversationId).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+      return state.messages
+        .map((row, index) => ({ row, index }))
+        .filter(item => item.row.conversation_id === conversationId)
+        .sort((a, b) => String(a.row.created_at).localeCompare(String(b.row.created_at)) || a.index - b.index)
+        .map(item => item.row);
     },
     async saveConversationFiles(conversationId, buildId, files = {}) {
       const { filterConversationFiles } = await import("./conversationStore.mjs");

@@ -114,6 +114,8 @@ let messagePersistChain = Promise.resolve();
 let conversationLoadToken = 0;
 let jobsPollTimer = null;
 let activeJobWaiters = new Set();
+const activeConversationJobRestorations = new Map();
+let jobsConversationFilter = "";
 let assetManagerSelectedConversationId = "";
 const GENERATION_START_TIMEOUT_MS = 300000;
 let assetManagerCurrentFolderId = "";
@@ -991,10 +993,13 @@ async function waitForJob(jobId, { onUpdate, interval = 1200, timeout = 900000 }
   }
 }
 
-async function loadJobs({ silent = false } = {}) {
+async function loadJobs({ silent = false, conversationId = jobsConversationFilter } = {}) {
   if (!jobList && !jobSummary) return [];
+  jobsConversationFilter = String(conversationId || "");
   try {
-    const data = await getJson(`${api.jobs}?limit=30`, { timeout: 15000 });
+    const query = new URLSearchParams({ limit: "30" });
+    if (jobsConversationFilter) query.set("conversation_id", jobsConversationFilter);
+    const data = await getJson(`${api.jobs}?${query.toString()}`, { timeout: 15000 });
     const jobs = Array.isArray(data.jobs) ? data.jobs : [];
     renderJobs(jobs);
     scheduleJobsPolling(jobs);
@@ -1010,7 +1015,40 @@ async function loadJobs({ silent = false } = {}) {
 function scheduleJobsPolling(jobs = []) {
   if (jobsPollTimer) window.clearTimeout(jobsPollTimer);
   const hasActive = jobs.some(job => !isFinalJob(job)) || activeJobWaiters.size > 0;
-  if (hasActive) jobsPollTimer = window.setTimeout(() => loadJobs({ silent: true }), 1500);
+  if (hasActive) jobsPollTimer = window.setTimeout(() => loadJobs({ silent: true, conversationId: jobsConversationFilter }), 1500);
+}
+
+function restoreConversationJob(job, conversationId) {
+  if (!job || isFinalJob(job) || activeConversationJobRestorations.has(job.id)) return;
+  const existing = [...(chatLog?.querySelectorAll(".msg") || [])]
+    .find(node => node.textContent.includes(job.id));
+  const body = existing?.querySelector(".msg-text") || addMarkdownMessage(
+    "agent",
+    `后台生成任务仍在${job.status === "queued" ? "排队" : "执行"}，已恢复项目状态。任务 ID：${job.id}`,
+  );
+  body?.closest(".msg")?.setAttribute("data-job-id", job.id);
+  const restoration = waitForJob(job.id, {
+    onUpdate(nextJob) {
+      if (!isActiveConversation(conversationId) || !nextJob) return;
+      const message = body?.closest(".msg")?.querySelector(".msg-text");
+      if (message && !isFinalJob(nextJob)) {
+        message.textContent = `后台生成任务仍在${nextJob.status === "queued" ? "排队" : "执行"}，已恢复项目状态。任务 ID：${nextJob.id}`;
+      }
+    },
+  }).then(async finishedJob => {
+    if (!isActiveConversation(conversationId)) return finishedJob;
+    if (finishedJob?.status === "succeeded" && finishedJob.output?.files) {
+      // The original tab may also be polling this job. The snapshot reload is
+      // idempotent and prevents a stale project view after switching back.
+      await selectConversation(conversationId);
+    }
+    return finishedJob;
+  }).catch(error => {
+    console.error("Failed to restore conversation job:", error);
+  }).finally(() => {
+    activeConversationJobRestorations.delete(job.id);
+  });
+  activeConversationJobRestorations.set(job.id, restoration);
 }
 
 function renderJobs(jobs = []) {
@@ -1518,16 +1556,7 @@ function hasDeployableBuild() {
 }
 
 async function findDeployableBuildId() {
-  const currentBuildId = currentGeneratedBuildId();
-  if (hasDeployableBuild()) return currentBuildId;
-  try {
-    const res = await fetch("/generated/current/manifest.json", { cache: "no-store" });
-    if (!res.ok) return "";
-    const manifest = await res.json();
-    return String(manifest?.id || "").trim();
-  } catch {
-    return "";
-  }
+  return hasDeployableBuild() ? currentGeneratedBuildId() : "";
 }
 
 function syncDeviceFrameFromActiveContext() {
@@ -1548,16 +1577,7 @@ function syncDeviceFrameFromActiveContext() {
 
 async function syncDeviceFrameFromCurrent() {
   if (!deviceFrame) return;
-  const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
-  try {
-    const res = await fetch("/generated/current/manifest.json", { cache: "no-store" });
-    if (!res.ok) throw new Error(`missing generated app manifest: ${res.status}`);
-    const manifest = await res.json();
-    const buildId = manifest.id || Date.now();
-    setDeviceFrameSrc(makePreviewUrl(profile.previewPath, buildId));
-  } catch {
-    showBlankDeviceFrame();
-  }
+  showBlankDeviceFrame();
 }
 
 function renderGoldenLoop(goldenLoop) {
@@ -2360,6 +2380,7 @@ async function startBuild(originalPrompt) {
     return;
   }
   addMarkdownMessage("agent", "🔨 **正在生成代码，请稍候...**");
+  persistMessage("agent", "🔨 **正在生成代码，请稍候...**", null, currentConversationId);
 
   // 收集完整的对话上下文
   const history = buildChatMessages();
@@ -2391,6 +2412,7 @@ async function runFlowOnce(prompt, history = [], conversationId = currentConvers
   progress.set("intake", "active", "run");
   progress.log("I will generate and verify locally first. Hardware write waits for your deploy click.");
   addMarkdownMessage("agent", "我开始执行您的任务。先理解需求并做本地生成与验证，不会自动写入硬件。");
+  persistMessage("agent", "我开始执行您的任务。先理解需求并做本地生成与验证，不会自动写入硬件。", null, conversationId);
 
   // Show thinking animation
   addThinkingAnimation();
@@ -2417,6 +2439,12 @@ async function runFlowOnce(prompt, history = [], conversationId = currentConvers
     const initialJob = started.job;
     const jobId = initialJob?.id;
     if (!jobId) throw new Error("Background generation job was not created.");
+    persistMessage(
+      "agent",
+      `后台生成任务已创建，状态：${initialJob.status || "queued"}。任务 ID：${jobId}`,
+      null,
+      conversationId,
+    );
     progress.log(isFinalJob(initialJob) ? `Background job completed: ${jobId}` : `Background job queued: ${jobId}`);
     setJobDrawer(true);
     const finishedJob = isFinalJob(initialJob)
@@ -2448,7 +2476,7 @@ async function runFlowOnce(prompt, history = [], conversationId = currentConvers
       } else {
         addThinkingBubble(`Execution trace
 1. Task received: ${prompt}
-2. No model reasoning output is available, so I continued through the local template path
+2. Agent output is ready for local verification
 3. Local verification is checking contracts, syntax, hardware simulation, and 480x360 render
 4. Hardware write waits for your later deploy confirmation`);
       }
@@ -3496,19 +3524,31 @@ async function selectConversation(id) {
     `;
   }
 
-  // Load messages and files in parallel
+  // Finish writes queued by the previous project before reading the new
+  // snapshot. This prevents a fast project switch from racing its own saves.
   try {
-    const [msgRes, fileRes, memoryRes, assetRes] = await Promise.all([
+    await flushPersistedMessages();
+    if (loadToken !== conversationLoadToken || id !== currentConversationId) return;
+
+    // Load the complete project snapshot and its server-owned job state.
+    const [msgRes, fileRes, memoryRes, assetRes, jobRes] = await Promise.all([
       fetch(`${API_BASE}/api/conversations/${id}/messages`),
       fetch(`${API_BASE}/api/conversations/${id}/files`),
       fetch(`${API_BASE}/api/conversations/${id}/memory`),
-      fetch(`${API_BASE}/api/conversations/${id}/assets`)
+      fetch(`${API_BASE}/api/conversations/${id}/assets`),
+      fetch(`${API_BASE}/api/jobs?limit=30&conversation_id=${encodeURIComponent(id)}`),
     ]);
     const msgData = await msgRes.json();
     const fileData = await fileRes.json();
     const memoryData = await memoryRes.json();
     const assetData = await assetRes.json();
+    const jobData = await jobRes.json();
     if (loadToken !== conversationLoadToken || id !== currentConversationId) return;
+
+    jobsConversationFilter = id;
+    const jobs = jobData.ok && Array.isArray(jobData.jobs) ? jobData.jobs : [];
+    renderJobs(jobs);
+    scheduleJobsPolling(jobs);
 
     // Restore code files if available
     if (fileData.ok && fileData.files && Object.keys(fileData.files).length > 0) {
@@ -3529,6 +3569,8 @@ async function selectConversation(id) {
       });
     }
     if (assetData.ok) renderAssetSummary(assetData.summary);
+    const activeJob = jobs.find(job => !isFinalJob(job) && job.type === "generate");
+    if (activeJob) restoreConversationJob(activeJob, id);
   } catch (err) {
     console.error("Failed to load conversation:", err);
     if (chatLog) {
