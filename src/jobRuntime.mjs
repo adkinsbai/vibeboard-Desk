@@ -104,7 +104,7 @@ export function createJobRuntime({
         const job = await jobStore.getJob(jobId);
         if (!job || isFinal(job.status)) return job;
         const next = await jobStore.transition(jobId, { phase: String(phase || job.phase || "") });
-        if (message) void settleSideEffect(() => jobStore.appendLog(jobId, message, {}, phase));
+        if (message) await settleSideEffect(() => jobStore.appendLog(jobId, message, {}, phase));
         return next;
       },
       async log(message, data = {}) {
@@ -165,7 +165,7 @@ export function createJobRuntime({
     void appendServerLog("job.claimed", { id: jobId, type: job.type, conversationId: job.conversation_id }).catch(() => {});
 
     try {
-      void settleSideEffect(() => jobStore.appendLog(jobId, "Job started."));
+      await settleSideEffect(() => jobStore.appendLog(jobId, "Job started."));
       void appendServerLog("job.start", { id: jobId, type: job.type, conversationId: job.conversation_id }).catch(() => {});
       const ctx = contextFor(jobId);
       const executionInput = runtimeInput || job.input || {};

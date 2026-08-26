@@ -22,7 +22,7 @@
     "verify:ui": "node tests/domain-routing.mjs && node tests/portal-smoke.mjs && node tests/admin-telemetry-ui.mjs && node tests/main-ui-smoke.mjs && node tests/digital-life-ui-smoke.mjs",
     "verify:public": "node scripts/verify-public-e2e.mjs",
     "verify:persistence": "node tests/project-persistence.mjs",
-    "verify:jobs": "node tests/job-concurrency.mjs && node tests/job-route-idempotency.mjs && node tests/job-runtime-secrets.mjs && node tests/build-isolation.mjs && node tests/job-http-concurrency.mjs",
+    "verify:jobs": "node tests/job-concurrency.mjs && node tests/job-route-idempotency.mjs && node tests/job-runtime-secrets.mjs && node tests/job-runtime-completion-race.mjs && node tests/build-isolation.mjs && node tests/job-http-concurrency.mjs",
     "verify:b2b-phase-a": "node scripts/check-execution-isolation.mjs && npm run verify:jobs && node tests/verify-agent.mjs && node tests/offline-smoke.mjs",
     "verify:all": "npm run check && npm run verify:auth && npm run verify:agent && npm run verify:agent-quality && npm run verify:agent-benchmark && npm run verify:offline && npm run verify:digital-life && npm run verify:ui"
   },
