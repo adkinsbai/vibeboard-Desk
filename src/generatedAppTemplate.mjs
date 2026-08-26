@@ -4,149 +4,26 @@ import {
   assertFileContracts,
 } from "./contracts.mjs";
 
-function promptHas(prompt, words) {
-  const lower = String(prompt || "").toLowerCase();
-  return words.some((word) => lower.includes(word.toLowerCase()));
-}
-
-function resolveHourlyRate(prompt) {
-  const text = String(prompt || "");
-  const patterns = [
-    /(?:时薪|hourly\s*(?:rate|wage)?|wage|salary)\D{0,12}(\d+(?:\.\d+)?)/i,
-    /(\d+(?:\.\d+)?)\s*(?:元\s*\/\s*小时|rmb\s*\/\s*hour|yuan\s*\/\s*hour|\/\s*h|per\s*hour)/i,
-  ];
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    const value = Number(match?.[1]);
-    if (Number.isFinite(value) && value > 0) return value;
-  }
-  return 150;
-}
-
-function isWagePrompt(prompt) {
-  return promptHas(prompt, ["paid fishing", "salary calculator", "wage calculator", "hourly wage", "带薪", "摸鱼", "薪资", "工资", "时薪", "薪水"]);
-}
-
 export function createAppSpec(prompt, id) {
   const text = String(prompt || "").trim() || "Build a VibeBoard hardware app";
-  let mode = "assistant";
-  if (promptHas(text, ["carousel", "slideshow", "photo", "image", "图片", "照片", "轮播", "相册"])) mode = "carousel";
-  if (promptHas(text, ["fullscreen clock", "full screen clock", "clock", "全屏时钟", "时钟", "大时钟"])) mode = "clock";
-  if (promptHas(text, ["voice", "audio", "record", "speech", "语音", "录音", "麦克风"])) mode = "voice";
-  if (mode === "assistant" && promptHas(text, ["server", "dashboard", "status", "监控", "状态", "面板", "服务器"])) mode = "dashboard";
-  if (isWagePrompt(text)) mode = "wage";
-  if (promptHas(text, ["timer", "focus", "countdown", "倒计时", "番茄"])) mode = "timer";
-  if (promptHas(text, ["control", "switch", "gpio", "relay", "button", "控制", "开关", "继电器"])) mode = "control";
-  if (isWagePrompt(text)) mode = "wage";
-  if (promptHas(text, ["weather", "天气", "气温", "白底蓝字", "白色", "蓝色", "小屏助手"])) mode = "weather";
-
-  const titles = {
-    assistant: "AI Screen Assistant",
-    voice: "Voice Console",
-    dashboard: "Device Dashboard",
-    timer: "Focus Clock",
-    control: "Hardware Control",
-    wage: "带薪摸鱼计算器",
-    weather: "小屏助手",
-    clock: "全屏时钟",
-    carousel: "图片轮播",
-  };
-  const accents = {
-    assistant: "#22c55e",
-    voice: "#38bdf8",
-    dashboard: "#f59e0b",
-    timer: "#a78bfa",
-    control: "#fb7185",
-    wage: "#14b8a6",
-    weather: "#0b63ce",
-    clock: "#f8fafc",
-    carousel: "#fb7185",
-  };
-  const widgetsByMode = {
-    assistant: [
-      ["wifi", "Wi-Fi", "--", "live network"],
-      ["ip", "IP", "--", "board address"],
-      ["temp", "Temp", "--", "thermal zone"],
-      ["runtime", "Runtime", "--", "python result"],
-    ],
-    voice: [
-      ["level", "Input", "ready", "mic state"],
-      ["transcript", "Transcript", "tap start", "simulated capture"],
-      ["response", "AI Reply", "waiting", "screen output"],
-      ["temp", "Temp", "--", "board thermal"],
-    ],
-    dashboard: [
-      ["ip", "IP", "--", "network"],
-      ["temp", "Temp", "--", "thermal"],
-      ["memory", "Memory", "--", "available"],
-      ["load", "Load", "--", "linux loadavg"],
-    ],
-    timer: [
-      ["remaining", "Timer", "25:00", "focus session"],
-      ["cycles", "Cycles", "0", "completed"],
-      ["temp", "Temp", "--", "board thermal"],
-      ["memory", "Memory", "--", "system"],
-    ],
-    control: [
-      ["switchA", "Output A", "off", "virtual GPIO"],
-      ["switchB", "Output B", "off", "virtual relay"],
-      ["serviceState", "Service", "--", "systemd"],
-      ["temp", "Temp", "--", "board thermal"],
-    ],
-    wage: [
-      ["earned", "已赚金额", "￥0.00", "实时累计"],
-      ["elapsed", "摸鱼时长", "00:00:00", "本轮合计"],
-      ["rate", "时薪", `${resolveHourlyRate(text)}元/小时`, "固定薪资"],
-      ["sessions", "今日次数", "0", "开始次数"],
-    ],
-    weather: [
-      ["weather", "天气", "--", "Shenzhen weather"],
-      ["temp", "板端温度", "--", "thermal zone"],
-      ["wifi", "Wi-Fi", "--", "live network"],
-      ["memory", "内存", "--", "system"],
-    ],
-    clock: [
-      ["time", "Time", "--:--", "fullscreen clock"],
-      ["date", "Date", "--", "calendar"],
-      ["seconds", "Seconds", "--", "ticker"],
-      ["service", "Service", "--", "hardware api"],
-    ],
-    carousel: [
-      ["slide", "Slide", "1/4", "image index"],
-      ["caption", "Caption", "ready", "current image"],
-      ["runtime", "Runtime", "--", "python result"],
-      ["service", "Service", "--", "hardware api"],
-    ],
-  };
-  const actionsByMode = {
-    weather: [{ id: "refresh", label: "刷新" }],
-    clock: [{ id: "refresh", label: "Sync" }],
-    carousel: [
-      { id: "previous", label: "Prev" },
-      { id: "next", label: "Next" },
-      { id: "refresh", label: "Sync" },
-    ],
-    wage: [
-      { id: "primary", label: "开始摸鱼" },
-      { id: "reset", label: "清零" },
-      { id: "mark", label: "记一笔" },
-    ],
-  };
-
   return {
     id,
     prompt: text,
-    mode,
-    title: titles[mode],
+    mode: "fallback",
+    title: "VibeBoard Generated App",
     subtitle: text.slice(0, 120),
-    accent: accents[mode],
-    hourlyRate: mode === "wage" ? resolveHourlyRate(text) : undefined,
+    accent: "#2f6bff",
     target: "480x360 RK3566 Linux kiosk",
     hardwareApi: [...HARDWARE_APP_CONTRACT.requiredRuntimeApis],
-    widgets: widgetsByMode[mode].map(([widgetId, label, value, hint]) => ({ id: widgetId, label, value, hint })),
-    actions: actionsByMode[mode] || [
-      { id: "primary", label: mode === "voice" ? "Start" : mode === "timer" ? "Start" : mode === "control" ? "Toggle A" : "Run" },
-      { id: "secondary", label: mode === "control" ? "Toggle B" : "Mark" },
+    widgets: [
+      { id: "preview", label: "Preview", value: "ready", hint: "generated screen" },
+      { id: "runtime", label: "Runtime", value: "--", hint: "python result" },
+      { id: "board", label: "Board", value: "--", hint: "hardware api" },
+      { id: "notes", label: "Notes", value: "custom", hint: "from prompt" },
+    ],
+    actions: [
+      { id: "primary", label: "Run" },
+      { id: "secondary", label: "Mark" },
       { id: "refresh", label: "Refresh" },
     ],
   };
@@ -176,6 +53,7 @@ export function injectHardwareAppContractsV2(source, buildId) {
 # --- VibeBoard runtime contract injection (auto-injected) ---
 import base64 as __vb_base64
 import json as __vb_json
+import os as __vb_os
 import socket as __vb_socket
 import sys as __vb_sys
 
@@ -216,7 +94,7 @@ def __vb_wrapped_main():
     if not isinstance(result, dict):
         result = {"value": result}
     result["build_id"] = __vb_build_id
-    result["runtime"] = "executed_on_board"
+    result["runtime"] = __vb_os.environ.get("VIBEBOARD_RUNTIME", "simulated")
     result["hostname"] = result.get("hostname") or __vb_socket.gethostname()
     result["available_apis"] = ${runtimeApisJson}
     print(__vb_json.dumps(result, ensure_ascii=False, sort_keys=True))

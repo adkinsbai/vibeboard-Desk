@@ -28,6 +28,11 @@ import {
   pythonRunnerRequired,
   resolvePythonRunnerConfig,
 } from "./pythonRunnerClient.mjs";
+import { createAgentTaskContract, taskContractPrompt } from "./agentTaskContract.mjs";
+import { compactAgentMessages } from "./agentContextBudget.mjs";
+import { createAgentLoopGuard } from "./agentLoopGuard.mjs";
+import { createAgentRunTelemetry, publicAgentRunTelemetry } from "./agentRunTelemetry.mjs";
+import { AGENT_PROGRESS_TYPES, createAgentProgressEvent } from "./agentProgress.mjs";
 
 const DEFAULT_MAX_ITERATIONS = 30;
 const DEFAULT_MAX_VERIFICATION_ATTEMPTS = 3;
@@ -330,12 +335,18 @@ export function createToolExecutor(fileStore, hardware = null) {
       }
 
       case "edit_file": {
-        const filePath = args.path;
-        const oldText = args.old_text;
-        const newText = args.new_text;
+        const filePath = String(args.path || "").trim();
+        const oldText = typeof args.old_text === "string" ? args.old_text : null;
+        const newText = typeof args.new_text === "string" ? args.new_text : null;
         if (!isWritableAgentFile(filePath)) {
           action.result = `错误：生成阶段只允许修改 ${[...AGENT_WRITABLE_FILES].join(", ")}，不能修改 ${filePath}`;
           action.args = { path: filePath, blocked: true };
+          actions.push(action);
+          return action.result;
+        }
+        if (oldText == null || newText == null) {
+          action.result = "错误：edit_file 需要字符串参数 path、old_text 和 new_text。请修正工具参数后重试。";
+          action.args = { path: filePath, invalid_arguments: true };
           actions.push(action);
           return action.result;
         }
@@ -370,11 +381,17 @@ export function createToolExecutor(fileStore, hardware = null) {
       }
 
       case "create_file": {
-        const filePath = args.path;
-        const content = args.content;
+        const filePath = String(args.path || "").trim();
+        const content = typeof args.content === "string" ? args.content : null;
         if (!isWritableAgentFile(filePath)) {
           action.result = `错误：生成阶段只允许创建 ${[...AGENT_WRITABLE_FILES].join(", ")}，不能创建 ${filePath}`;
           action.args = { path: filePath, blocked: true };
+          actions.push(action);
+          return action.result;
+        }
+        if (content == null) {
+          action.result = "错误：create_file 需要字符串参数 path 和 content。请补全文件内容后重试。";
+          action.args = { path: filePath, invalid_arguments: true };
           actions.push(action);
           return action.result;
         }
@@ -935,8 +952,28 @@ export function createToolExecutor(fileStore, hardware = null) {
 /**
  * Run the coding agent with auto-verification.
  */
-export async function runAgent(settings, prompt, fileStore, history = [], onAction = null, userPreferences = {}, experienceStore = null, hardware = null) {
+export async function runAgent(settings, prompt, fileStore, history = [], onAction = null, userPreferences = {}, experienceStore = null, hardware = null, runOptions = {}) {
   const { executeTool, actions, lessons: sessionLessons, getFileStore } = createToolExecutor(fileStore, hardware);
+  const telemetry = createAgentRunTelemetry();
+  const loopGuard = createAgentLoopGuard();
+  const emitProgress = (type, detail = {}) => {
+    if (typeof runOptions.onProgress !== "function") return;
+    try {
+      runOptions.onProgress(createAgentProgressEvent(type, detail));
+    } catch {}
+  };
+  let fileRevision = 0;
+  const finish = (result, reason) => {
+    telemetry.finish({ reason });
+    const publicTelemetry = publicAgentRunTelemetry(telemetry.snapshot());
+    emitProgress(result.success ? AGENT_PROGRESS_TYPES.RUN_COMPLETED : AGENT_PROGRESS_TYPES.RUN_FAILED, {
+      phase: "complete",
+      ok: result.success,
+      elapsedMs: publicTelemetry.duration_ms,
+      message: reason,
+    });
+    return { ...result, telemetry: publicTelemetry };
+  };
   const isEditing = Object.keys(fileStore).length > 0;
 
   // 获取经验教训
@@ -948,7 +985,19 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
   }
 
   // Build system prompt
-  const systemPrompt = buildAgentSystemPrompt(isEditing, fileStore, userPreferences, lessons);
+  const taskContract = runOptions.taskContract?.schema_version === "agent-task-contract.v1"
+    ? runOptions.taskContract
+    : createAgentTaskContract({
+      objective: prompt,
+      acceptanceCriteria: [
+        "All required files satisfy the VibeBoard generated-app contracts.",
+        "JavaScript, Python, hardware simulation, and render verification pass.",
+        "The 480x360 screen is nonblank and has no overflow.",
+      ],
+      forbidden: ["automatic hardware deployment", "credentials in generated files"],
+      maxModelTurns: Number(settings.maxIterations || DEFAULT_MAX_ITERATIONS),
+    });
+  const systemPrompt = `${buildAgentSystemPrompt(isEditing, fileStore, userPreferences, lessons)}\n\n${taskContractPrompt(taskContract)}`;
 
   // Build messages
   const messages = [
@@ -969,19 +1018,71 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
       : `请创建一个新项目：${prompt}`
   });
 
-  const maxIterations = Number(settings.maxIterations || process.env.VIBEBOARD_AGENT_MAX_ITERATIONS || DEFAULT_MAX_ITERATIONS);
+  const configuredMaxIterations = Number(settings.maxIterations || process.env.VIBEBOARD_AGENT_MAX_ITERATIONS || DEFAULT_MAX_ITERATIONS);
+  const maxIterations = Math.max(1, Math.min(configuredMaxIterations, taskContract.max_model_turns));
   const maxVerificationAttempts = Number(settings.maxVerificationAttempts || process.env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS || DEFAULT_MAX_VERIFICATION_ATTEMPTS);
+  const agentTimeoutMs = Math.max(1000, Number(settings.timeoutMs || process.env.VIBEBOARD_AGENT_TIMEOUT_MS || AGENT_TIMEOUT_MS));
+  const agentDeadlineAt = Date.now() + agentTimeoutMs;
   let summary = "";
   let whatWorked = [];
   let whatFailed = [];
   let verificationAttempts = 0;
   let lastVerifyResult = null;
+  const runAutoVerify = async () => {
+    const startedAt = Date.now();
+    emitProgress(AGENT_PROGRESS_TYPES.VERIFICATION_STARTED, {
+      phase: "verify",
+      message: "Automatic verification started",
+    });
+    telemetry.verification();
+    const result = await autoVerify(fileStore, executeTool, actions, onAction);
+    emitProgress(AGENT_PROGRESS_TYPES.VERIFICATION_COMPLETED, {
+      phase: "verify",
+      ok: result.ok,
+      elapsedMs: Date.now() - startedAt,
+      message: result.ok ? "Automatic verification passed" : `${result.issues.length} issue(s) found`,
+    });
+    return result;
+  };
+
+  emitProgress(AGENT_PROGRESS_TYPES.RUN_STARTED, {
+    phase: "plan",
+    message: isEditing ? "Editing existing project" : "Creating project",
+  });
 
   for (let i = 0; i < maxIterations; i++) {
-    const response = await callLLMWithTools(settings, messages);
+    const remainingMs = agentDeadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      return finish({
+        success: false,
+        summary: `Agent exceeded its ${agentTimeoutMs}ms execution budget.`,
+        error: { type: "agent_timeout", message: "Agent execution budget exceeded." },
+        actions,
+        files: getFileStore(),
+        whatWorked,
+        whatFailed,
+      }, "timeout");
+    }
+    const modelStartedAt = Date.now();
+    emitProgress(AGENT_PROGRESS_TYPES.MODEL_STARTED, {
+      phase: "reason",
+      message: `Model turn ${i + 1}`,
+    });
+    const response = await callLLMWithTools({
+      ...settings,
+      llmTimeoutMs: Math.max(1, Math.min(Number(settings.llmTimeoutMs || LLM_TIMEOUT_MS), remainingMs)),
+    }, compactAgentMessages(messages));
+    const modelDurationMs = Date.now() - modelStartedAt;
+    telemetry.modelTurn({ durationMs: modelDurationMs });
+    emitProgress(AGENT_PROGRESS_TYPES.MODEL_COMPLETED, {
+      phase: "reason",
+      ok: !response?.error,
+      elapsedMs: modelDurationMs,
+      message: `Model turn ${i + 1}`,
+    });
 
     if (response?.error) {
-      return {
+      return finish({
         success: false,
         summary: response.error.message,
         error: response.error,
@@ -989,7 +1090,7 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
         files: getFileStore(),
         whatWorked,
         whatFailed,
-      };
+      }, response.error.type === "llm_timeout" ? "timeout" : "provider_error");
     }
 
     messages.push(response);
@@ -1004,6 +1105,10 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
           summary = `Agent 未生成完整项目: ${completionIssues.join("; ")}`;
           break;
         }
+        emitProgress(AGENT_PROGRESS_TYPES.RECOVERY, {
+          phase: "reason",
+          message: "Model returned no tools before completion",
+        });
         messages.push({
           role: "user",
           content: [
@@ -1020,10 +1125,15 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
       // even after creating all required files. Treat that as a completion
       // candidate, but still run the same auto-verification gate used by done.
       if (verificationAttempts < maxVerificationAttempts) {
-        lastVerifyResult = await autoVerify(fileStore, executeTool, actions, onAction);
+        lastVerifyResult = await runAutoVerify();
 
         if (!lastVerifyResult.ok) {
           verificationAttempts++;
+          emitProgress(AGENT_PROGRESS_TYPES.RECOVERY, {
+            phase: "repair",
+            ok: false,
+            message: `Repairing ${lastVerifyResult.issues.length} verification issue(s)`,
+          });
           whatFailed.push(`验证失败 (第${verificationAttempts}次): ${lastVerifyResult.issues.join("; ")}`);
           messages.push({
             role: "user",
@@ -1054,7 +1164,7 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
         } catch {}
       }
 
-      return { success: true, summary, actions, files: getFileStore(), whatWorked, whatFailed, lessons: sessionLessons };
+      return finish({ success: true, summary, actions, files: getFileStore(), whatWorked, whatFailed, lessons: sessionLessons }, "verified");
     }
 
     for (const tc of toolCalls) {
@@ -1066,8 +1176,31 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
           : tc.function.arguments;
       } catch {}
 
+      const guardDecision = loopGuard.beforeTool({ name: fnName, args, fileRevision });
+      if (!guardDecision.allowed) {
+        const blockedResult = `BLOCKED ${guardDecision.code}: ${guardDecision.guidance}`;
+        const blockedAction = { tool: fnName, args, result: blockedResult, blocked: true };
+        actions.push(blockedAction);
+        telemetry.recovery({ code: guardDecision.code });
+        telemetry.tool({ name: fnName, ok: false });
+        emitProgress(AGENT_PROGRESS_TYPES.RECOVERY, {
+          phase: "reason",
+          tool: fnName,
+          ok: false,
+          message: "Repeated action blocked; choosing another step",
+        });
+        if (onAction) onAction(blockedAction);
+        messages.push({ role: "tool", tool_call_id: tc.id, content: blockedResult });
+        continue;
+      }
+
       // 拦截 get_learnings，注入经验数据
       if (fnName === "get_learnings") {
+        const toolStartedAt = Date.now();
+        emitProgress(AGENT_PROGRESS_TYPES.TOOL_STARTED, {
+          phase: "context",
+          tool: fnName,
+        });
         const taskType = args.task_type || "general";
         const learnings = experienceStore ? experienceStore.getLessons(taskType, 5) : lessons;
         const learnText = [
@@ -1082,11 +1215,35 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
           content: learnText,
         });
 
+        telemetry.tool({ name: fnName, ok: true });
+        emitProgress(AGENT_PROGRESS_TYPES.TOOL_COMPLETED, {
+          phase: "context",
+          tool: fnName,
+          ok: true,
+          elapsedMs: Date.now() - toolStartedAt,
+        });
         if (onAction) onAction({ tool: fnName, args, result: learnText });
         continue;
       }
 
+      const toolStartedAt = Date.now();
+      emitProgress(AGENT_PROGRESS_TYPES.TOOL_STARTED, {
+        phase: "code",
+        tool: fnName,
+        path: args.path || "",
+      });
       const result = await executeTool(fnName, args);
+      const toolOk = !/❌|\bFAIL\b|\bBLOCKING\b/i.test(String(result || ""));
+      const toolDurationMs = Date.now() - toolStartedAt;
+      telemetry.tool({ name: fnName, durationMs: toolDurationMs, ok: toolOk });
+      emitProgress(AGENT_PROGRESS_TYPES.TOOL_COMPLETED, {
+        phase: "code",
+        tool: fnName,
+        path: args.path || "",
+        ok: toolOk,
+        elapsedMs: toolDurationMs,
+      });
+      if (toolOk && ["create_file", "edit_file"].includes(fnName)) fileRevision += 1;
 
       if (onAction) {
         onAction({ tool: fnName, args, result });
@@ -1106,10 +1263,15 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
 
         // 自动验证循环
         if (verificationAttempts < maxVerificationAttempts) {
-          lastVerifyResult = await autoVerify(fileStore, executeTool, actions, onAction);
+          lastVerifyResult = await runAutoVerify();
 
           if (!lastVerifyResult.ok) {
             verificationAttempts++;
+            emitProgress(AGENT_PROGRESS_TYPES.RECOVERY, {
+              phase: "repair",
+              ok: false,
+              message: `Repairing ${lastVerifyResult.issues.length} verification issue(s)`,
+            });
             whatFailed.push(`验证失败 (第${verificationAttempts}次): ${lastVerifyResult.issues.join("; ")}`);
 
             // 注入修复提示，继续循环
@@ -1147,7 +1309,7 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
           } catch {}
         }
 
-        return { success: true, summary, actions, files: getFileStore(), whatWorked, whatFailed, lessons: sessionLessons };
+        return finish({ success: true, summary, actions, files: getFileStore(), whatWorked, whatFailed, lessons: sessionLessons }, "verified");
       }
     }
   }
@@ -1155,9 +1317,25 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
   const finalFiles = getFileStore();
   const finalIssues = getCompletionIssues(finalFiles);
   if (finalIssues.length === 0) {
+    if (!lastVerifyResult?.ok && verificationAttempts < maxVerificationAttempts) {
+      lastVerifyResult = await runAutoVerify();
+      if (!lastVerifyResult.ok) {
+        return finish({
+          success: false,
+          summary: `Agent reached the model-turn limit with ${lastVerifyResult.issues.length} unresolved verification issue(s).`,
+          error: { type: "verification_failed", message: lastVerifyResult.issues.join("; ") },
+          actions,
+          files: finalFiles,
+          whatWorked,
+          whatFailed: [...whatFailed, ...lastVerifyResult.issues],
+          lessons: sessionLessons,
+        }, "verification_failed");
+      }
+      whatWorked.push("All required files passed automatic verification at the model-turn limit.");
+    }
     const fallbackSummary = `Accepted complete files after reaching max iterations (${maxIterations}) before explicit done.`;
     whatWorked.push("All required files were generated before the iteration budget ended.");
-    return {
+    return finish({
       success: true,
       summary: summary || fallbackSummary,
       actions,
@@ -1165,10 +1343,10 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
       whatWorked,
       whatFailed,
       lessons: sessionLessons,
-    };
+    }, "iteration_limit");
   }
 
-  return {
+  return finish({
     success: false,
     summary: summary || `达到最大迭代次数（${maxIterations}），未确认完成`,
     actions,
@@ -1176,7 +1354,7 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
     whatWorked,
     whatFailed,
     lessons: sessionLessons,
-  };
+  }, "iteration_limit");
 }
 
 // ─── Auto-Verification ───
@@ -1733,12 +1911,14 @@ function buildAgentSystemPrompt(isEditing, fileStore, userPreferences = {}, less
 ## 你的工作流程
 
 ### Phase 1: 准备
-1. 用 get_learnings 查询过去的经验教训
+1. 编辑已有项目或遇到验证失败时才用 get_learnings；全新项目不要为此增加一次模型往返
 2. 用 read_file / list_files 了解项目结构（如果是编辑）
 3. 用 search_code 找到要修改的位置
 
 ### Phase 2: 编码
 4. 用 create_file 或 edit_file 生成/修改代码
+   - 全新项目应在同一次回复中并行调用多个 create_file，一次生成 index.html、style.css、app.js、hardware_app.py
+   - 独立的读取或写入应尽量在同一次回复中发出多个工具调用，减少模型往返
 5. 完成一组相关修改后用 verify_syntax 做轻量检查，不要每改一行都验证
 6. 生成阶段只能创建或修改 index.html、style.css、app.js、hardware_app.py。不要创建 _encode.py、_run.sh、test 文件或任何临时辅助文件
 

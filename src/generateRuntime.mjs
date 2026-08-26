@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { runBuildGraph } from "./buildGraph.mjs";
 import { buildRefinedPrompt } from "./clarifyEngine.mjs";
 import { normalizeProjectMemory } from "./conversationStore.mjs";
@@ -66,6 +68,7 @@ export function createGenerateRuntime(deps = {}) {
     generatedDir,
     getCurrentBuild = () => null,
     setCurrentBuild,
+    createBuildHandle = defaultCreateBuildHandle,
     projectWorkspace = null,
     formatMemoryForPrompt = formatProjectMemoryForPrompt,
     log = console,
@@ -73,20 +76,13 @@ export function createGenerateRuntime(deps = {}) {
 
   requireObject(conversationStore, "conversationStore");
   requireObject(memoryStore, "memoryStore");
-  let activeGenerate = null;
-
   async function runGenerateRequest(body = {}) {
-    if (activeGenerate) {
-      throw createStructuredError("Another generation is already running.", "generate_busy", {
-        statusCode: 409,
-        activeGenerate,
-      });
-    }
-    activeGenerate = {
-      id: `pending-${Date.now()}`,
+    const execution = {
+      jobId: String(body.job_id || body.jobId || body.request_id || body.requestId || `direct-${Date.now()}`).trim(),
       startedAt: new Date().toISOString(),
       conversationId: String(body.conversation_id || "").trim(),
       promptPreview: String(body.prompt || body.build_prompt || "").trim().slice(0, 120),
+      context: executionContextFromBody(body),
     };
     try {
       const rawPrompt = String(body.prompt || "").trim();
@@ -96,6 +92,7 @@ export function createGenerateRuntime(deps = {}) {
       const clarifyAnswers = Array.isArray(body.clarify_answers) ? body.clarify_answers : [];
       const modelSettings = body.modelSettings || {};
       const agentMode = normalizeAgentMode(body.agent_mode || body.agentMode);
+      const taskContract = body.task_contract || null;
       const conversationId = String(body.conversation_id || "").trim();
       const projectMemory = conversationId
         ? await conversationStore.getProjectMemory(conversationId)
@@ -158,6 +155,7 @@ export function createGenerateRuntime(deps = {}) {
         isEditing,
         agentMode,
         embeddedAssets,
+        taskContract,
       }, {
         agentGenerate: async () => runAgentGenerate({
           prompt,
@@ -170,9 +168,17 @@ export function createGenerateRuntime(deps = {}) {
           isEditing,
           agentMode,
           embeddedAssets,
+          taskContract,
           agentStartedAt,
+          execution,
         }),
-        templateGenerate: async () => runTemplateGenerate({ prompt, modelSettings, embeddedAssets }),
+        templateGenerate: async () => runTemplateGenerate({
+          prompt,
+          displayPrompt: rawPrompt,
+          modelSettings,
+          embeddedAssets,
+          execution,
+        }),
         saveSnapshot: async state => saveSnapshot({ state, conversationId, embeddedAssets, rawPrompt }),
       });
     } catch (error) {
@@ -180,14 +186,12 @@ export function createGenerateRuntime(deps = {}) {
       await appendServerLog("generate.request.failed", {
         error: error.message,
         ...classified,
-        conversationId: activeGenerate?.conversationId || "",
-        activeGenerate,
-        durationMs: activeGenerate?.startedAt ? Date.now() - Date.parse(activeGenerate.startedAt) : null,
+        conversationId: execution.conversationId,
+        jobId: execution.jobId,
+        durationMs: Date.now() - Date.parse(execution.startedAt),
       }).catch(() => {});
       Object.assign(error, classified);
       throw error;
-    } finally {
-      activeGenerate = null;
     }
   }
 
@@ -202,7 +206,9 @@ export function createGenerateRuntime(deps = {}) {
     isEditing,
     agentMode,
     embeddedAssets,
+    taskContract,
     agentStartedAt,
+    execution,
   }) {
     requireFunction(runAgent, "runAgent");
     requireFunction(buildId, "buildId");
@@ -240,7 +246,10 @@ export function createGenerateRuntime(deps = {}) {
           query: action.args?.query || "",
           summary: action.args?.summary || "",
         }).catch(() => {});
-      }, userPreferences, experienceStore, { ssh, scp, board: getBoard() });
+      }, userPreferences, experienceStore, { ssh, scp, board: getBoard() }, {
+        taskContract,
+        onProgress: event => appendServerLog("generate.agent.progress", event).catch(() => {}),
+      });
     } catch (agentErr) {
       await appendServerLog("generate.agent.failed", {
         error: agentErr.message,
@@ -292,7 +301,19 @@ export function createGenerateRuntime(deps = {}) {
     agentFiles = embedded.files;
     manifest = embedded.manifest || manifest;
 
-    await writeGeneratedFiles(generatedDir, agentFiles);
+    const build = createBuildHandle({
+      context: execution.context,
+      jobId: execution.jobId,
+      buildId: id,
+      generatedRoot: generatedDir,
+      prompt,
+      files: agentFiles,
+      built: false,
+      deployed: false,
+      manifest,
+      conversationId,
+    });
+    await writeGeneratedFiles(build.workspaceDir, agentFiles);
     let agentRun = transitionRun(createAgentRun({
       prompt,
       mode: "agent",
@@ -312,7 +333,8 @@ export function createGenerateRuntime(deps = {}) {
       },
       issues: [],
     });
-    setCurrentBuild({ id, prompt, files: agentFiles, dir: generatedDir, built: false, deployed: false, manifest, agentRun, conversationId });
+    build.agentRun = agentRun;
+    setCurrentBuild(build);
 
     const repairReport = await buildWithAutoRepair({
       id,
@@ -326,21 +348,25 @@ export function createGenerateRuntime(deps = {}) {
       history,
       userPreferences,
       agentStartedAt,
+      build,
+      context: execution.context,
     });
     agentFiles = repairReport.files || agentFiles;
     manifest = repairReport.manifest || manifest;
 
-    const currentBuild = getCurrentBuild();
     recordAgentLearning({
       prompt,
       agentResult,
-      verificationResult: currentBuild?.buildEvidence || null,
+      verificationResult: build.buildEvidence || null,
       success: true,
     });
 
     await appendServerLog("generate.agent.done", {
       id,
       actionCount: agentResult.actions?.length || 0,
+      modelTurns: agentResult.telemetry?.model_turns ?? null,
+      repeatedActionBlocks: agentResult.telemetry?.repeated_action_blocks ?? 0,
+      verificationAttempts: agentResult.telemetry?.verification_attempts ?? 0,
       durationMs: Date.now() - agentStartedAt,
     });
 
@@ -350,12 +376,14 @@ export function createGenerateRuntime(deps = {}) {
       files: agentFiles,
       manifest,
       source: "agent",
-      spec: currentBuild?.agentRun?.spec || null,
-      evidence: formatRunEvidence(currentBuild?.agentRun || {}),
-      buildEvidence: currentBuild?.buildEvidence || null,
-      intelligenceSummary: currentBuild?.intelligenceSummary || null,
+      spec: build.agentRun?.spec || null,
+      evidence: formatRunEvidence(build.agentRun || {}),
+      buildEvidence: build.buildEvidence || null,
+      intelligenceSummary: build.intelligenceSummary || null,
+      workspaceDir: build.workspaceDir,
       verificationMode: isBoardPasswordConfigured() ? "real-ready" : "local-simulated",
       agentSummary: agentResult.summary,
+      agentTelemetry: agentResult.telemetry || null,
       repairSummary: repairReport.summary || "",
       repairAttempts: repairReport.attempts || 0,
       agentActions: (agentResult.actions || []).map(a => ({
@@ -379,6 +407,8 @@ export function createGenerateRuntime(deps = {}) {
     history,
     userPreferences,
     agentStartedAt,
+    build,
+    context,
   }) {
     let files = agentFiles;
     let currentManifest = manifest;
@@ -387,7 +417,7 @@ export function createGenerateRuntime(deps = {}) {
 
     for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
       try {
-        await buildCurrent();
+        await buildCurrent({ build, context });
         if (attempt > 0) {
           await appendServerLog("generate.agent.auto_repair.done", {
             id,
@@ -453,14 +483,11 @@ export function createGenerateRuntime(deps = {}) {
         });
         files = finalized.files;
         currentManifest = finalized.manifest;
-        await writeGeneratedFiles(generatedDir, files);
-        const currentBuild = getCurrentBuild();
-        if (currentBuild) {
-          currentBuild.files = files;
-          currentBuild.manifest = currentManifest;
-          currentBuild.built = false;
-          currentBuild.buildEvidence = null;
-        }
+        await writeGeneratedFiles(build.workspaceDir, files);
+        build.files = files;
+        build.manifest = currentManifest;
+        build.built = false;
+        build.buildEvidence = null;
       }
     }
 
@@ -549,6 +576,12 @@ export function createGenerateRuntime(deps = {}) {
         userPreferences,
         experienceStore,
         { ssh, scp, board: getBoard() },
+        {
+          onProgress: event => appendServerLog("generate.agent.progress", {
+            ...event,
+            repairAttempt: attempt,
+          }).catch(() => {}),
+        },
       );
       if (!repairResult.success) {
         const error = new Error(repairResult.summary || "Auto repair agent failed");
@@ -613,9 +646,18 @@ export function createGenerateRuntime(deps = {}) {
     return { files: nextFiles, manifest: nextManifest };
   }
 
-  async function runTemplateGenerate({ prompt, modelSettings, embeddedAssets }) {
+  async function runTemplateGenerate({ prompt, displayPrompt = prompt, modelSettings, embeddedAssets, execution }) {
     requireFunction(writeGenerated, "writeGenerated");
-    const build = await writeGenerated(prompt, modelSettings, [], embeddedAssets);
+    const build = await writeGenerated(prompt, modelSettings, [], embeddedAssets, {
+      displayPrompt,
+      context: execution.context,
+      jobId: execution.jobId,
+      conversationId: execution.conversationId,
+    });
+    syncGeneratedManifestPrompt(build, displayPrompt);
+    if (build?.agentRun?.spec && typeof build.agentRun.spec === "object") {
+      build.agentRun.spec.prompt = displayPrompt;
+    }
     const embedded = embedGeneratedAssetsInFiles(build.files, embeddedAssets, build.manifest);
     return {
       ok: true,
@@ -627,16 +669,37 @@ export function createGenerateRuntime(deps = {}) {
       evidence: formatRunEvidence(build.agentRun || {}),
       buildEvidence: build.buildEvidence || null,
       intelligenceSummary: build.intelligenceSummary || null,
+      workspaceDir: build.workspaceDir,
       verificationMode: isBoardPasswordConfigured() ? "real-ready" : "local-simulated",
       agentActions: [],
       thinking: "",
     };
   }
 
+  function syncGeneratedManifestPrompt(build, displayPrompt) {
+    if (!build || !displayPrompt) return;
+    let manifest = build.manifest && typeof build.manifest === "object" && !Array.isArray(build.manifest)
+      ? { ...build.manifest }
+      : {};
+    if (!Object.keys(manifest).length && typeof build.files?.["manifest.json"] === "string") {
+      try {
+        manifest = JSON.parse(build.files["manifest.json"]);
+      } catch {
+        manifest = {};
+      }
+    }
+    if (!Object.keys(manifest).length) return;
+    manifest.prompt = displayPrompt;
+    build.manifest = manifest;
+    if (build.files && typeof build.files === "object") {
+      build.files["manifest.json"] = JSON.stringify(manifest, null, 2);
+    }
+  }
+
   async function saveSnapshot({ state, conversationId, embeddedAssets, rawPrompt }) {
     if (!conversationId) return;
     try {
-      const files = await filesWithHardwareResult(state.result.files);
+      const files = await filesWithHardwareResult(state.result.files, state.result);
       await conversationStore.saveConversationFiles(
         conversationId,
         state.result.id,
@@ -972,6 +1035,47 @@ function defaultPositiveInt(value, fallback) {
 function nonNegativeInt(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
+function executionContextFromBody(body = {}) {
+  return Object.freeze({
+    organizationId: String(body.organization_id || body.organizationId || "").trim(),
+    actorId: String(body.actor_id || body.actorId || body.user_id || "").trim(),
+    projectId: String(body.project_id || body.projectId || body.conversation_id || "").trim(),
+    applicationId: String(body.application_id || body.applicationId || "").trim(),
+    buildId: String(body.build_id || body.buildId || "").trim(),
+    deviceId: String(body.device_id || body.deviceId || "").trim(),
+    requestId: String(body.request_id || body.requestId || body.client_run_id || body.clientRunId || "").trim(),
+  });
+}
+
+function defaultCreateBuildHandle({
+  context = {},
+  jobId = "",
+  buildId = "",
+  generatedRoot = "",
+  files = {},
+  ...metadata
+} = {}) {
+  const safeJobId = safePathSegment(jobId || context.requestId || `direct-${buildId}`);
+  const safeBuildId = safePathSegment(buildId);
+  const workspaceDir = path.join(path.resolve(generatedRoot), "jobs", safeJobId, safeBuildId);
+  return {
+    ...metadata,
+    id: String(buildId || ""),
+    buildId: String(buildId || ""),
+    jobId: String(jobId || ""),
+    context: Object.freeze({ ...(context || {}) }),
+    workspaceDir,
+    dir: workspaceDir,
+    files: { ...(files || {}) },
+  };
+}
+
+function safePathSegment(value) {
+  const text = String(value || "").trim();
+  if (!text) throw new Error("Build path identity is required.");
+  return text.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_");
 }
 
 function requireFunction(value, name) {

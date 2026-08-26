@@ -45,9 +45,10 @@ export function createBuildRuntime(deps = {}) {
   requireFunction(getCurrentBuild, "getCurrentBuild");
   requireString(pythonBin, "pythonBin");
 
-  async function buildCurrent() {
-    const currentBuild = getCurrentBuild();
+  async function buildCurrent({ build = null, context = null } = {}) {
+    const currentBuild = build || getCurrentBuild();
     if (!currentBuild) throw new Error("No generated app. Generate first.");
+    assertBuildContext(currentBuild, context);
 
     await appendServerLog("build.start", { id: currentBuild.id });
 
@@ -223,7 +224,24 @@ export function createBuildRuntime(deps = {}) {
     return manifest;
   }
 
-  return { buildCurrent };
+  return {
+    buildCurrent,
+    build: (build, context = null) => buildCurrent({ build, context }),
+  };
+}
+
+function assertBuildContext(build, context) {
+  if (!context || !build?.context) return;
+  for (const key of ["organizationId", "projectId"]) {
+    const expected = String(context[key] || "").trim();
+    const actual = String(build.context[key] || "").trim();
+    if (expected && actual && expected !== actual) {
+      const error = new Error(`Build ${build.id || ""} does not belong to ${key} ${expected}.`);
+      error.errorType = "build_context_mismatch";
+      error.statusCode = 404;
+      throw error;
+    }
+  }
 }
 
 async function runPythonCheck({

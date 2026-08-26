@@ -2,7 +2,9 @@ export function classifyError(error, context = {}) {
   const text = errorText(error);
   const lower = text.toLowerCase();
   const stageHint = String(context.stage || error?.stage || "").trim();
-  const type = explicitType(error) || detectType(text, lower, context);
+  const explicit = explicitType(error);
+  const detected = detectType(text, lower, context);
+  const type = refineExplicitType(explicit, detected);
   const profile = ERROR_PROFILES[type] || ERROR_PROFILES.unknown;
   const technicalDetail = cleanTechnicalDetail(error, text);
   return {
@@ -63,6 +65,15 @@ const ERROR_PROFILES = Object.freeze({
     statusCode: 502,
     nextActions: ["检查 API Key", "检查模型名", "更换 Provider"],
   },
+  database_quota: {
+    label: "Database provider quota is unavailable",
+    stage: "database",
+    userMessage: "数据库服务返回流量或额度超限，依赖数据库的登录、对话、项目保存和任务接口暂时不可用。",
+    suggestion: "请升级或恢复 Neon 数据库额度，或等额度重置后再试；这不是 GLM 5.2 的 API Key 问题。",
+    retryable: false,
+    statusCode: 503,
+    nextActions: ["检查 Neon 数据库用量", "升级数据库套餐", "恢复数据库额度"],
+  },
   llm_quota: {
     label: "AI provider quota is unavailable",
     stage: "model_call",
@@ -71,6 +82,15 @@ const ERROR_PROFILES = Object.freeze({
     retryable: false,
     statusCode: 502,
     nextActions: ["检查余额", "切换模型", "稍后重试"],
+  },
+  llm_quota: {
+    label: "AI provider quota is unavailable",
+    stage: "model_call",
+    userMessage: "模型服务返回额度、余额或配额不足，生成流程已经在写入硬件前停止。",
+    suggestion: "请给模型账号充值、提高额度，或在 Model 设置里切换到另一个可用 API Key 后重试。",
+    retryable: false,
+    statusCode: 502,
+    nextActions: ["检查模型账号余额", "充值或提高额度", "更换 API Key"],
   },
   llm_rate_limited: {
     label: "AI provider rate limited the request",
@@ -89,6 +109,15 @@ const ERROR_PROFILES = Object.freeze({
     retryable: true,
     statusCode: 504,
     nextActions: ["重试生成", "缩短需求", "切换模型"],
+  },
+  agent_timeout: {
+    label: "Agent execution exceeded its time budget",
+    stage: "generate",
+    userMessage: "Agent 在生成或本地验证过程中超过了任务时限，代码尚未被视为完整可用。",
+    suggestion: "可以重试；如果持续发生，请缩短需求、减少上下文，或提高服务端生成超时配置。",
+    retryable: true,
+    statusCode: 504,
+    nextActions: ["重试生成", "缩短需求", "查看任务日志"],
   },
   llm_network: {
     label: "AI provider network is unreachable",
@@ -304,16 +333,28 @@ function explicitType(error) {
   return ERROR_PROFILES[value] ? value : "";
 }
 
+function refineExplicitType(explicit, detected) {
+  if (detected === "database_quota") return detected;
+  if (!explicit) return detected;
+  if (explicit === "llm_failed" && detected && detected !== "llm_failed" && detected.startsWith("llm_")) {
+    return detected;
+  }
+  return explicit;
+}
+
 function detectType(text, lower, context = {}) {
   if (/spawn\s+\S*python\S*\s+ENOENT|\bENOENT\b[\s\S]*\bpython\b|PYTHON_RUNTIME_UNAVAILABLE|Python runtime is unavailable|Python was not found|unable to find Python|could not find Python|No Python at|not recognized as an internal or external command|command not found/i.test(text) && /python|py_compile|hardware_app\.py/i.test(text)) return "python_runtime_unavailable";
   if (/another generation|generation.*running|generate_busy|already.*running|in progress/i.test(text)) return "generate_busy";
   if (/Prompt is required|empty.*prompt/i.test(text)) return "empty_prompt";
   if (/larger than|payload too large|request entity too large|HTTP 413|413/i.test(text)) return "request_too_large";
+  if (isDatabaseQuota(text, lower)) return "database_quota";
   if (/not configured|no api key|missing api key|NO_API_KEY/i.test(text)) return "no_api_key";
+  if (/HTTP\s*402|status[=:]\s*402|余额不足|额度不足|配额不足|欠费|充值|insufficient.*balance/i.test(text)) return "llm_quota";
   if (/HTTP\s*(401|403)|status[=:]\s*(401|403)|unauthori[sz]ed|forbidden|invalid api key|authentication|permission denied|无效.*key|鉴权|认证失败/i.test(text)) return "llm_auth";
   if (/insufficient.*quota|quota|balance|billing|credits?|余额不足|额度不足/i.test(text)) return "llm_quota";
   if (/HTTP\s*429|status[=:]\s*429|rate limit|too many requests|限流|频率/i.test(text)) return "llm_rate_limited";
   if (/LLM_TIMEOUT|llm.*timeout|model.*timeout|Timed out after/i.test(text)) return "llm_timeout";
+  if (/Agent execution budget exceeded|agent execution.*(?:budget|time)|agent.*budget exceeded/i.test(text)) return "agent_timeout";
   if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|fetch failed|getaddrinfo|network|socket hang up/i.test(text) && /llm|model|chat\/completions|provider|api\./i.test(text)) return "llm_network";
   if (/LLM_CALL_FAILED|llm.*fail|model.*fail|chat\/completions|provider=/i.test(text)) return "llm_failed";
   if (/missing index\.html|missing.*style\.css|missing.*app\.js|Model output is missing|not.*valid JSON|JSON.*parse|empty content/i.test(text)) return "model_output_invalid";
@@ -335,6 +376,15 @@ function detectType(text, lower, context = {}) {
   if (/Deploy failed/i.test(text)) return "deploy_failed";
   if (/maximum iterations|max iterations|iteration limit/i.test(text)) return "model_output_invalid";
   return "unknown";
+}
+
+function isDatabaseQuota(text, lower) {
+  const primary = String(text || "").split(/\n\s*at\s+/)[0];
+  if (/Database provider quota exceeded/i.test(primary)) return true;
+  if (/data transfer quota/i.test(primary)) return true;
+  const hasQuotaSignal = /HTTP\s*402|HTTP status 402|status[=:]\s*402|quota|billing|exceeded/i.test(primary);
+  if (!hasQuotaSignal) return false;
+  return /neon|neon:retryable|database|postgres|DATABASE_URL|project_persistence|conversation|authStore|telemetry/i.test(primary);
 }
 
 function errorText(error) {

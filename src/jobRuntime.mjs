@@ -81,13 +81,21 @@ function choicesFromOutput(type, output = {}, job = {}) {
 
 const DEFAULT_JOB_TIMEOUT_MS = 180000;
 
-export function createJobRuntime({ jobStore, classifyError, appendServerLog = async () => {}, timeoutMs = DEFAULT_JOB_TIMEOUT_MS } = {}) {
+export function createJobRuntime({
+  jobStore,
+  classifyError,
+  appendServerLog = async () => {},
+  timeoutMs = DEFAULT_JOB_TIMEOUT_MS,
+  maxConcurrency = 2,
+} = {}) {
   if (!jobStore) throw new Error("jobStore is required");
   const handlers = new Map();
   const runtimeInputs = new Map();
   const scheduledJobs = new Set();
   const activeRuns = new Map();
-  let queue = Promise.resolve();
+  const pendingRuns = [];
+  const concurrency = Math.max(1, Math.min(Number(maxConcurrency) || 2, 64));
+  let runningCount = 0;
 
   function contextFor(jobId) {
     return {
@@ -96,11 +104,11 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
         const job = await jobStore.getJob(jobId);
         if (!job || isFinal(job.status)) return job;
         const next = await jobStore.transition(jobId, { phase: String(phase || job.phase || "") });
-        if (message) await jobStore.appendLog(jobId, message, {}, phase);
+        if (message) void settleSideEffect(() => jobStore.appendLog(jobId, message, {}, phase));
         return next;
       },
       async log(message, data = {}) {
-        return await jobStore.appendLog(jobId, message, data);
+        return await settleSideEffect(() => jobStore.appendLog(jobId, message, data));
       },
       async checkCanceled() {
         const job = await jobStore.getJob(jobId);
@@ -122,6 +130,20 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
       ? await jobStore.claimJob(jobId)
       : await jobStore.transition(jobId, { status: JOB_STATUS.RUNNING, phase: "starting" });
     if (!job) return await jobStore.getJob(jobId);
+    try {
+      await jobStore.transition(jobId, { phase: "claimed" });
+    } catch (error) {
+      const classified = classifyError
+        ? classifyError(error, { stage: "job_claim" })
+        : { errorType: error?.errorType || "job_claim_failed", retryable: true };
+      await jobStore.transition(jobId, {
+        status: JOB_STATUS.FAILED,
+        phase: "job_claim",
+        error: serializeError(error, classified),
+        choices: choicesFromError(classified, job),
+      }).catch(() => {});
+      return await jobStore.getJob(jobId);
+    }
     const handler = handlers.get(job.type);
     if (!handler) {
       await jobStore.transition(jobId, {
@@ -140,15 +162,18 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
       });
     }
 
-    await jobStore.appendLog(jobId, "Job started.");
-    await appendServerLog("job.start", { id: jobId, type: job.type, conversationId: job.conversation_id });
+    void appendServerLog("job.claimed", { id: jobId, type: job.type, conversationId: job.conversation_id }).catch(() => {});
 
     try {
+      void settleSideEffect(() => jobStore.appendLog(jobId, "Job started."));
+      void appendServerLog("job.start", { id: jobId, type: job.type, conversationId: job.conversation_id }).catch(() => {});
       const ctx = contextFor(jobId);
       const executionInput = runtimeInput || job.input || {};
       await ctx.checkCanceled();
+      await jobStore.transition(jobId, { phase: "dispatching" });
+      const handlerPromise = Promise.resolve().then(() => handler(executionInput, ctx, job));
       const output = await withTimeout(
-        handler(executionInput, ctx, job),
+        handlerPromise,
         Number(executionInput?.job_timeout_ms || executionInput?.timeout_ms || timeoutMs || DEFAULT_JOB_TIMEOUT_MS),
         job
       );
@@ -168,7 +193,7 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
           choices: choicesFromOutput(job.type, output, job),
         });
       }
-      await appendServerLog("job.done", { id: jobId, type: job.type });
+      void appendServerLog("job.done", { id: jobId, type: job.type }).catch(() => {});
     } catch (error) {
       const classified = classifyError
         ? classifyError(error, { stage: job.type })
@@ -179,24 +204,38 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
         error: serializeError(error, classified),
         choices: choicesFromError(classified, job),
       });
-      await jobStore.appendLog(jobId, error?.message || "Job failed.", {
+      await settleSideEffect(() => jobStore.appendLog(jobId, error?.message || "Job failed.", {
         errorType: classified.errorType,
         technicalDetail: classified.technicalDetail,
-      });
-      await appendServerLog("job.failed", { id: jobId, type: job.type, errorType: classified.errorType, error: error?.message });
+      }));
+      void appendServerLog("job.failed", { id: jobId, type: job.type, errorType: classified.errorType, error: error?.message }).catch(() => {});
     }
     return await jobStore.getJob(jobId);
   }
 
   function schedule(jobId) {
-    if (scheduledJobs.has(jobId)) return queue;
+    if (scheduledJobs.has(jobId)) return activeRuns.get(jobId) || Promise.resolve(null);
     scheduledJobs.add(jobId);
-    const run = () => runOnce(jobId, runtimeInputs.get(jobId) || null);
-    queue = queue.then(run, run).finally(() => {
-      scheduledJobs.delete(jobId);
-      runtimeInputs.delete(jobId);
+    const completion = new Promise((resolve, reject) => {
+      pendingRuns.push({ jobId, resolve, reject });
     });
-    return queue;
+    queueMicrotask(pump);
+    return completion;
+  }
+
+  function pump() {
+    while (runningCount < concurrency && pendingRuns.length) {
+      const pending = pendingRuns.shift();
+      runningCount += 1;
+      runOnce(pending.jobId, runtimeInputs.get(pending.jobId) || null)
+        .then(pending.resolve, pending.reject)
+        .finally(() => {
+          runningCount -= 1;
+          scheduledJobs.delete(pending.jobId);
+          runtimeInputs.delete(pending.jobId);
+          pump();
+        });
+    }
   }
 
   async function createOrGetRuntimeJob(type, input, { conversationId = "", title = "", persistedInput = input } = {}) {
@@ -271,6 +310,15 @@ export function createJobRuntime({ jobStore, classifyError, appendServerLog = as
       for (const job of jobs.reverse()) {
         schedule(job.id);
       }
+      return Promise.resolve();
+    },
+
+    capacity() {
+      return {
+        maxConcurrency: concurrency,
+        running: runningCount,
+        queued: pendingRuns.length,
+      };
     },
   };
 }
@@ -292,4 +340,18 @@ function withTimeout(promise, timeoutMs, job = {}) {
     }, ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function settleSideEffect(effect, timeoutMs = 2000) {
+  let value;
+  try {
+    value = typeof effect === "function" ? effect() : effect;
+  } catch {
+    value = null;
+  }
+  const promise = Promise.resolve(value).catch(() => null);
+  return await Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => resolve(null), timeoutMs)),
+  ]);
 }
