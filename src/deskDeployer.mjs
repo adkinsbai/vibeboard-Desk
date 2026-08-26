@@ -57,7 +57,7 @@ export function buildDeployRemoteCommand({ board, buildId }) {
     "mkdir -p \"$backup\" || exit 10",
     "python3 -m py_compile \"$release/hardware_app.py\" >\"$compile_log\" 2>&1 || exit 16",
     "echo \"board py_compile ok: $release/hardware_app.py\" >>\"$compile_log\"",
-    "python3 \"$release/hardware_app.py\" >\"$program_result\" 2>>\"$compile_log\" || exit 17",
+    "VIBEBOARD_RUNTIME=executed_on_board python3 \"$release/hardware_app.py\" >\"$program_result\" 2>>\"$compile_log\" || exit 17",
     "echo \"board program executed: $program_result\" >>\"$compile_log\"",
     `grep -q '"runtime"' "$program_result" || python3 -c "import json,sys;p=sys.argv[1];d=json.load(open(p));d['runtime']='executed_on_board';d.setdefault('build_id','${buildId}');json.dump(d,open(p,'w'),indent=2)" "$program_result" && echo "injected runtime" >>"$compile_log" || echo "inject-failed" >>"$compile_log"`,
     "cp -a \"$target/.\" \"$backup/\" || exit 11",

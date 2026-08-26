@@ -1,0 +1,19 @@
+.git
+.vercel
+.codex-artifacts
+node_modules
+runtime
+generated
+previews
+output
+VibeBoard Projects
+*.log
+*.tmp
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+vibeboard.db
+.env
+.env.*

@@ -1,0 +1,22 @@
+.env
+.env.*
+.git/
+node_modules/
+.vercel/cache/
+.vercel/output/
+market-apps/vb-digital-life-companion-demo/
+VibeBoard Projects/Digital Life physical companion benchmark-*/
+VibeBoard Projects/______*/
+docs/superpowers/plans/2026-07-20-deepseek-agent-physical-companion-benchmark.md
+**/__pycache__/
+*.pyc
+previews/vb-mrslb141-*
+previews/vb-mrsmh090-*
+runtime/benchmarks/
+src/agentBenchmark.mjs
+src/agentContextBudget.mjs
+src/agentLoopGuard.mjs
+src/agentProgress.mjs
+src/agentRunTelemetry.mjs
+tests/agent-benchmark.mjs
+tests/agent-loop-quality.mjs

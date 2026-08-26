@@ -110,12 +110,13 @@ try {
       },
     }),
   });
-  assert(job.status === 200, `public request-bound job should finish before response, got ${job.status}: ${JSON.stringify(job.data)}`);
+  assert(job.status === 202, `public background job should be accepted asynchronously, got ${job.status}: ${JSON.stringify(job.data)}`);
   jobId = job.data.job?.id || "";
   assert(jobId, "job create should return a job id");
-  assert(job.data.job?.status === "succeeded", `request-bound job should succeed, got ${JSON.stringify(job.data.job)}`);
+  const completedJob = await waitForJob(baseUrl, jobId, cookie);
+  assert(completedJob.status === "succeeded", `background job should succeed, got ${JSON.stringify(completedJob)}`);
   const files = await getJson(baseUrl, `/api/conversations/${conversationId}/files`, cookie);
-  assert(files.buildId === job.data.job.output.id, `conversation files should persist after public job: ${JSON.stringify(files)}`);
+  assert(files.buildId === completedJob.output.id, `conversation files should persist after public job: ${JSON.stringify(files)}`);
   assert(files.files?.["index.html"], "conversation files should include index.html after public job");
   const projectPersistenceState = JSON.parse(await fs.readFile(projectPersistencePath, "utf8"));
   assert(
@@ -246,6 +247,15 @@ async function getJson(baseUrl, targetPath, cookie = "") {
   const result = await raw(baseUrl, targetPath, { headers: cookie ? { cookie } : {} });
   assert(result.response.ok, `${targetPath} should return ok HTTP, got ${result.status}: ${JSON.stringify(result.data)}`);
   return result.data;
+}
+
+async function waitForJob(baseUrl, id, cookie = "") {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const job = await getJson(baseUrl, `/api/jobs/${encodeURIComponent(id)}`, cookie);
+    if (["succeeded", "failed", "canceled"].includes(job.job?.status)) return job.job;
+    await delay(100);
+  }
+  throw new Error(`job ${id} did not finish before the persistence test timeout`);
 }
 
 async function raw(baseUrl, targetPath, options = {}) {
