@@ -41,6 +41,7 @@ const MODEL_STORAGE_KEY = "vibeboard-digital-life-model-settings";
 const providerDefaults = {
   deepseek: { baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash" },
   minimax: { baseUrl: "https://api.minimaxi.com/v1", model: "MiniMax-M2.7" },
+  glm: { baseUrl: "https://maas-openapi.wanjiedata.com/api/v1", model: "glm-5.2" },
   custom: { baseUrl: "", model: "" },
 };
 

@@ -705,7 +705,7 @@
         const data = await res.json();
         if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
         const conversation = encodeURIComponent(data.conversation_id || '');
-        window.location.href = `/workbench?conversation=${conversation}&marketPreview=1`;
+        window.location.href = `/studio/workbench?conversation=${conversation}&marketPreview=1`;
       } catch (err) {
         alert(`预览失败：${err.message}`);
         if (button) {

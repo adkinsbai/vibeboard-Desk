@@ -5,15 +5,12 @@ await withServer(async ({ baseUrl }) => {
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1280, height: 760 } });
   try {
-    await page.goto(`${baseUrl}/`, { waitUntil: "domcontentloaded" });
+    await page.goto(`${baseUrl}/studio`, { waitUntil: "domcontentloaded" });
     await page.locator("#portalAuthCard").waitFor({ timeout: 6000 });
-    const title = await page.locator(".portal-brand h1").textContent();
-    assert(title.includes("开发板主控平台"), "root page should be the board control portal");
     const portalLayout = await page.locator(".portal-hero").evaluate(node => ({
       justifyItems: getComputedStyle(node).justifyItems,
       cardX: Math.round(document.querySelector("#portalAuthCard").getBoundingClientRect().x),
       heroX: Math.round(node.getBoundingClientRect().x),
-      heroWidth: Math.round(node.getBoundingClientRect().width),
       primaryBackground: getComputedStyle(document.querySelector("#portalLoginForm button[type='submit']")).backgroundColor,
       bodyBackground: getComputedStyle(document.body).backgroundImage,
     }));
@@ -28,11 +25,18 @@ await withServer(async ({ baseUrl }) => {
     await page.locator("#portalRegisterForm button[type='submit']").click();
     await page.locator("#portalBoardArea").waitFor({ state: "visible", timeout: 6000 });
     const boards = await page.locator(".board-card").count();
-    assert(boards >= 4, "portal should show a board catalog after login");
-    const hasCurrentWorkbench = await page.locator(".board-card", { hasText: "泰山派" }).count();
-    assert(hasCurrentWorkbench >= 1, "portal should include current Taishan workbench entry");
+    assert(boards >= 6, "portal should show a board catalog after login");
+    const taishanCards = await page.locator(".board-card[data-board-id^='taishan-']").count();
+    assert(taishanCards === 1, `portal should show one generic Taishan entry, got ${taishanCards}`);
+    assert(await page.locator("#deviceBindForm").count() === 1, "portal should expose the device binding form");
 
-    await page.goto(`${baseUrl}/workbench`, { waitUntil: "domcontentloaded" });
+    await page.locator("#deviceSerialInput").fill("GRAYUNIT2026");
+    await page.locator("#deviceBindForm button[type='submit']").click();
+    await page.locator(".my-device-card", { hasText: "灰色版" }).waitFor({ timeout: 6000 });
+    const boundDevices = await page.locator(".my-device-card").count();
+    assert(boundDevices === 1, "bound devices should appear in My Devices after binding");
+
+    await page.goto(`${baseUrl}/studio/workbench`, { waitUntil: "domcontentloaded" });
     await page.locator("#chatLog").waitFor({ timeout: 6000 });
     assert(await page.locator("#currentConversationTitle").count() === 1, "workbench route should preserve current UI");
 
@@ -42,7 +46,7 @@ await withServer(async ({ baseUrl }) => {
     const preview = await fetch(`${baseUrl}/api/market/${encodeURIComponent(previewable.id)}/preview`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ deviceId: "taishan-transparent" }),
+      body: JSON.stringify({ deviceId: "taishan-gray" }),
     }).then(res => res.json());
     assert(preview.ok === true && preview.conversation_id, "market preview should create an editable conversation");
     const files = await fetch(`${baseUrl}/api/conversations/${preview.conversation_id}/files`).then(res => res.json());
