@@ -45,7 +45,7 @@ import { createJobRuntime } from "./src/jobRuntime.mjs";
 import { createDebugRecovery } from "./src/debugRuntime.mjs";
 import { executionContextFromRequest } from "./src/executionContext.mjs";
 import { verifyAllLocal } from "./src/verifiers/index.mjs";
-import { classifyError } from "./src/errorClassifier.mjs";
+import { classifyError, createStructuredError } from "./src/errorClassifier.mjs";
 import { createDatabaseClient } from "./src/databaseClient.mjs";
 import { analyzeAndClarify } from "./src/clarifyEngine.mjs";
 import { createAgentOrchestrator } from "./src/agentOrchestrator.mjs";
@@ -792,29 +792,17 @@ function parseUsageMetadata(value) {
 
 function publicSafeModelSettings(input = {}) {
   if (!PUBLIC_DEPLOYMENT) return input || {};
-  if (input.enabled === false || input.forceTemplate === true) {
-    return {
-      provider: input.provider || process.env.VIBEBOARD_LLM_PROVIDER || process.env.VIBEBOARD_MODEL_PROVIDER || "deepseek",
-      baseUrl: input.baseUrl || process.env.VIBEBOARD_LLM_BASE_URL || process.env.VIBEBOARD_MODEL_BASE_URL || "",
-      model: input.model || process.env.VIBEBOARD_LLM_MODEL || process.env.VIBEBOARD_MODEL || "",
-      enabled: false,
-    };
-  }
   return {
     provider: process.env.VIBEBOARD_LLM_PROVIDER || process.env.VIBEBOARD_MODEL_PROVIDER || input.provider || "deepseek",
     baseUrl: process.env.VIBEBOARD_LLM_BASE_URL || process.env.VIBEBOARD_MODEL_BASE_URL || input.baseUrl || "",
     model: process.env.VIBEBOARD_LLM_MODEL || process.env.VIBEBOARD_MODEL || input.model || "",
     // The browser stores a per-user key locally. It is request-scoped here and never returned.
     apiKey: String(input.apiKey || "").trim(),
-    enabled: true,
+    enabled: input.enabled === false ? false : true,
   };
 }
 
-function withServerModelSettings(body = {}, options = {}) {
-  const forceTemplate = options.forceTemplate === true;
-  const modelInput = forceTemplate
-    ? { ...(body?.modelSettings || {}), enabled: false, forceTemplate: true }
-    : (body?.modelSettings || {});
+function withServerModelSettings(body = {}) {
   const cloudAgentLimits = PUBLIC_DEPLOYMENT
     ? {
         max_iterations: Math.min(6, Number(body?.max_iterations || body?.maxIterations || 6)),
@@ -824,7 +812,7 @@ function withServerModelSettings(body = {}, options = {}) {
     : {};
   return {
     ...(body || {}),
-    modelSettings: publicSafeModelSettings(modelInput),
+    modelSettings: publicSafeModelSettings(body?.modelSettings || {}),
     ...cloudAgentLimits,
   };
 }
@@ -1998,11 +1986,11 @@ function normalizeGeneratedFiles(raw, prompt, id, meta = {}) {
   return { files, manifest };
 }
 
-function templateGeneratedFiles(prompt, id, reason = "", displayPrompt = prompt) {
+function offlineSimulationGeneratedFiles(prompt, id, reason = "", displayPrompt = prompt) {
   const spec = createAppSpec(displayPrompt, id);
   const manifest = generatedManifestV2(displayPrompt, id, spec, {
-    source: "template",
-    fallbackReason: reason,
+    source: "offline-simulated",
+    simulationReason: reason,
     target: BOARD.targetStatic
   });
   const advanced = advancedTemplateFilesV2(prompt, id, spec);
@@ -2167,10 +2155,17 @@ function buildExtractiveSummary(messages) {
   return parts.join("。") || "之前有一段对话";
 }
 
-async function generateFilesForPrompt(prompt, id, modelSettings = {}, history = [], displayPrompt = prompt) {
+async function generateFilesForPrompt(prompt, id, modelSettings = {}, history = [], displayPrompt = prompt, options = {}) {
   const settings = normalizeModelSettings(modelSettings);
   if (!settings.enabled) {
-    return templateGeneratedFiles(prompt, id, "model settings not configured", displayPrompt);
+    if (options.allowOfflineSimulation !== true) {
+      throw createStructuredError(
+        "A configured AI model is required for code generation.",
+        "no_api_key",
+        { statusCode: 400 },
+      );
+    }
+    return offlineSimulationGeneratedFiles(prompt, id, "explicit offline simulation", displayPrompt);
   }
 
   try {
@@ -2181,11 +2176,7 @@ async function generateFilesForPrompt(prompt, id, modelSettings = {}, history = 
       model: settings.model
     });
   } catch (error) {
-    if (history.length > 0) {
-      // If editing and LLM fails, don't fall back to template - throw the error
-      throw error;
-    }
-    return templateGeneratedFiles(prompt, id, `model generation failed: ${error.message}`, displayPrompt);
+    throw error;
   }
 }
 
@@ -2474,15 +2465,17 @@ async function writeGenerated(prompt, modelSettings = {}, history = [], embedded
     routeProfile: options.routeProfile || null,
     contextRetrieval: options.contextRetrieval || null,
   });
-  await appendServerLog("generate.template.start", { id, prompt: String(prompt || "").slice(0, 160) });
-  const generated = await generateFilesForPrompt(prompt, id, modelSettings, history, displayPrompt);
+  await appendServerLog("generate.offline.start", { id, prompt: String(prompt || "").slice(0, 160) });
+  const generated = await generateFilesForPrompt(prompt, id, modelSettings, history, displayPrompt, {
+    allowOfflineSimulation: true,
+  });
   const embedded = embedGeneratedAssetsInFiles(generated.files, embeddedAssets, generated.manifest);
   const files = embedded.files;
   const manifest = embedded.manifest || generated.manifest;
   await writeGeneratedFiles(build.workspaceDir, files);
   const agentRun = transitionRun(createAgentRun({
     prompt: displayPrompt,
-    mode: "template",
+    mode: "offline-simulated",
     buildId: id,
     hardwareMode: boardPassword ? "real" : "simulated",
   }), AGENT_PHASES.CODE, {
@@ -2491,7 +2484,7 @@ async function writeGenerated(prompt, modelSettings = {}, history = [], embedded
   Object.assign(build, { files, manifest, agentRun });
   setCurrentBuild(build);
   await buildCurrent({ build, context: options.context || null });
-  await appendServerLog("generate.template.done", { id, files: Object.keys(files) });
+  await appendServerLog("generate.offline.done", { id, files: Object.keys(files) });
   return build;
 }
 
@@ -3628,7 +3621,7 @@ async function route(req, res) {
       if (payload?.conversation_id) await ensureConversationAccess(payload.conversation_id, requestUser);
       if (type === "agent" || type === "generate") await ensureCreditsAvailable(requestUser);
       const normalizedPayload = type === "generate"
-        ? withServerModelSettings(payload || {}, { forceTemplate: PUBLIC_DEPLOYMENT && payload?.agent_full !== true && payload?.agentFull !== true })
+        ? withServerModelSettings(payload || {})
         : { ...(payload || {}) };
       const jobInput = {
         ...normalizedPayload,
@@ -3732,9 +3725,7 @@ async function route(req, res) {
       let body = {};
       try {
         const rawBody = await readBody(req);
-        body = withServerModelSettings(rawBody, {
-          forceTemplate: PUBLIC_DEPLOYMENT && rawBody?.agent_full !== true && rawBody?.agentFull !== true,
-        });
+        body = withServerModelSettings(rawBody);
         if (body?.conversation_id) await ensureConversationAccess(body.conversation_id, requestUser);
         await ensureCreditsAvailable(requestUser);
         if (wantsBackgroundJob(body || {})) {

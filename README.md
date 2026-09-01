@@ -181,7 +181,7 @@ Agent 的目标不是自动把代码写进真机，而是把风险分成几个�
 - 输入自然语言描述，自动生成 5 个文件：`index.html`, `style.css`, `app.js`, `hardware_app.py`, `manifest.json`
 - 支持 OpenAI、Anthropic、自定义 OpenAI 兼容 Provider
 - 可配置温度、Token 上限、系统提示词
-- LLM 不可用时自动回退到本地模板生成
+- LLM 不可用时停止生成并返回可操作的模型配置错误；离线模拟仅供显式测试使用
 
 ### 2. 编译校验
 
@@ -694,7 +694,7 @@ db.pragma('busy_timeout = 5000');
 |------|------|
 | 单用户 | 当前设计为单用户使用，不支持多用户并发 |
 | Windows 依赖 | SSH 命令通过 Windows 的 `sshpass` 执行，需要 WSL 或 Git Bash |
-| LLM 依赖 | 代码生成依赖外部 LLM API，离线时只能使用本地模板 |
+| LLM 依赖 | 代码生成依赖外部 LLM API；离线模拟必须显式开启，不会自动替代真实模型 |
 | 固定分辨率 | 生成的应用固定为 480×360，不支持自适应布局 |
 | 无认证 | 没有用户认证机制，任何人可以访问和操作 |
 | 数据库 | 使用 SQLite 文件，不支持分布式部署 |

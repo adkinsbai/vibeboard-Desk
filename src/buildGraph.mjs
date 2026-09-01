@@ -1,6 +1,6 @@
 export const BUILD_GRAPH_NODES = Object.freeze({
   PREPARE: "prepare",
-  TEMPLATE_GENERATE: "template_generate",
+  OFFLINE_SIMULATION: "offline_simulation",
   AGENT_GENERATE: "agent_generate",
   ENSURE_CONTRACTS: "ensure_contracts",
   LOCAL_VERIFY: "local_verify",
@@ -43,16 +43,19 @@ export async function runBuildGraph(input = {}, steps = {}) {
   if (steps.prepare) await steps.prepare(state);
   appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.PREPARE, "done");
 
-  if (!input.settings?.enabled) {
-    requireStep(steps.templateGenerate, BUILD_GRAPH_NODES.TEMPLATE_GENERATE);
-    appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.TEMPLATE_GENERATE, "start");
-    state.result = await steps.templateGenerate(state);
+  if (input.offlineSimulation === true) {
+    requireStep(steps.offlineSimulation, BUILD_GRAPH_NODES.OFFLINE_SIMULATION);
+    appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.OFFLINE_SIMULATION, "start");
+    state.result = await steps.offlineSimulation(state);
     state.files = state.result?.files || {};
-    appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.TEMPLATE_GENERATE, "done", {
+    appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.OFFLINE_SIMULATION, "done", {
       id: state.result?.id || "",
       fileCount: Object.keys(state.files).length,
     });
   } else {
+    if (!input.settings?.enabled) {
+      throw missingModelError();
+    }
     requireStep(steps.agentGenerate, BUILD_GRAPH_NODES.AGENT_GENERATE);
     appendBuildGraphTrace(trace, BUILD_GRAPH_NODES.AGENT_GENERATE, "start", {
       fileCount: Object.keys(input.fileStore || {}).length,
@@ -98,6 +101,13 @@ export async function runBuildGraph(input = {}, steps = {}) {
     ...state.result,
     buildGraph: trace,
   };
+}
+
+function missingModelError() {
+  const error = new Error("A configured AI model is required for code generation.");
+  error.errorType = "no_api_key";
+  error.statusCode = 400;
+  return error;
 }
 
 function requireStep(fn, node) {

@@ -5,22 +5,23 @@ const generate = await json("/api/generate", {
   method: "POST",
   body: JSON.stringify({
     prompt: "offline acceptance dashboard",
+    generation_mode: "offline-simulated",
     modelSettings: { enabled: false },
   }),
 });
-assert(generate.ok === true, "/api/generate should succeed in template mode");
+assert(generate.ok === true, "/api/generate should succeed in explicit offline simulation mode");
 assert(generate.buildEvidence?.ok === true, "generate should include passing buildEvidence");
 assert(generate.intelligenceSummary?.confidence === "local_verified", "generate should include local verified intelligence summary");
 assert(generate.intelligenceSummary?.nextBestAction === "deploy_to_board", "generate intelligence should suggest deploy_to_board");
 assert(generate.intelligenceSummary?.userMoment?.includes(generate.id), "generate intelligence should mention current build id");
 assert(generate.verificationMode === "local-simulated", "generate should expose local-simulated verificationMode");
 assert(Array.isArray(generate.buildGraph), "generate should include BuildGraph trace");
-assert(generate.buildGraph.some(item => item.node === "template_generate"), "BuildGraph trace should include template_generate");
+assert(generate.buildGraph.some(item => item.node === "offline_simulation"), "BuildGraph trace should include offline_simulation");
 
 const emptyGenerateResponse = await fetch(`${baseUrl}/api/generate`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ prompt: "", modelSettings: { enabled: false } }),
+  body: JSON.stringify({ prompt: "", generation_mode: "offline-simulated", modelSettings: { enabled: false } }),
 });
 const emptyGenerate = await emptyGenerateResponse.json();
 assert(emptyGenerateResponse.status === 400, "/api/generate should return 400 for empty prompt");
@@ -92,6 +93,8 @@ const backgroundAgent = await json("/api/agent", {
     build_prompt: "background job smoke dashboard",
     conversation_id: "",
     background: true,
+    generation_mode: "offline-simulated",
+    offline_simulation: true,
     modelSettings: { enabled: false },
   }),
 });
@@ -205,6 +208,7 @@ try {
     body: JSON.stringify({
       prompt: promptA,
       conversation_id: conversationA.id,
+      generation_mode: "offline-simulated",
       modelSettings: { enabled: false },
     }),
   });
@@ -213,6 +217,7 @@ try {
     body: JSON.stringify({
       prompt: promptB,
       conversation_id: conversationB.id,
+      generation_mode: "offline-simulated",
       modelSettings: { enabled: false },
     }),
   });
@@ -231,11 +236,13 @@ try {
       action: "confirm_build",
       build_prompt: agentPrompt,
       conversation_id: conversationC.id,
+      generation_mode: "offline-simulated",
+      offline_simulation: true,
       modelSettings: { enabled: false },
       history: [{ role: "user", content: "确认按这个方案构建" }],
     }),
   });
-  assert(generatedC.ok === true, "/api/agent confirm_build should succeed in template mode");
+  assert(generatedC.ok === true, "/api/agent confirm_build should succeed in explicit offline simulation mode");
   assert(generatedC.mode === "build_done", "/api/agent confirm_build should report build_done");
   assert(Array.isArray(generatedC.agentGraph), "/api/agent should include AgentGraph trace");
   assert(generatedC.agentGraph.some(item => item.node === "build_graph"), "AgentGraph trace should include build_graph");

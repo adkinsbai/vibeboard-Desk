@@ -130,6 +130,14 @@ export function createGenerateRuntime(deps = {}) {
 
       const settings = normalizeModelSettings(modelSettings);
       const history = await compressHistory(normalizedHistory, settings);
+      const offlineSimulation = offlineSimulationRequested(body, env);
+      if (!settings.enabled && !offlineSimulation) {
+        throw createStructuredError(
+          "A configured AI model is required for code generation.",
+          "no_api_key",
+          { statusCode: 400 },
+        );
+      }
       const userPreferences = memoryStore.getAll();
       const prompt = buildRefinedPrompt(
         `${rawPrompt}${formatMemoryForPrompt(projectMemory)}${retrievedContext.text}${formatAgentModeForPrompt(agentMode)}${assetContext}${projectFilesContext}${formatEmbeddedAssetContext(embeddedAssets)}`,
@@ -168,6 +176,7 @@ export function createGenerateRuntime(deps = {}) {
         settings,
         agentSettings,
         modelSettings,
+        offlineSimulation,
         fileStore,
         history,
         userPreferences,
@@ -195,7 +204,7 @@ export function createGenerateRuntime(deps = {}) {
           agentStartedAt,
           execution,
         }),
-        templateGenerate: async () => runTemplateGenerate({
+        offlineSimulation: async () => runOfflineSimulation({
           prompt,
           displayPrompt: rawPrompt,
           modelSettings,
@@ -693,7 +702,7 @@ export function createGenerateRuntime(deps = {}) {
     return { files: nextFiles, manifest: nextManifest };
   }
 
-  async function runTemplateGenerate({ prompt, displayPrompt = prompt, modelSettings, embeddedAssets, execution, routeProfile }) {
+  async function runOfflineSimulation({ prompt, displayPrompt = prompt, modelSettings, embeddedAssets, execution, routeProfile }) {
     requireFunction(writeGenerated, "writeGenerated");
     const build = await writeGenerated(prompt, modelSettings, [], embeddedAssets, {
       displayPrompt,
@@ -713,7 +722,7 @@ export function createGenerateRuntime(deps = {}) {
       id: build.id,
       files: embedded.files,
       manifest: embedded.manifest || build.manifest || null,
-      source: "template",
+      source: "offline-simulated",
       routeProfile,
       spec: build.agentRun?.spec || null,
       evidence: formatRunEvidence(build.agentRun || {}),
@@ -788,6 +797,18 @@ export function createGenerateRuntime(deps = {}) {
   }
 
   return { runGenerateRequest };
+}
+
+function offlineSimulationRequested(body = {}, env = process.env) {
+  const explicitRequest = body.offline_simulation === true ||
+    body.offlineSimulation === true ||
+    String(body.generation_mode || body.generationMode || "").trim() === "offline-simulated";
+  if (!explicitRequest) return false;
+  const allowed = String(env.VIBEBOARD_ALLOW_OFFLINE_GENERATION || "").trim() === "1";
+  const testMode = String(env.VIBEBOARD_TEST_MODE || "").trim() === "1";
+  const publicDeployment = String(env.VERCEL || "").trim() === "1" ||
+    String(env.VIBEBOARD_PUBLIC_DEPLOYMENT || "").trim() === "1";
+  return allowed && (!publicDeployment || testMode);
 }
 
 export function formatEmbeddedAssetContext(embeddedAssets = emptyEmbeddedAssets()) {

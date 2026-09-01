@@ -15,13 +15,14 @@
     "benchmark:agent:fixture": "node scripts/run-agent-benchmark.mjs --mode=fixture",
     "benchmark:agent:live": "node scripts/run-agent-benchmark.mjs --mode=live",
     "verify:offline": "node tests/offline-smoke.mjs",
+    "verify:no-template": "node tests/no-forced-template.mjs",
     "smoke:generation": "node scripts/smoke-generation-flows.mjs",
     "verify:ui": "node tests/portal-smoke.mjs && node tests/admin-telemetry-ui.mjs && node tests/main-ui-smoke.mjs && node tests/market-companion-device-app.mjs && node tests/makivo-device-apps.mjs",
     "verify:public": "node scripts/verify-public-e2e.mjs",
     "verify:persistence": "node tests/project-persistence.mjs",
     "verify:jobs": "node tests/job-concurrency.mjs && node tests/job-route-idempotency.mjs && node tests/job-runtime-secrets.mjs && node tests/job-debug-runtime.mjs",
     "verify:b2b-phase-a": "npm run verify:jobs && node tests/verify-agent.mjs && node tests/offline-smoke.mjs",
-    "verify:all": "npm run check && npm run verify:auth && npm run verify:context && npm run verify:persistence && npm run verify:agent && npm run verify:jobs && npm run verify:agent-quality && npm run verify:agent-benchmark && npm run verify:offline && npm run verify:ui"
+    "verify:all": "npm run check && npm run verify:auth && npm run verify:context && npm run verify:persistence && npm run verify:agent && npm run verify:jobs && npm run verify:agent-quality && npm run verify:agent-benchmark && npm run verify:offline && npm run verify:no-template && npm run verify:ui"
   },
   "dependencies": {
     "@langchain/langgraph": "^1.4.13",

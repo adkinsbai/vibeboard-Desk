@@ -2756,19 +2756,20 @@ await test("chat planner switches project memory when user replaces the goal", a
   assert(requestBody.messages[0].content.includes("不要因为旧记忆里有 build_prompt 就返回 build_ready"), "planner prompt should forbid old build_prompt reuse");
 });
 
-await test("build graph runs template path and returns trace", async () => {
+await test("build graph runs explicit offline simulation path and returns trace", async () => {
   const { runBuildGraph } = await import(pathToFileURL(path.join(ROOT, "src", "buildGraph.mjs")).href);
   const result = await runBuildGraph({
     prompt: "offline graph test",
     settings: { enabled: false },
+    offlineSimulation: true,
     conversationId: "project-a",
     isEditing: false,
   }, {
-    templateGenerate: async () => ({
+    offlineSimulation: async () => ({
       ok: true,
       id: "build-a",
       files: { "index.html": "<html></html>" },
-      source: "template",
+      source: "offline-simulated",
       agentActions: [],
     }),
     saveSnapshot: async state => {
@@ -2778,16 +2779,17 @@ await test("build graph runs template path and returns trace", async () => {
 
   const nodes = result.buildGraph.map(item => item.node);
   assert(result.ok === true, `expected ok result, got ${JSON.stringify(result)}`);
-  assert(result.id === "build-a", "build graph should preserve template result");
+  assert(result.id === "build-a", "build graph should preserve offline simulation result");
   assert(nodes.includes("prepare"), "build graph should include prepare node");
-  assert(nodes.includes("template_generate"), "build graph should include template node");
+  assert(nodes.includes("offline_simulation"), "build graph should include offline simulation node");
   assert(nodes.includes("save_snapshot"), "build graph should include snapshot node");
 });
 
-await test("generate runtime runs template path and saves snapshot", async () => {
+await test("generate runtime runs explicit offline simulation and saves snapshot", async () => {
   const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
   let savedSnapshot = null;
   const runtime = createGenerateRuntime({
+    env: { ...process.env, VIBEBOARD_ALLOW_OFFLINE_GENERATION: "1" },
     conversationStore: {
       getProjectMemory: id => {
         assert(id === "conv-runtime-template", "runtime should load project memory by conversation id");
@@ -2822,15 +2824,16 @@ await test("generate runtime runs template path and saves snapshot", async () =>
   const result = await runtime.runGenerateRequest({
     prompt: "Build a small device panel.",
     conversation_id: "conv-runtime-template",
+    generation_mode: "offline-simulated",
     modelSettings: { enabled: false },
   });
 
   const nodes = result.buildGraph.map(item => item.node);
   assert(result.ok === true, `expected runtime ok, got ${JSON.stringify(result)}`);
-  assert(result.id === "vb-runtime-template", "template build id should pass through");
-  assert(result.source === "template", "runtime should use template path when model settings are disabled");
-  assert(result.intelligenceSummary?.confidence === "local_verified", "runtime should return template build intelligence summary");
-  assert(nodes.includes("template_generate"), "runtime graph should include template node");
+  assert(result.id === "vb-runtime-template", "offline build id should pass through");
+  assert(result.source === "offline-simulated", "runtime should use offline simulation only when explicitly requested");
+  assert(result.intelligenceSummary?.confidence === "local_verified", "runtime should return offline build intelligence summary");
+  assert(nodes.includes("offline_simulation"), "runtime graph should include offline simulation node");
   assert(nodes.includes("save_snapshot"), "runtime graph should include save snapshot node");
   assert(savedSnapshot?.conversationId === "conv-runtime-template", "runtime should save conversation snapshot");
   assert(savedSnapshot?.files?.[HARDWARE_RESULT_FILE], "snapshot should include hardware result file");
@@ -2844,6 +2847,7 @@ await test("generate runtime accepts overlapping generation requests without sha
   let markBothStarted;
   const bothStarted = new Promise(resolve => { markBothStarted = resolve; });
   const runtime = createGenerateRuntime({
+    env: { ...process.env, VIBEBOARD_ALLOW_OFFLINE_GENERATION: "1" },
     conversationStore: {
       getProjectMemory: () => ({}),
       loadConversationFiles: () => ({ files: {} }),
@@ -2874,10 +2878,12 @@ await test("generate runtime accepts overlapping generation requests without sha
 
   const first = runtime.runGenerateRequest({
     prompt: "first long running task",
+    offline_simulation: true,
     modelSettings: { enabled: false },
   });
   const second = runtime.runGenerateRequest({
     prompt: "second task while first is active",
+    offline_simulation: true,
     modelSettings: { enabled: false },
   });
   await bothStarted;
@@ -2890,13 +2896,14 @@ await test("generate runtime accepts overlapping generation requests without sha
   assert(secondResult.files["index.html"].includes(secondResult.id), "second response should keep second files");
 });
 
-await test("generate runtime embeds uploaded passive assets into template builds", async () => {
+await test("generate runtime embeds uploaded passive assets into offline simulations", async () => {
   const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
   const embeddedPng = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
   let savedSnapshot = null;
   let receivedPrompt = "";
   let receivedEmbeddedAssets = null;
   const runtime = createGenerateRuntime({
+    env: { ...process.env, VIBEBOARD_ALLOW_OFFLINE_GENERATION: "1" },
     conversationStore: {
       getProjectMemory: () => ({ goal: "use uploaded hero image" }),
       loadConversationFiles: () => ({ files: {} }),
@@ -2948,6 +2955,7 @@ await test("generate runtime embeds uploaded passive assets into template builds
   const result = await runtime.runGenerateRequest({
     prompt: "Build a product display with my uploaded hero image.",
     conversation_id: "conv-runtime-assets",
+    offline_simulation: true,
     modelSettings: { enabled: false },
   });
   const manifest = JSON.parse(result.files["manifest.json"]);
@@ -2955,7 +2963,7 @@ await test("generate runtime embeds uploaded passive assets into template builds
   assert(result.ok === true, `expected runtime ok, got ${JSON.stringify(result)}`);
   assert(receivedPrompt.includes("Embedded uploaded assets"), "model prompt should expose embedded asset paths");
   assert(receivedPrompt.includes("./assets/uploaded/hero.png"), "model prompt should include the generated asset path");
-  assert(receivedEmbeddedAssets?.items?.[0]?.path === "assets/uploaded/hero.png", "template generator should receive embedded asset metadata");
+  assert(receivedEmbeddedAssets?.items?.[0]?.path === "assets/uploaded/hero.png", "offline generator should receive embedded asset metadata");
   assert(Buffer.isBuffer(result.files["assets/uploaded/hero.png"]), "runtime result should include embedded binary asset");
   assert(result.files["assets/uploaded/hero.png"].equals(embeddedPng), "embedded asset bytes should be preserved");
   assert(manifest.assets.includes("assets/uploaded/hero.png"), "manifest assets[] should declare embedded asset");
@@ -2969,6 +2977,7 @@ await test("generate runtime fails when conversation snapshot save fails", async
   const { createGenerateRuntime } = await import(pathToFileURL(path.join(ROOT, "src", "generateRuntime.mjs")).href);
   const logs = [];
   const runtime = createGenerateRuntime({
+    env: { ...process.env, VIBEBOARD_ALLOW_OFFLINE_GENERATION: "1" },
     conversationStore: {
       getProjectMemory: async () => ({}),
       loadConversationFiles: async () => ({ files: {} }),
@@ -3008,6 +3017,7 @@ await test("generate runtime fails when conversation snapshot save fails", async
     await runtime.runGenerateRequest({
       prompt: "Build a clock",
       conversation_id: "conv-save-fails",
+      offline_simulation: true,
       modelSettings: { enabled: false },
     });
   } catch (error) {
@@ -3390,7 +3400,7 @@ await test("agent graph confirm action runs build graph and returns build result
         ok: true,
         id: "vb-agent-graph-test",
         files: { "index.html": "<html></html>" },
-        source: "template",
+        source: "offline-simulated",
         buildEvidence: { ok: true, issues: [] },
       };
     },
@@ -3475,7 +3485,7 @@ await test("agent orchestrator returns choice-based guidance when model is missi
   assert(result.ready_to_build === false, "missing model should not auto-build from chat message");
   assert(result.reply.includes("没有配置可用的 AI 模型"), `missing model reply should be localized, got ${result.reply}`);
   assert(Array.isArray(result.quick_replies) && result.quick_replies.length >= 2, "missing model should offer quick reply choices");
-  assert(result.quick_replies.some(item => item.label.includes("本地生成")), "missing model should offer local template generation choice");
+  assert(result.quick_replies.some(item => item.label.includes("配置模型")), "missing model should offer model configuration choice");
 });
 
 await test("agent orchestrator exposes Codex hardware mode boundary", async () => {

@@ -55,7 +55,6 @@ function choicesFromError(classified = {}, job = {}) {
   if (["no_api_key", "llm_auth", "llm_quota", "llm_network", "llm_failed"].includes(errorType)) {
     add("Open model settings", "open_model_settings");
   }
-  if (errorType === "no_api_key") add("Use local template", "retry_local_template", { job_id: job.id });
   if (/deploy|audio|board|ssh/i.test(errorType) || classified.errorStage === "deploy") {
     add("Open board status", "open_board_status");
   }

@@ -95,6 +95,7 @@ await withServer(async ({ baseUrl }) => {
       payload: {
         prompt: "should not start",
         conversation_id: conversation.id,
+        generation_mode: "offline-simulated",
         modelSettings: { enabled: false },
       },
     }),
