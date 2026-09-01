@@ -20,7 +20,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const mode = process.argv.find(arg => arg.startsWith("--mode="))?.slice("--mode=".length) || "fixture";
 assert(["fixture", "live"].includes(mode), `unsupported benchmark mode: ${mode}`);
 
-const scenario = getBenchmarkScenario("digital-life-physical-companion");
+const scenario = getBenchmarkScenario("physical-companion-device");
 const startedAt = Date.now();
 let execution;
 try {
@@ -57,7 +57,7 @@ const artifactJson = JSON.stringify(artifact, null, 2);
 assert(!/\bsk-[a-z0-9_-]{12,}\b|bearer\s+[a-z0-9._-]{8,}/i.test(artifactJson), "benchmark artifact contains credential-shaped text");
 const artifactDir = path.join(ROOT, "runtime", "benchmarks");
 await fs.mkdir(artifactDir, { recursive: true });
-const artifactPath = path.join(artifactDir, `${mode}-digital-life-physical-companion.json`);
+const artifactPath = path.join(artifactDir, `${mode}-physical-companion-device.json`);
 await fs.writeFile(artifactPath, artifactJson, "utf8");
 
 const summary = {
@@ -164,7 +164,7 @@ async function runLiveScenario(currentScenario) {
   try {
     await waitForReady(`${origin}/api/health`, child);
     const conversation = await postJson(`${origin}/api/conversations`, {
-      title: "Digital Life physical companion benchmark",
+      title: "Physical companion device benchmark",
     });
     const conversationId = String(conversation.id || "").trim();
     assert(conversationId, "benchmark conversation creation did not return an id");
@@ -411,7 +411,7 @@ async function verifyBrowserBehavior(files, currentMode) {
     await dispatchPhysicalKey(desktop, "Digit3", "KEY3");
     const afterKey3 = await inspectSimulator(desktop);
     const desktopMetrics = await inspectViewport(desktop);
-    const desktopName = `${currentMode}-digital-life-physical-companion-480x360.png`;
+    const desktopName = `${currentMode}-physical-companion-device-480x360.png`;
     await desktop.screenshot({ path: path.join(screenshotDir, desktopName) });
     screenshots.push(desktopName);
 
@@ -420,7 +420,7 @@ async function verifyBrowserBehavior(files, currentMode) {
     await mobile.goto(`${server.origin}/index.html`, { waitUntil: "networkidle" });
     await mobile.waitForTimeout(100);
     const mobileMetrics = await inspectViewport(mobile);
-    const mobileName = `${currentMode}-digital-life-physical-companion-390x844.png`;
+    const mobileName = `${currentMode}-physical-companion-device-390x844.png`;
     await mobile.screenshot({ path: path.join(screenshotDir, mobileName), fullPage: false });
     screenshots.push(mobileName);
 
@@ -457,7 +457,7 @@ async function verifyBrowserBehavior(files, currentMode) {
 
 async function inspectSimulator(page) {
   return page.evaluate(() => {
-    const hook = window.DigitalLifeDeviceSimulator;
+    const hook = window.PhysicalCompanionDeviceSimulator;
     const state = hook?.getState?.() || {};
     return {
       exists: typeof hook?.getState === "function",
@@ -579,7 +579,7 @@ function benchmarkTaskContract(currentScenario, executionMaxTurns = currentScena
       `Support every skin: ${currentScenario.required_skins.join(", ")}.`,
       `Use these local schemas: ${currentScenario.required_schemas.join(", ")}.`,
       "KEY1 changes expression, KEY2 toggles memory inspection, and KEY3 changes skin.",
-      "Expose window.DigitalLifeDeviceSimulator.getState() for verification.",
+      "Expose window.PhysicalCompanionDeviceSimulator.getState() for verification.",
       "Pass all VibeBoard L0-L3 local verification.",
     ],
     forbidden: [
@@ -757,7 +757,7 @@ function fixtureFiles() {
   return {
     "index.html": '<!doctype html><html><head><meta name="viewport" content="width=480,height=360"><link rel="stylesheet" href="./style.css"></head><body><main id="companion-screen"><div id="face"><i></i><i></i><b></b></div><aside id="memory-overlay" hidden></aside></main><script src="./app.js"></script></body></html>',
     "style.css": "html,body,#companion-screen{width:480px;height:360px;overflow:hidden;margin:0;background:#050505;color:#fff}#companion-screen{display:grid;place-items:center}#face{position:relative;width:220px;height:150px}#face i{position:absolute;top:28px;width:54px;height:38px;border-radius:50%;background:#dffcff;box-shadow:0 0 18px #46d7e8}#face i:first-child{left:28px}#face i:nth-child(2){right:28px}#face b{position:absolute;left:76px;bottom:25px;width:68px;height:28px;border-bottom:8px solid #ff8297;border-radius:0 0 50% 50%}#memory-overlay{font-size:14px}@media(max-width:479px){html,body,#companion-screen{width:100vw}}",
-    "app.js": `const BUILD_ID="fixture"; const PROMPT="synthetic physical companion"; const states=${JSON.stringify(states)}; const skins=["life-line","bot-face","hybrid"]; const schemas=["memory-projection.v1","expression-state.v1"]; const memories=[{schema_version:"memory-projection.v1",text:"quiet high value guidance",tags:["guidance"]},{schema_version:"memory-projection.v1",text:"transparent screen companion",tags:["device"]}]; let expressionIndex=0; let skinIndex=0; let overlayOpen=false; function retrieveMemories(query){const term=String(query||"").toLowerCase(); return memories.filter(item=>item.text.includes(term)||item.tags.some(tag=>tag.includes(term))).sort((a,b)=>b.tags.length-a.tags.length);} function setExpression(value){expressionIndex=Math.max(0,states.indexOf(value)); document.body.dataset.expression=states[expressionIndex];} function cycleExpression(){setExpression(states[(expressionIndex+1)%states.length]);} function toggleMemory(){overlayOpen=!overlayOpen; document.getElementById("memory-overlay").hidden=!overlayOpen; retrieveMemories("guidance");} function cycleSkin(){skinIndex=(skinIndex+1)%skins.length; document.body.dataset.skin=skins[skinIndex];} document.addEventListener("keydown",event=>{if(event.code==="Digit1"||event.key==="KEY1")cycleExpression();if(event.code==="Digit2"||event.key==="KEY2")toggleMemory();if(event.code==="Digit3"||event.key==="KEY3")cycleSkin();}); window.DigitalLifeDeviceSimulator={getState(){return {schema_version:"expression-state.v1",expression:states[expressionIndex],skin:skins[skinIndex],memory_overlay_open:overlayOpen,retrieval_count:retrieveMemories("guidance").length,states,schemas};}}; window.VibeBoardHardware={async getStatus(){return fetch("/api/status").then(r=>r.json())},async getProgramResult(){return fetch("./hardware-result.json").then(r=>r.json())},getSnapshot(){return {build_id:BUILD_ID,prompt:PROMPT}}}; setExpression("idle"); cycleSkin();`,
+    "app.js": `const BUILD_ID="fixture"; const PROMPT="synthetic physical companion"; const states=${JSON.stringify(states)}; const skins=["life-line","bot-face","hybrid"]; const schemas=["memory-projection.v1","expression-state.v1"]; const memories=[{schema_version:"memory-projection.v1",text:"quiet high value guidance",tags:["guidance"]},{schema_version:"memory-projection.v1",text:"transparent screen companion",tags:["device"]}]; let expressionIndex=0; let skinIndex=0; let overlayOpen=false; function retrieveMemories(query){const term=String(query||"").toLowerCase(); return memories.filter(item=>item.text.includes(term)||item.tags.some(tag=>tag.includes(term))).sort((a,b)=>b.tags.length-a.tags.length);} function setExpression(value){expressionIndex=Math.max(0,states.indexOf(value)); document.body.dataset.expression=states[expressionIndex];} function cycleExpression(){setExpression(states[(expressionIndex+1)%states.length]);} function toggleMemory(){overlayOpen=!overlayOpen; document.getElementById("memory-overlay").hidden=!overlayOpen; retrieveMemories("guidance");} function cycleSkin(){skinIndex=(skinIndex+1)%skins.length; document.body.dataset.skin=skins[skinIndex];} document.addEventListener("keydown",event=>{if(event.code==="Digit1"||event.key==="KEY1")cycleExpression();if(event.code==="Digit2"||event.key==="KEY2")toggleMemory();if(event.code==="Digit3"||event.key==="KEY3")cycleSkin();}); window.PhysicalCompanionDeviceSimulator={getState(){return {schema_version:"expression-state.v1",expression:states[expressionIndex],skin:skins[skinIndex],memory_overlay_open:overlayOpen,retrieval_count:retrieveMemories("guidance").length,states,schemas};}}; window.VibeBoardHardware={async getStatus(){return fetch("/api/status").then(r=>r.json())},async getProgramResult(){return fetch("./hardware-result.json").then(r=>r.json())},getSnapshot(){return {build_id:BUILD_ID,prompt:PROMPT}}}; setExpression("idle"); cycleSkin();`,
     "hardware_app.py": 'import json\nBUILD_ID="fixture"\nPROMPT="synthetic physical companion"\navailable_apis=["/api/status","./hardware-result.json"]\npayload={"build_id":BUILD_ID,"prompt":PROMPT,"runtime":{"mode":"simulated"},"available_apis":available_apis}\nopen("hardware-result.json","w",encoding="utf-8").write(json.dumps(payload))\nprint(json.dumps(payload))',
     "manifest.json": '{"id":"fixture","name":"Physical Companion Fixture","files":["index.html","style.css","app.js","hardware_app.py","manifest.json"]}',
   };

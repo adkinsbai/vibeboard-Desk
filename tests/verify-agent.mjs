@@ -3071,6 +3071,13 @@ await test("generate runtime passes conversation files into agent path", async (
             "app.js": "console.log('new')",
           },
           actions: [],
+          route_escalations: [{
+            schema_version: "task-route-escalation.v1",
+            from_route: "fast_patch",
+            to_route: "guided_build",
+            reason: "multi_file_scope_discovered",
+            tool: "edit_file",
+          }],
         };
       },
       buildId: () => "vb-runtime-agent",
@@ -3110,6 +3117,9 @@ await test("generate runtime passes conversation files into agent path", async (
     assert(receivedFiles?.["app.js"] === "console.log('old')", "agent should receive saved conversation files");
     assert(Buffer.isBuffer(result.files["assets/uploaded/agent-hero.png"]), "agent result should include embedded passive asset");
     assert(result.files["assets/uploaded/agent-hero.png"].equals(embeddedPng), "agent embedded asset bytes should be preserved");
+    assert(result.route_escalations?.length === 1, "agent runtime should preserve route escalation evidence");
+    assert(result.route_escalations[0].to_route === "guided_build", "route escalation target should be guided_build");
+    assert(currentBuild.routeEscalations?.length === 1, "build handle should carry route escalation evidence");
     const manifest = JSON.parse(result.files["manifest.json"]);
     assert(manifest.assets.includes("assets/uploaded/agent-hero.png"), "agent manifest should declare embedded asset");
     assert(result.buildGraph.some(item => item.node === "agent_generate" && item.status === "done"), "runtime graph should include completed agent node");

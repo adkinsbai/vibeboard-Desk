@@ -1,0 +1,10 @@
+{
+  "id": "vb-salary-flip-counter",
+  "name": "今日收入计分牌",
+  "version": "1.0.0",
+  "entry": "index.html",
+  "display": { "width": 480, "height": 360 },
+  "hardware": { "capabilities": [], "contract": "system-owned" },
+  "offline": true
+}
+

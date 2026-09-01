@@ -25,8 +25,17 @@ assert(
   "server should disable legacy sqlite_snapshots writes in public production without VIBEBOARD_TEST_CLOUD_SQLITE_FILE"
 );
 assert(
-  /if\s*\(\s*shouldSaveSqliteSnapshot\(\)\s*\)\s*{[\s\S]*?cloudSqliteSnapshot\.save\(buffer\)/.test(serverSource),
-  "saveDb should guard cloudSqliteSnapshot.save(buffer) with shouldSaveSqliteSnapshot()"
+  /const\s+shouldSaveCloudSnapshot\s*=\s*dbBootstrapComplete\s*&&\s*shouldSaveSqliteSnapshot\(\)/.test(serverSource) &&
+  /if\s*\(\s*shouldSaveCloudSnapshot\s*\)\s*{[\s\S]*?cloudSqliteSnapshot\.save\(buffer\)/.test(serverSource),
+  "saveDb should decide cloud snapshot writes when the save is queued"
+);
+assert(
+  /const\s+localDbBuffer\s*=\s*cloudSqliteSnapshot\s*[\r\n\s]*\?\s*null\s*[\r\n\s]*:\s*await\s+fs\.readFile\(DB_PATH\)/.test(serverSource),
+  "server should not fall back to a stale local Vercel sqlite file when a cloud snapshot source is configured"
+);
+assert(
+  !/createDigitalLife(?:Store|Routes)\b/.test(serverSource) && !/\/api\/digital-life/.test(serverSource),
+  "platform server should not mount the legacy companion as a built-in route or hidden runtime"
 );
 
 const defaultVercel = await startServer(await findFreePort(), {

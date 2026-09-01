@@ -9,8 +9,6 @@ const explicitFiles = [
   "server.mjs",
   "app.js",
   "admin.js",
-  "digital-life-expression.js",
-  "digital-life.js",
 ];
 
 const sourceDirs = ["src", "tests"];

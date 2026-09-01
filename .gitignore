@@ -28,6 +28,7 @@ runtime/*
 !runtime/start-kiosk.sh
 hardware-result.json
 manifest.json
+!market-apps/**/manifest.json
 
 # Previews (generated at runtime)
 previews/

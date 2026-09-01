@@ -1,4 +1,5 @@
 import { runAgentGraph } from "./agentGraph.mjs";
+import { runAgentWorkflowGraphV2 } from "./agentWorkflowGraphV2.mjs";
 import { planChatWithModel } from "./chatPlanner.mjs";
 import {
   codexBridgeMetadata,
@@ -19,6 +20,7 @@ export function createAgentOrchestrator({
   recordAgentLearning,
   runGenerateRequest,
   fetchImpl = globalThis.fetch,
+  agentWorkflowVersion = "v1",
 } = {}) {
   if (!conversationStore) throw new Error("conversationStore is required");
   if (!memoryStore) throw new Error("memoryStore is required");
@@ -65,7 +67,14 @@ export function createAgentOrchestrator({
       ? codexBridgeMetadata({ modeBoundary, assetContext, action: body.action || "message" })
       : null;
 
-    return runAgentGraph({
+    const workflowRunner = shouldUseLangGraphV2(body, agentWorkflowVersion)
+      ? runAgentWorkflowGraphV2
+      : runAgentGraph;
+    const confirmedTaskContract = body.action === "confirm_build"
+      ? taskContractForBuild(body.task_contract, body.build_prompt || body.prompt || query, projectMemory)
+      : null;
+
+    return workflowRunner({
       action: body.action,
       messages: rawMessages,
       conversationId,
@@ -75,6 +84,10 @@ export function createAgentOrchestrator({
       modeBoundary,
       routeProfile,
       context_retrieval: retrievedContext.meta,
+      assetContext,
+      retrievedContextText: unifiedContext,
+      debugContext: body.debug_context || body.debugContext || null,
+      taskContract: confirmedTaskContract,
     }, {
       planMessage: async () => {
         if (agentMode === "codex") {
@@ -149,12 +162,14 @@ export function createAgentOrchestrator({
         }
       },
       build: async (_state, prompt) => {
+        const debugContext = body.debug_context || body.debugContext || _state.debugContext || _state.contextBundle?.debugContext || null;
         const executionPrompt = buildExecutionPrompt({
           prompt,
           agentMode,
           modeBoundary,
           codexBridge,
           assetContext: `${assetContext}${unifiedContext}`,
+          debugContext,
         });
         return runGenerateRequest({
           prompt: executionPrompt,
@@ -167,7 +182,16 @@ export function createAgentOrchestrator({
           codex_bridge: codexBridge,
           route_profile: routeProfile,
           context_retrieval: retrievedContext.meta,
-          task_contract: taskContractForBuild(body.task_contract, prompt, projectMemory),
+          debug_context: debugContext,
+          context_bundle: _state.contextBundle
+            ? {
+              retrievedEntries: _state.contextBundle.contextRetrieval?.entryCount || 0,
+              availableLayers: _state.contextBundle.contextRetrieval?.availableLayers || [],
+              assetContextAttached: Boolean(_state.contextBundle.assetContext),
+              debugContextAttached: Boolean(_state.contextBundle.debugContext?.previousFailures?.length || _state.contextBundle.debugContext?.playbooks?.length),
+            }
+            : null,
+          task_contract: _state.taskContract || confirmedTaskContract || taskContractForBuild(body.task_contract, prompt, projectMemory),
         });
       },
       reflect: async (state) => {
@@ -303,9 +327,13 @@ export function buildExecutionPrompt({
   modeBoundary = agentModeBoundary(agentMode),
   codexBridge = null,
   assetContext = "",
+  debugContext = null,
 } = {}) {
   const rawPrompt = String(prompt || "").trim();
-  if (normalizeAgentMode(agentMode) !== "codex") return rawPrompt;
+  const debugContextText = formatDebugContextForPrompt(debugContext);
+  if (normalizeAgentMode(agentMode) !== "codex") {
+    return [rawPrompt, debugContextText].filter(Boolean).join("\n\n");
+  }
 
   const lines = [
     rawPrompt,
@@ -329,7 +357,37 @@ export function buildExecutionPrompt({
   if (String(assetContext || "").trim()) {
     lines.push("", "Asset Library context:", String(assetContext).trim());
   }
+  if (debugContextText) {
+    lines.push("", debugContextText);
+  }
 
+  return lines.join("\n");
+}
+
+function formatDebugContextForPrompt(debugContext = null) {
+  if (!debugContext || typeof debugContext !== "object") return "";
+  const previousFailures = Array.isArray(debugContext.previousFailures) ? debugContext.previousFailures : [];
+  const playbooks = Array.isArray(debugContext.playbooks) ? debugContext.playbooks : [];
+  if (!previousFailures.length && !playbooks.length) return "";
+
+  const lines = [
+    "## Automatic debug context",
+    "The previous attempt failed before hardware deployment. Apply the smallest code change that addresses the evidence, keep hardware contracts read-only, then run local verification again.",
+  ];
+  if (previousFailures.length) {
+    lines.push("", "Previous failures:");
+    for (const failure of previousFailures.slice(0, 5)) {
+      lines.push(`- ${String(failure.errorType || failure.type || "failure").slice(0, 80)}: ${String(failure.message || failure.technicalDetail || "").slice(0, 500)}`);
+    }
+  }
+  if (playbooks.length) {
+    lines.push("", "Relevant experience playbooks:");
+    for (const playbook of playbooks.slice(0, 3)) {
+      const title = String(playbook.title || playbook.signature || "playbook").slice(0, 120);
+      const fix = String(playbook.fix || playbook.root_cause || "").slice(0, 500);
+      lines.push(`- ${title}${fix ? `: ${fix}` : ""}`);
+    }
+  }
   return lines.join("\n");
 }
 
@@ -371,4 +429,16 @@ function arrayOfStrings(value = []) {
   return Array.isArray(value)
     ? value.map(item => String(item || "").trim()).filter(Boolean)
     : [];
+}
+
+function shouldUseLangGraphV2(body = {}, defaultVersion = "v1") {
+  const value = String(
+    body.workflow_version ||
+    body.workflowVersion ||
+    body.agent_workflow ||
+    body.agentWorkflow ||
+    defaultVersion ||
+    "v1"
+  ).trim().toLowerCase();
+  return value === "v2" || value === "langgraph-v2";
 }

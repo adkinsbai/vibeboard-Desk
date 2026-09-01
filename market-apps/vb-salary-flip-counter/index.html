@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=480,height=360,initial-scale=1">
+  <title>今日收入计分牌</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="screen" aria-label="今日收入计分牌">
+    <header class="topbar">
+      <div class="calendar" id="calendar" aria-label="当前日期"><span id="calendarMonth">AUG</span><strong id="calendarDay">27</strong></div>
+      <div class="heading"><span class="eyebrow">VIBEBOARD / WORK SHIFT</span><h1>今日收入</h1></div>
+      <div class="rate"><span>日薪</span><strong>¥1,000</strong></div>
+    </header>
+    <section class="scoreboard" aria-live="polite">
+      <div class="score-label"><span id="phaseLabel">正在准备</span><span class="dot"></span><span>09:00 — 18:00</span></div>
+      <div class="amount" id="amount" aria-label="已赚金额"></div>
+      <div class="precise" id="precise">精确收入 ¥0.00</div>
+      <div class="progress-row"><span id="progressLabel">今日进度 0%</span><span id="remainingLabel">距 ¥1,000</span></div>
+      <div class="progress-track"><div id="progressBar"></div></div>
+    </section>
+    <footer><span id="statusLabel">工作日开始前</span><span class="live"><i></i> LOCAL TIME</span></footer>
+  </main>
+  <script defer src="./app.js"></script>
+</body>
+</html>

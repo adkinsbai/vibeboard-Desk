@@ -2580,6 +2580,11 @@ async function runDeployJob(buildId = currentGeneratedBuildId()) {
   return finishedJob.output;
 }
 
+function reportSkippedDeploy(result) {
+  const detail = friendlyErrorMarkdown(result, "应用未写入真机。", { includeRaw: false });
+  addMarkdownMessage("agent", `⚠️ **未写入真机**\n\n${detail}`);
+}
+
 async function doDeploy(prompt) {
   const profile = deviceProfiles[activeDeviceId] || deviceProfiles["taishan-gray"];
   setBusy(true);
@@ -2593,7 +2598,7 @@ async function doDeploy(prompt) {
     if (deployed.skipped) {
       deployState.textContent = "hardware skipped";
       renderDevicePreview("", "local verification ready");
-      addMarkdownMessage("agent", `**Hardware deploy skipped**\n\nNo reachable board is configured right now. Local L0-L3 verification passed and this build is ready for L4 golden-loop after hardware is connected.`);
+      reportSkippedDeploy(deployed);
     } else {
       deployState.textContent = labels.done;
       renderDevicePreview("", "已写入真机");
@@ -2620,8 +2625,8 @@ async function runDeploy(btn) {
     if (deployed.skipped) {
       deployState.textContent = "hardware skipped";
       renderDevicePreview("", "local verification ready");
-      addMessage("agent", "Hardware deploy skipped. Local L0-L3 verification passed; connect the board to run L4 golden-loop.");
-      btn.textContent = "Hardware skipped";
+      reportSkippedDeploy(deployed);
+      btn.textContent = "未连接真机，点击重试";
       btn.disabled = false;
     } else {
       deployState.textContent = labels.done;

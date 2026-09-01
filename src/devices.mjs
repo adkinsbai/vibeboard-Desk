@@ -4,7 +4,9 @@ export function defaultBoardRoots(env = process.env) {
     appRoot: env.VIBEBOARD_APP_ROOT || "/home/linaro/workspace/taishan-screen",
     releaseRoot: env.VIBEBOARD_RELEASE_ROOT || "/home/linaro/workspace/vibeboard-deploy/releases",
     backupRoot: env.VIBEBOARD_BACKUP_ROOT || "/home/linaro/workspace/vibeboard-deploy/backups",
-    service: env.VIBEBOARD_BOARD_SERVICE || "taishan-screen.service"
+    service: env.VIBEBOARD_BOARD_SERVICE || "taishan-screen.service",
+    kioskUrl: env.VIBEBOARD_KIOSK_URL || "http://127.0.0.1:8765/",
+    statusUrl: env.VIBEBOARD_BOARD_STATUS_URL || "http://127.0.0.1:8765/api/status"
   };
 }
 
@@ -59,6 +61,45 @@ export function createBoardConfig(deviceId = undefined, env = process.env) {
   };
 }
 
+export function boardConfigForBoundDevice(device = {}, env = process.env) {
+  const board = createBoardConfig(device.board_id || device.boardId || "taishan-gray", env);
+  const connection = device.connection && typeof device.connection === "object" ? device.connection : {};
+  const connectionMode = String(connection.mode || (connection.host || connection.frpHost ? "frp" : "preview")).trim() || "preview";
+  const shared = {
+    ...board,
+    id: device.board_id || device.boardId || board.id,
+    label: device.label || board.label,
+    connectionMode,
+  };
+
+  if (connectionMode === "preview") {
+    return {
+      ...shared,
+      host: "",
+      port: "",
+      frpHost: "",
+      frpPort: "",
+      deployable: false,
+    };
+  }
+
+  const host = connection.host || connection.lanHost || board.host;
+  const port = connection.port || connection.lanPort || board.port;
+  const frpHost = connection.frpHost || (connectionMode === "frp" ? connection.host : board.frpHost);
+  const frpPort = connection.frpPort || (connectionMode === "frp" ? connection.port : board.frpPort);
+  return {
+    ...shared,
+    host,
+    port,
+    frpHost,
+    frpPort,
+    user: connection.user || board.user,
+    kioskUrl: connection.kioskUrl || board.kioskUrl,
+    statusUrl: connection.statusUrl || board.statusUrl,
+    deployable: true,
+  };
+}
+
 export function deviceIdFrom(input = {}, fallbackId = "taishan-gray") {
   const id = String(input.deviceId || input.boardId || "").trim();
   if (DEVICE_PROFILES[id]) return id;
@@ -70,9 +111,12 @@ export function endpointLabel(endpoint) {
 }
 
 export function boardEndpoints(board) {
+  if (board?.connectionMode === "preview" || board?.deployable === false) {
+    return [];
+  }
   const preferred = { name: "configured", host: board.host, port: Number(board.port) };
   const frp = { name: "frp", host: board.frpHost, port: Number(board.frpPort) };
-  return [frp, preferred].filter((endpoint, index, list) => (
+  return [preferred, frp].filter((endpoint, index, list) => (
     endpoint.host &&
     endpoint.port &&
     list.findIndex(item => item.host === endpoint.host && item.port === endpoint.port) === index
@@ -88,6 +132,10 @@ export function publicBoardConfig(board, runtime = {}) {
     user: board.user,
     frpHost: board.frpHost,
     frpPort: String(board.frpPort),
+    kioskUrl: board.kioskUrl,
+    statusUrl: board.statusUrl,
+    connectionMode: board.connectionMode || "real",
+    deployable: board.deployable !== false,
     passwordConfigured: Boolean(runtime.passwordConfigured),
     activeRoute: runtime.activeEndpoint ? endpointLabel(runtime.activeEndpoint) : ""
   };
@@ -104,6 +152,8 @@ export function publicDeviceProfiles(env = process.env) {
       port: String(board.port),
       frpHost: board.frpHost,
       frpPort: String(board.frpPort),
+      kioskUrl: board.kioskUrl,
+      statusUrl: board.statusUrl,
       targetStatic: roots.targetStatic
     };
   });

@@ -82,6 +82,49 @@ kill_existing_chromium() {
   fi
 }
 
+hide_cursor() {
+  if command -v xsetroot >/dev/null 2>&1; then
+    if ! xsetroot -cursor_name none >/dev/null 2>&1; then
+      cursor_bits="${TMPDIR:-/tmp}/taishan-empty-cursor.xbm"
+      cursor_mask="${TMPDIR:-/tmp}/taishan-empty-cursor-mask.xbm"
+      {
+        echo "#define empty_width 1"
+        echo "#define empty_height 1"
+        echo "static unsigned char empty_bits[] = { 0x00 };"
+      } >"$cursor_bits"
+      cp "$cursor_bits" "$cursor_mask"
+      xsetroot -cursor "$cursor_bits" "$cursor_mask" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if command -v xdotool >/dev/null 2>&1; then
+    xdotool mousemove 479 359 >/dev/null 2>&1 || true
+  fi
+
+  if command -v unclutter >/dev/null 2>&1; then
+    pkill -u "$(id -u)" -f "unclutter.*-root" 2>/dev/null || true
+    unclutter -idle 1 -root >/dev/null 2>&1 &
+  fi
+}
+
+start_front_guard() {
+  (
+    sleep 2
+    if command -v xdotool >/dev/null 2>&1; then
+      window_id="$(xdotool search --onlyvisible --class chromium 2>/dev/null | tail -n 1 || true)"
+      if [ -n "$window_id" ]; then
+        xdotool windowactivate "$window_id" >/dev/null 2>&1 || true
+        xdotool windowmove "$window_id" 0 0 >/dev/null 2>&1 || true
+        xdotool windowsize "$window_id" 480 360 >/dev/null 2>&1 || true
+        xdotool mousemove 479 359 >/dev/null 2>&1 || true
+      fi
+    fi
+    if command -v wmctrl >/dev/null 2>&1; then
+      wmctrl -r :ACTIVE: -b add,above,fullscreen >/dev/null 2>&1 || true
+    fi
+  ) &
+}
+
 {
   echo "[$(date -Iseconds)] waiting for X 480x360"
   wait_for_x || echo "[$(date -Iseconds)] X did not report 480x360 before timeout"
@@ -103,6 +146,8 @@ kill_existing_chromium() {
   pkill -9 ibus 2>/dev/null || true
 
   kill_existing_chromium
+  hide_cursor
+  start_front_guard
 
   echo "[$(date -Iseconds)] launching Chromium kiosk via $CHROMIUM_BIN"
   exec "$CHROMIUM_BIN" \
@@ -123,6 +168,7 @@ kill_existing_chromium() {
     --hide-scrollbars \
     --overscroll-history-navigation=0 \
     --force-device-scale-factor=1 \
+    --start-fullscreen \
     --window-position=0,0 \
     --window-size=480,360 \
     --kiosk "$URL"

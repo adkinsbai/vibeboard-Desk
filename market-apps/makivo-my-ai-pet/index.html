@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=480,height=360,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>MAKIVO One - My AI Pet</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main id="pet-screen" aria-label="MAKIVO One 声音魔法宠物">
+    <canvas id="petCanvas" width="480" height="360" aria-hidden="true"></canvas>
+    <header class="topbar">
+      <span class="brand-mark">MAKIVO <b>ONE</b></span>
+      <span id="connectionStatus">LOCAL / READY</span>
+    </header>
+    <section class="pet-copy" aria-live="polite">
+      <p id="stageLabel" class="eyebrow">VOICE MAGIC PET</p>
+      <h1 id="petName">等待一段声音</h1>
+      <p id="petDetails">说出颜色、动物和一个爱好</p>
+      <p id="eventLine" class="event-line">声音会在这里孵化成伙伴。</p>
+    </section>
+    <section class="voice-dock" aria-label="创建宠物">
+      <div id="transcript" class="transcript">准备聆听</div>
+      <form id="voiceForm">
+        <input id="voiceInput" type="text" maxlength="120" autocomplete="off" placeholder="电脑端可直接输入一句话" aria-label="宠物描述">
+        <button id="voiceButton" type="button" aria-label="开始语音输入" title="开始语音输入">MIC</button>
+        <button id="createButton" type="submit" aria-label="孵化宠物" title="孵化宠物">HATCH</button>
+      </form>
+      <div class="dock-meta"><span>离线可运行</span><span id="inputStatus">文字回退已开启</span></div>
+    </section>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>

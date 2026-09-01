@@ -1,0 +1,39 @@
+:root {
+  --ink: #f6f7ef;
+  --muted: #a2a797;
+  --acid: #d8ff55;
+  --pink: #ff6f91;
+  --blue: #75c8ff;
+  --panel: rgba(13, 18, 18, .9);
+  --line: rgba(246, 247, 239, .2);
+}
+
+* { box-sizing: border-box; }
+html, body { width: 480px; height: 360px; margin: 0; overflow: hidden; background: #070a09; }
+body { color: var(--ink); font: 12px/1.3 "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 0; }
+button, input { font: inherit; }
+button { color: inherit; cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--acid); outline-offset: 2px; }
+
+#pet-screen { position: relative; width: 480px; height: 360px; overflow: hidden; background: #0b100d; }
+#petCanvas { position: absolute; inset: 0; width: 480px; height: 360px; image-rendering: pixelated; }
+.topbar { position: absolute; z-index: 2; top: 10px; left: 14px; right: 14px; display: flex; justify-content: space-between; align-items: center; color: var(--muted); font: 10px ui-monospace, Consolas, monospace; letter-spacing: .08em; }
+.brand-mark { color: var(--ink); font-weight: 700; }
+.brand-mark b { color: var(--acid); font-weight: 700; }
+#connectionStatus { color: var(--acid); }
+.pet-copy { position: absolute; z-index: 2; top: 36px; left: 24px; max-width: 210px; text-shadow: 0 2px 10px rgba(0,0,0,.35); }
+.eyebrow { margin: 0 0 5px; color: var(--acid); font: 10px ui-monospace, Consolas, monospace; letter-spacing: .12em; }
+h1 { margin: 0; max-width: 210px; font-size: 25px; line-height: 1; font-weight: 700; }
+#petDetails { margin: 8px 0 0; color: var(--muted); }
+.event-line { margin: 9px 0 0; color: var(--pink); font-size: 11px; }
+.voice-dock { position: absolute; z-index: 3; right: 12px; bottom: 12px; left: 12px; padding: 8px; border: 1px solid var(--line); background: var(--panel); box-shadow: 0 8px 28px rgba(0,0,0,.3); }
+.transcript { min-height: 16px; margin-bottom: 6px; color: var(--blue); font-family: ui-monospace, Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#voiceForm { display: grid; grid-template-columns: 1fr 52px 60px; gap: 6px; }
+input { min-width: 0; height: 30px; border: 1px solid var(--line); background: #111817; color: var(--ink); padding: 0 9px; }
+input::placeholder { color: #778075; }
+button { height: 30px; border: 1px solid var(--line); background: #18201b; font: 10px ui-monospace, Consolas, monospace; letter-spacing: .06em; }
+#voiceButton { color: var(--blue); }
+#createButton { border-color: var(--acid); background: var(--acid); color: #0a0e09; font-weight: 700; }
+.dock-meta { display: flex; justify-content: space-between; margin-top: 6px; color: var(--muted); font-size: 10px; }
+
+@media (prefers-reduced-motion: reduce) { #petCanvas { image-rendering: auto; } }

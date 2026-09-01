@@ -1,6 +1,6 @@
 # 0003. Local-First Runtime Database
 
-The prototype uses local SQLite file persistence through sql.js for runtime state, generated conversations, and Digital Life memory.
+The prototype uses local SQLite file persistence through sql.js for runtime state, generated conversations, job state, assets, and platform-side memory.
 
 This is accepted because it keeps the Windows and RK3566 prototype portable, easy to inspect, and easy to back up without requiring a separate database service.
 

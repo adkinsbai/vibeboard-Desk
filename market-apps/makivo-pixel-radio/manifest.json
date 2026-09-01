@@ -1,0 +1,11 @@
+{
+  "id": "makivo-pixel-radio",
+  "name": "像素音乐台",
+  "description": "预装曲库、本地播放、歌词与随节拍变化的像素动效，不依赖网络。",
+  "version": "1.0.0",
+  "source": "makivo-one-device-app",
+  "files": ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"],
+  "capabilities": ["bundled-catalog", "local-audio", "lyrics", "visualizer", "offline"],
+  "screen": {"width": 480, "height": 360, "touch": false},
+  "audio": {"input": "none", "output": "speaker"}
+}

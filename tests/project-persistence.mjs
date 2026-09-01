@@ -119,6 +119,46 @@ await test("file ProjectPersistence does not overwrite newer rows with stale wri
   assert(ids.includes("conv-stale"), "stale writer conversation should also be saved");
 });
 
+await test("file ProjectPersistence serializes concurrent writes from independent instances", async () => {
+  const filePath = fileURLToPath(new URL(`runtime/project-persistence-concurrent-${Date.now()}-${Math.random()}.json`, new URL("..", import.meta.url)));
+  const instances = Array.from({ length: 4 }, () => createFileProjectPersistence({ filePath }));
+  await Promise.all(instances.map(instance => instance.initSchema()));
+
+  await Promise.all(instances.map(async (instance, index) => {
+    const conversationId = `conv-${index}`;
+    const buildId = `build-${index}`;
+    await instance.createConversation(conversationId, `Project ${index}`, { userId: "user-a" });
+    await instance.appendMessage(conversationId, { role: "user", content: `prompt ${index}` });
+    await instance.saveConversationFiles(conversationId, buildId, {
+      "index.html": "<!doctype html>",
+      "style.css": "body{}",
+      "app.js": `console.log(${index})`,
+      "hardware_app.py": `print(${index})`,
+      "manifest.json": JSON.stringify({ id: buildId, files: ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"] }),
+    });
+    const job = await instance.createJob({
+      type: "generate",
+      conversationId,
+      title: `Generate ${index}`,
+      input: { prompt: `prompt ${index}`, user_id: "user-a" },
+    });
+    await instance.transition(job.id, { status: "succeeded", phase: "done", output: { ok: true, id: buildId } });
+  }));
+
+  const reader = createFileProjectPersistence({ filePath });
+  const conversations = await reader.listConversations({ userId: "user-a" });
+  assert(conversations.length === 4, `all concurrent conversations should be retained: ${JSON.stringify(conversations)}`);
+  for (let index = 0; index < 4; index += 1) {
+    const conversationId = `conv-${index}`;
+    const files = await reader.loadConversationFiles(conversationId);
+    const messages = await reader.listMessages(conversationId);
+    const jobs = await reader.listJobs({ conversationId });
+    assert(files.files["app.js"] === `console.log(${index})`, `files for ${conversationId} should survive concurrent writes`);
+    assert(messages.some(item => item.content === `prompt ${index}`), `messages for ${conversationId} should survive concurrent writes`);
+    assert(jobs.some(item => item.status === "succeeded"), `jobs for ${conversationId} should survive concurrent writes`);
+  }
+});
+
 await test("postgres ProjectPersistence initializes first-class project tables", async () => {
   const statements = [];
   const pg = async (strings, ...values) => {

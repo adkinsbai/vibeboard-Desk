@@ -74,15 +74,15 @@ await withServer(async ({ baseUrl }) => {
   });
   assert(blockedStatus.status === 403, "regular users should not access hardware status in public deployment");
 
-  const hiddenDigitalLife = await raw(baseUrl, "/digital-life.html", {
+  const hiddenCompanionPage = await raw(baseUrl, "/digital-life.html", {
     headers: { accept: "text/html", cookie: regularCookie },
   });
-  assert(hiddenDigitalLife.status === 404, "public deployment should not expose the Digital Life page");
+  assert(hiddenCompanionPage.status === 404, "public deployment should not expose the legacy companion page");
 
-  const hiddenDigitalLifeApi = await raw(baseUrl, "/api/digital-life/state", {
+  const hiddenCompanionApi = await raw(baseUrl, "/api/digital-life/state", {
     headers: { cookie: regularCookie },
   });
-  assert(hiddenDigitalLifeApi.status === 404, "public deployment should not expose Digital Life APIs");
+  assert(hiddenCompanionApi.status === 404, "public deployment should not expose legacy companion APIs");
 
   const acceptedJob = await raw(baseUrl, "/api/jobs", {
     method: "POST",
@@ -99,10 +99,12 @@ await withServer(async ({ baseUrl }) => {
       },
     }),
   });
-  assert(acceptedJob.status === 200, `public /api/jobs should run request-bound jobs, got ${acceptedJob.status}`);
-  assert(acceptedJob.data.job?.status === "succeeded", `public /api/jobs should return a final job, got ${JSON.stringify(acceptedJob.data.job)}`);
-  assert(acceptedJob.data.job?.output?.ok === true, "free public beta should allow AI jobs even with zero credits");
-  const persistedJob = await getJson(baseUrl, `/api/jobs/${encodeURIComponent(acceptedJob.data.job.id)}`, cookie);
+  assert(acceptedJob.status === 202, `public /api/jobs should queue background jobs, got ${acceptedJob.status}`);
+  assert(acceptedJob.data.job?.id, `public /api/jobs should return a queued job, got ${JSON.stringify(acceptedJob.data)}`);
+  const finalJob = await waitForJob(baseUrl, acceptedJob.data.job.id, cookie);
+  assert(finalJob.status === "succeeded", `public /api/jobs should finish request-bound jobs, got ${JSON.stringify(finalJob)}`);
+  assert(finalJob.output?.ok === true, "free public beta should allow AI jobs even with zero credits");
+  const persistedJob = await getJson(baseUrl, `/api/jobs/${encodeURIComponent(finalJob.id)}`, cookie);
   assert(persistedJob.job?.status === "succeeded", "request-bound public job should persist its final status");
 }, {
   dbPrefix: "auth-flow",
@@ -156,6 +158,18 @@ async function getJson(baseUrl, path, cookie = "") {
   });
   assert(result.response.ok, `${path} should return ok HTTP, got ${result.status}: ${JSON.stringify(result.data)}`);
   return result.data;
+}
+
+async function waitForJob(baseUrl, jobId, cookie = "", timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    const payload = await getJson(baseUrl, `/api/jobs/${encodeURIComponent(jobId)}`, cookie);
+    latest = payload.job;
+    if (["succeeded", "failed", "canceled"].includes(latest?.status)) return latest;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  return latest;
 }
 
 async function raw(baseUrl, path, options = {}) {

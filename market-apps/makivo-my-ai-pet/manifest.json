@@ -1,0 +1,11 @@
+{
+  "id": "makivo-my-ai-pet",
+  "name": "声音魔法宠物",
+  "description": "用声音创造一只属于你的像素宠物，完全离线运行，支持电脑端文字回退。",
+  "version": "1.0.0",
+  "source": "makivo-one-device-app",
+  "files": ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"],
+  "capabilities": ["voice-text-fallback", "local-pixel-pet", "offline"],
+  "screen": {"width": 480, "height": 360, "touch": false},
+  "audio": {"input": "microphone", "output": "speaker"}
+}

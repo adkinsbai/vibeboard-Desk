@@ -27,13 +27,17 @@ function compactOutput(output) {
 }
 
 function serializeError(error, classified) {
-  return {
+  const serialized = {
     ok: false,
     error: error?.message || "Job failed",
     ...classified,
     stdout: error?.stdout || "",
     stderr: error?.stderr || "",
   };
+  if (error?.debugRecovery || error?.debug_recovery) {
+    serialized.debug_recovery = error.debugRecovery || error.debug_recovery;
+  }
+  return serialized;
 }
 
 function actionKey(action = "") {
@@ -87,6 +91,7 @@ export function createJobRuntime({
   appendServerLog = async () => {},
   timeoutMs = DEFAULT_JOB_TIMEOUT_MS,
   maxConcurrency = 2,
+  debugRecovery = null,
 } = {}) {
   if (!jobStore) throw new Error("jobStore is required");
   const handlers = new Map();
@@ -171,12 +176,15 @@ export function createJobRuntime({
       const executionInput = runtimeInput || job.input || {};
       await ctx.checkCanceled();
       await jobStore.transition(jobId, { phase: "dispatching" });
-      const handlerPromise = Promise.resolve().then(() => handler(executionInput, ctx, job));
-      const output = await withTimeout(
-        handlerPromise,
-        Number(executionInput?.job_timeout_ms || executionInput?.timeout_ms || timeoutMs || DEFAULT_JOB_TIMEOUT_MS),
+      const runTimeoutMs = Number(executionInput?.job_timeout_ms || executionInput?.timeout_ms || timeoutMs || DEFAULT_JOB_TIMEOUT_MS);
+      const runAttempt = attemptInput => withTimeout(
+        Promise.resolve().then(() => handler(attemptInput, ctx, job)),
+        runTimeoutMs,
         job
       );
+      const output = debugRecovery?.run
+        ? await debugRecovery.run({ job, input: executionInput, ctx, runAttempt })
+        : await runAttempt(executionInput);
       const latest = await jobStore.getJob(jobId);
       if (latest?.cancel_requested) {
         await jobStore.transition(jobId, {

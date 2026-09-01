@@ -1,0 +1,25 @@
+{
+  "id": "vb-companion-device-demo",
+  "name": "本地陪伴小电脑",
+  "description": "可部署到小电脑的本地 companion 示例，提供表情、记忆检索、文字互动和按键控制，不依赖主平台内置后端。",
+  "version": "1.2.0",
+  "source": "market-deployable-app",
+  "files": ["index.html", "style.css", "app.js", "hardware_app.py", "manifest.json"],
+  "capabilities": [
+    "text-dialogue",
+    "ranked-memory",
+    "local-expression",
+    "push-to-talk",
+    "offline-fallback"
+  ],
+  "controls": {
+    "KEY1": "cycle-expression",
+    "KEY2": "toggle-memory",
+    "KEY3": "cycle-skin"
+  },
+  "screen": {
+    "width": 480,
+    "height": 360,
+    "touch": false
+  }
+}

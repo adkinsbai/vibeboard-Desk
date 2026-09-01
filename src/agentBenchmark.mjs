@@ -6,10 +6,10 @@ const EXPRESSION_STATES = [
 const SECRET_KEY_RE = /api.?key|authorization|reasoning|prompt|messages|files|content/i;
 const SECRET_VALUE_RE = /\bsk-[a-z0-9_-]{12,}\b|bearer\s+[a-z0-9._-]{8,}/ig;
 
-const DIGITAL_LIFE_SCENARIO = Object.freeze({
+const PHYSICAL_COMPANION_SCENARIO = Object.freeze({
   schema_version: "agent-benchmark-scenario.v1",
-  id: "digital-life-physical-companion",
-  title: "Digital Life transparent-screen physical companion simulator",
+  id: "physical-companion-device",
+  title: "Transparent-screen physical companion device simulator",
   screen: Object.freeze({ width: 480, height: 360, touch: false }),
   controls: Object.freeze(["KEY1", "KEY2", "KEY3"]),
   required_files: Object.freeze(REQUIRED_FILES),
@@ -25,14 +25,14 @@ const DIGITAL_LIFE_SCENARIO = Object.freeze({
     `Support these expression states: ${EXPRESSION_STATES.join(", ")}.`,
     "Use synthetic memory-projection.v1 records and a local hybrid-style RAG search simulation.",
     "KEY1 cycles expression, KEY2 opens a compact memory inspection overlay, KEY3 changes skin.",
-    "Expose window.DigitalLifeDeviceSimulator.getState() for deterministic verification.",
+    "Expose window.PhysicalCompanionDeviceSimulator.getState() for deterministic verification.",
     "Do not call external APIs, include credentials, or claim real sensing, memory, or deployment.",
   ].join("\n"),
 });
 
 export function getBenchmarkScenario(id) {
-  if (id !== DIGITAL_LIFE_SCENARIO.id) throw new Error(`unknown benchmark scenario: ${id}`);
-  return structuredClone(DIGITAL_LIFE_SCENARIO);
+  if (id !== PHYSICAL_COMPANION_SCENARIO.id) throw new Error(`unknown benchmark scenario: ${id}`);
+  return structuredClone(PHYSICAL_COMPANION_SCENARIO);
 }
 
 export function scoreBenchmarkRun({ scenario, result = {}, progressEvents = [], durationMs = 0 } = {}) {
@@ -84,7 +84,7 @@ export function verifyPhysicalCompanionFiles(files = {}) {
   const allSource = `${indexSource}\n${styleSource}\n${appSource}`;
   const failures = [];
   const missingStates = EXPRESSION_STATES.filter(state => !hasLiteral(appSource, state));
-  const missingSkins = DIGITAL_LIFE_SCENARIO.required_skins.filter(skin => !hasLiteral(appSource, skin));
+  const missingSkins = PHYSICAL_COMPANION_SCENARIO.required_skins.filter(skin => !hasLiteral(appSource, skin));
   const memoryProjection = hasLiteral(appSource, "memory-projection.v1")
     && /(?:const|let|var)\s+\w*memor\w*\s*=\s*\[/i.test(appSource);
   const ragBehavior = /(?:function\s+\w*(?:retrieve|search|query)\w*\s*\([^)]*(?:query|term)|(?:retrieve|search|query)\w*\s*=\s*\([^)]*(?:query|term))/i.test(appSource)
@@ -94,7 +94,7 @@ export function verifyPhysicalCompanionFiles(files = {}) {
     && /(?:set|cycle|next|update)Expression|currentExpression|expressionIndex/i.test(appSource);
   const keyControls = ["1", "2", "3"].every(number => new RegExp(`(?:KEY|Key|Digit)${number}`).test(appSource))
     && /(?:keydown|KeyboardEvent|addEventListener)/.test(appSource);
-  const inspectionHook = /window\.DigitalLifeDeviceSimulator\s*=/.test(appSource)
+  const inspectionHook = /window\.PhysicalCompanionDeviceSimulator\s*=/.test(appSource)
     && /getState\s*\(/.test(appSource);
   const companionFirst = /<(?:main|section|div)[^>]+(?:id|class)=["'][^"']*(?:companion|face|expression|screen)[^"']*["']/i.test(indexSource)
     && !/<(?:main|section)[^>]+(?:id|class)=["'][^"']*dashboard[^"']*["']/i.test(indexSource);
@@ -117,8 +117,8 @@ export function verifyPhysicalCompanionFiles(files = {}) {
     metrics: {
       expression_states_present: EXPRESSION_STATES.length - missingStates.length,
       expression_states_required: EXPRESSION_STATES.length,
-      skins_present: DIGITAL_LIFE_SCENARIO.required_skins.length - missingSkins.length,
-      skins_required: DIGITAL_LIFE_SCENARIO.required_skins.length,
+      skins_present: PHYSICAL_COMPANION_SCENARIO.required_skins.length - missingSkins.length,
+      skins_required: PHYSICAL_COMPANION_SCENARIO.required_skins.length,
       memory_projection: memoryProjection,
       rag_behavior: ragBehavior,
       expression_transitions: expressionTransitions,

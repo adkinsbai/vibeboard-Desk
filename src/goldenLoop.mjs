@@ -24,15 +24,22 @@ function shQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
 }
 
-export function buildGoldenLoopRemoteCommand({ targetStatic, service }) {
+export function buildGoldenLoopRemoteCommand({
+  targetStatic,
+  service,
+  kioskUrl = "http://127.0.0.1:8765/",
+  statusUrl = "http://127.0.0.1:8765/api/status"
+}) {
   return [
     "set -u",
     `target=${shQuote(targetStatic)}`,
     `service=${shQuote(service)}`,
+    `kiosk_url=${shQuote(kioskUrl)}`,
+    `status_url=${shQuote(statusUrl)}`,
     "printf '__SECTION__:service\\n'",
     "systemctl is-active \"$service\" 2>/dev/null || true",
     "printf '\\n__SECTION__:http_index_id\\n'",
-    "{ curl -fsS http://127.0.0.1:8765/ 2>/dev/null; printf '\\n'; curl -fsS http://127.0.0.1:8765/index.html 2>/dev/null; printf '\\n'; curl -fsS http://127.0.0.1:8765/app.js 2>/dev/null; printf '\\n'; curl -fsS http://127.0.0.1:8765/manifest.json 2>/dev/null; } | grep -o 'vb-[a-z0-9]*-[a-f0-9]*' | head -1 || true",
+    "{ curl -fsS \"$kiosk_url\" 2>/dev/null; printf '\\n'; curl -fsS \"${kiosk_url%/}/index.html\" 2>/dev/null; printf '\\n'; curl -fsS \"${kiosk_url%/}/app.js\" 2>/dev/null; printf '\\n'; curl -fsS \"${kiosk_url%/}/manifest.json\" 2>/dev/null; } | grep -o 'vb-[a-z0-9]*-[a-f0-9]*' | head -1 || true",
     "printf '\\n__SECTION__:static_index_id\\n'",
     "grep -o 'vb-[a-z0-9]*-[a-f0-9]*' \"$target/index.html\" \"$target/app.js\" 2>/dev/null | head -1 || true",
     "printf '\\n__SECTION__:manifest\\n'",
@@ -40,9 +47,11 @@ export function buildGoldenLoopRemoteCommand({ targetStatic, service }) {
     "printf '\\n__SECTION__:program\\n'",
     "cat \"$target/hardware-result.json\" 2>/dev/null || true",
     "printf '\\n__SECTION__:status\\n'",
-    "curl -fsS http://127.0.0.1:8765/api/status 2>/dev/null || true",
+    "curl -fsS \"$status_url\" 2>/dev/null || true",
     "printf '\\n__SECTION__:geometry\\n'",
     "DISPLAY=:0 XAUTHORITY=/home/linaro/.Xauthority xwininfo -root 2>/dev/null | grep -E 'Absolute upper-left|Width|Height' || true",
+    "printf '\\n__SECTION__:kiosk_url\\n'",
+    "printf '%s\\n' \"$kiosk_url\"",
     "printf '\\n__SECTION__:kiosk\\n'",
     "{ ps -C chromium -o pid=,args= 2>/dev/null; ps -C chromium-bin -o pid=,args= 2>/dev/null; } | head -n 3 || true"
   ].join("\n");
@@ -71,12 +80,15 @@ export function buildGoldenLoopResult({
   sections,
   route = "",
   serviceName = "taishan-screen.service",
+  kioskUrl = "http://127.0.0.1:8765/",
+  statusUrl = "http://127.0.0.1:8765/api/status",
   checkedAt = new Date().toISOString()
 }) {
   const manifest = parseJsonSafe(sections.manifest);
   const program = parseJsonSafe(sections.program);
   const status = parseJsonSafe(sections.status);
   const geometry = sections.geometry || "";
+  const observedKioskUrl = sections.kiosk_url || "";
   const kiosk = sections.kiosk || "";
   const httpIndexId = parseFirstBuildId(sections.http_index_id);
   const staticIndexId = parseFirstBuildId(sections.static_index_id);
@@ -97,6 +109,7 @@ export function buildGoldenLoopResult({
     makeCheck("status-api", "board status API responded", Boolean(status?.hostname || status?.network || status?.services), sections.status),
     makeCheck("service-active", `${serviceName} active`, service === "active", service || "missing"),
     makeCheck("display-geometry", "display geometry is 480x360", /Width:\s*480\b/.test(geometry) && /Height:\s*360\b/.test(geometry), geometry || "xwininfo unavailable"),
+    makeCheck("kiosk-url", "kiosk uses the configured application URL", observedKioskUrl === kioskUrl, observedKioskUrl || "kiosk URL unavailable"),
     makeCheck("kiosk-window", "kiosk launched at 480x360 scale 1", /--window-size=480,360/.test(kiosk) && /--force-device-scale-factor=1/.test(kiosk), kiosk || "chromium process not found")
   ];
 

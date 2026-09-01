@@ -203,6 +203,7 @@ export function createBuildRuntime(deps = {}) {
     currentBuild.buildEvidence.phase = AGENT_PHASES.LOCAL_VERIFY;
     currentBuild.buildEvidence.summary = "L0-L3 local verification passed";
     currentBuild.buildEvidence.route_profile = currentBuild.routeProfile || null;
+    currentBuild.buildEvidence.route_escalations = Array.isArray(currentBuild.routeEscalations) ? currentBuild.routeEscalations : [];
     currentBuild.buildEvidence.context_retrieval = currentBuild.contextRetrieval || null;
     currentBuild.buildEvidence.evidence = {
       ...currentBuild.buildEvidence.evidence,
@@ -214,6 +215,7 @@ export function createBuildRuntime(deps = {}) {
       contractHash,
       pythonBin,
       route_profile: currentBuild.routeProfile || null,
+      route_escalations: Array.isArray(currentBuild.routeEscalations) ? currentBuild.routeEscalations : [],
       context_retrieval: currentBuild.contextRetrieval || null,
     };
     currentBuild.intelligenceSummary = createBuildIntelligenceSummary({
@@ -235,6 +237,7 @@ export function createBuildRuntime(deps = {}) {
       nextBestAction: currentBuild.intelligenceSummary.nextBestAction,
       route: currentBuild.routeProfile?.route || "",
       routeScore: currentBuild.routeProfile?.score ?? null,
+      routeEscalationCount: Array.isArray(currentBuild.routeEscalations) ? currentBuild.routeEscalations.length : 0,
       retrievalEntryCount: currentBuild.contextRetrieval?.entryCount ?? null,
       retrievalDegraded: currentBuild.contextRetrieval?.degraded ?? false,
     });

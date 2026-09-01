@@ -146,6 +146,9 @@ Treat these as reference values, not permanent truth; re-check current runtime b
 
 - LAN IP can change; do not assume `192.168.1.49` is current.
 - FRP `150.158.146.192:6278` can refuse connections while LAN SSH works, and the reverse can also happen when the board moves networks.
+- Platform deployment must use the resolved board config consistently across route probe, upload, remote command execution, status readback, and golden-loop verification. Do not hard-code `BOARD.frpHost` / `BOARD.frpPort` in stdin upload, and do not hard-code `http://127.0.0.1:8765/api/status` in board status checks when `BOARD.statusUrl` is configured.
+- Prefer configured/LAN endpoints before FRP fallback when both are present. A cached heartbeat or L0-L3 local verification is not deployability proof; verify SSH route, authentication, target write access, board-side compile/run, service restart, HTTP build id, geometry, and kiosk process separately.
+- Bound devices marked `connection.mode: "preview"` must not inherit the default gray-board SSH route. Keep them simulated or return an explicit preview-only deployment message.
 - OpenSSH public key over FRP can fail even when Paramiko password auth works.
 - Multiple SSH connections in one deployment are brittle through FRP; bundle uploads into fewer connections.
 - `scp` may fail with connection-closed behavior; base64/Paramiko upload is more reliable for this MVP.

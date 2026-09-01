@@ -254,6 +254,15 @@ const ERROR_PROFILES = Object.freeze({
     statusCode: 400,
     nextActions: ["检查资产包", "删除危险路径", "分批上传"],
   },
+  board_unreachable: {
+    label: "Board transport is unreachable",
+    stage: "deploy",
+    userMessage: "真机 SSH/FRP 通道当前不可达，应用还没有写入设备。",
+    suggestion: "确认小电脑已开机联网、FRP 客户端在线、SSH 端口可达，并检查绑定设备的 host/port/user 配置。",
+    retryable: false,
+    statusCode: 502,
+    nextActions: ["检查设备电源", "检查 FRP/SSH", "确认绑定设备"],
+  },
   deploy_failed: {
     label: "Deploy failed",
     stage: "deploy",
@@ -362,6 +371,7 @@ function detectType(text, lower, context = {}) {
   if (/database disk image is malformed|SQLITE_CORRUPT|malformed database/i.test(text)) return "storage_corrupt";
   if (/SQLITE|database|snapshot|conversation.*save|save.*failed|EACCES|EPERM|ENOENT/i.test(text)) return "storage_failed";
   if (/unsafe ZIP|unsafe path|asset.*reject|unsupported archive|too large.*asset|archive/i.test(text) && /asset|upload|zip|tar|gz/i.test(text)) return "asset_rejected";
+  if (/Unable to reach|No deployable endpoint|NoValidConnectionsError|Error reading SSH protocol banner|Connection refused|banner exchange|kex_exchange_identification|ssh:/i.test(text) && /board|device|taishan|frp|ssh|灰色|小电脑|真机|部署/i.test(text)) return "board_unreachable";
   if (/syntax.?error|SyntaxError|unexpected token|node --check|JavaScript parse/i.test(text)) return "syntax_error";
   if (/IndentationError|TabError|NameError|py_compile|hardware_app\.py failed|Python.*(?:error|failed)/i.test(text)) return "python_syntax";
   if (/hardware-result\.json|HARDWARE_|hardware contract|build_id mismatch|required runtime API|available_apis/i.test(text)) return "hardware_contract";

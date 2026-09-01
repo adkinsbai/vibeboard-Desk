@@ -38,6 +38,19 @@
 
 ---
 
+## 2026-08-31 Update: LangGraph V2 Agent Workflow and Escalation
+
+- The current v1 workspace was preserved before migration. Snapshot and patch evidence live under `C:\tmp\vibeboard-backups\pre-langgraph-v1-20260829`, and the safety branch is `codex/pre-langgraph-v1-backup-20260829`.
+- Added a LangGraph workflow engine powered by `@langchain/langgraph`. The server now defaults `/api/agent` to `langgraph-v2`, while `VIBEBOARD_AGENT_WORKFLOW=v1` still rolls back to the legacy path when needed.
+- The v2 graph breaks the Agent into traceable nodes: `load_context`, `retrieve_context`, `plan_requirement`, `confirm_gate`, `contract_firewall`, `build_graph`, `debug_reflect`, `deploy_approval`, and `respond`.
+- `retrieve_context` now carries a compact, auditable context bundle into planning/building: project memory, unified retrieval metadata, asset-library prompt context, and automatic debug/playbook evidence.
+- `contract_firewall` keeps hardware system files read-only before the build starts. If a task contract marks `hardware_app.py` or `manifest.json` as model-writable, v2 blocks generation and returns choice-style guidance.
+- Route discovery now records `route_escalations` when the agent reveals multi-file scope or hard dependencies during execution, and the wider build evidence keeps that trace.
+- Successful local builds now stop at an explicit `deploy_approval` gate in the v2 trace, preserving the rule that hardware writes require user confirmation.
+- Verification includes `tests/agent-workflow-langgraph-v2.mjs`, `tests/route-escalation.mjs`, and the existing Agent regression suite.
+
+---
+
 ## 目录
 
 - [项目简介](#项目简介)
@@ -87,11 +100,12 @@ VibeBoard 是一个 **AI + 硬件** 的端到端应用生成平台。用户在 W
 - **Agent 交互提速**：澄清问题改为 `quick_replies` 选择题，每轮最多追问一个关键问题；用户输入“开始吧”会直接进入构建，输入“帮我部署吧”会基于当前构建直接显示部署确认按钮。
 - **生成失败原因可解释**：生成、Agent 确认、资产上传、市场发布和部署失败都会返回结构化 `errorType/errorStage/userMessage/suggestion/nextActions/technicalDetail`。常见问题会明确提示缺 API Key、模型认证失败、额度不足、限流、模型超时、模型输出不合法、本地语法/硬件合同/480×360 渲染失败、资产包被拒绝、数据库/快照保存失败、设备部署失败等原因，不再只显示“未知错误”。同一时间重复发起生成会返回 `409 generate_busy`，前端会提示等待当前任务完成，而不是静默忽略。
 - **部署前自动修复**：如果已配置 DeepSeek 或其它 OpenAI-compatible 模型，Agent 生成后遇到 L0-L3 本地验证失败，会先把失败证据和当前文件交给模型自动修复，默认最多 2 轮；修复通过后才把结果交给用户部署确认。只有缺 API Key、模型认证/额度/网络问题、资产缺失、存储损坏等必须用户介入的问题，才会停止并说明原因。
+- **后台 Job Debug 系统**：任务中心运行 Agent、生成、验证或部署时会捕获失败，先按错误类型和错误签名判断是否可自动修复，再结合经验库与 playbook 把失败证据注入下一轮 `debug_context`。语法、渲染、硬件契约、模型输出不合法等可修复错误会自动进入最多 2 次调试循环；缺 API Key、模型额度不足、数据库配额不足、资产被拒绝、灰色小电脑 FRP/SSH 不通等需要用户处理的问题会直接停止，并返回明确按钮和下一步建议。
+- **LangGraph v2 工作流**：`/api/agent` 现在默认走 `langgraph-v2`，把 Agent 运行拆成可追踪节点，并在构建成功后停在部署确认门。v2 已显式接入项目记忆、统一检索、资产简报、Debug 经验上下文和硬件契约防火墙；如需回退，可将 `VIBEBOARD_AGENT_WORKFLOW` 设为 `v1`。
 - **会话级资产库**：聊天框支持上传多文件资产，后端会分析图片、视频、音频、HTML/CSS/JS 组件、文本、字体、数据文件、PDF/Office 文档和设计源文件；`.zip`、`.tar`、`.tgz`、`.gz` 资源包会在安全路径和大小限制内展开，并聚合成面向 480×360 小屏的产品设计简报。资产分析会提取调色板、组件结构、CTA 文案、数据字段、交互暗示、媒体计划、媒体画像、文档画像和设计画像；图片会识别尺寸/比例，音频会识别 WAV 时长/采样率，视频会识别轻量容器提示，`.docx/.pptx/.xlsx/.pdf` 会提取可用文本、幻灯片/表格线索和字段，`.fig/.sketch/.psd/.ai/.xd` 和设计 token 会作为视觉方向、组件层级、调色板和布局参考。设计简报还会推断 `product-intent`、`layout-plan` 和 `completion-gap`，帮助 Agent/Codex 用默认方案补齐素材用途、版式和缺失 CTA/视觉方向，减少反复追问。上传反馈和 Assets 状态 tooltip 会展示这些重点。合同允许的被动资源会复制到生成应用的 `assets/uploaded/` 并写入 `manifest.json`，随预览、会话快照、市场发布和部署一起流转。
 - **Agent 实现模式选择**：聊天框右下角可切换“自研 Agent / Codex 硬件模式”。Codex 模式现在走独立 `codex-hardware-agent` 桥接层，被限制在 VibeBoard 480×360 硬件嵌入式 UI 设计、生成、验证和部署确认范围内；明显非硬件请求会被代码层 scope guard 拦截并转回小屏设计选择题，前端会显示 `mode_boundary`、`codex_bridge` 状态和拦截原因。确认构建时，后端会把原始需求包装成 Codex hardware execution package，把硬件边界、Assets 情报、禁止自动部署和本地验证要求一起送进生成器。
-- **应用市场扩展**：内置静态市场应用、预览图、二进制资源资产、数据库发布/部署流程，支持从市场一键部署回硬件。
-- **Digital Life Companion**：新增独立 `/digital-life.html` 页面和本地优先的 companion runtime，包含长期记忆、情绪/认知/自主性循环、presence、硬件/音频 API 和 UI smoke 测试。
-- **验证栈升级**：`npm run check` 会扫描主程序、前端脚本、`src/*.mjs`、Digital Life 和测试文件；`npm run verify:all` 汇总 Agent、offline 和 Digital Life 验证。
+- **应用市场扩展**：内置静态市场应用、预览图、二进制资源资产、数据库发布/部署流程，支持从市场一键部署回硬件；companion/personality 类体验只作为可部署设备应用存在，不再作为主平台内置页面、API 或后台循环。
+- **验证栈升级**：`npm run check` 会扫描主程序、前端脚本、`src/*.mjs` 和测试文件；`npm run verify:all` 汇总 Auth、Context、Persistence、Agent、Jobs、Offline 和 UI 验证。
 
 ### Agent 工作流
 
@@ -104,9 +118,11 @@ Agent 的目标不是自动把代码写进真机，而是把风险分成几个�
 5. **确认构建**：需求完整后显示“我理解你要的是/我准备这样做”的确认卡；用户点按钮或输入“开始吧/按这个方案”都会进入构建。
 6. **本地 L0-L3 验证**：生成文件、硬件契约、语法、模拟运行和 480×360 渲染先在本地通过。
 7. **部署前自动修复**：如果 L0-L3 本地验证失败且模型可用，Agent 会把失败证据、当前文件和硬件合同重新交给模型修复，修完后再次验证；默认修复上限由 `VIBEBOARD_AGENT_REPAIR_ATTEMPTS` 控制，默认 2。
-8. **失败解释与并发保护**：如果模型、资产、快照或本地验证在部署设备前失败，API 会返回明确阶段、用户可读原因、下一步建议和技术详情；如果一个任务未结束又开启另一个，会返回 `generate_busy` 并提示等待当前任务完成。
-9. **部署确认**：本地验证完成后才显示部署按钮；如果用户直接输入“帮我部署吧”，前端会检测当前构建并直接给出部署确认按钮，不再重复追问。
-10. **真机 L4 Golden Loop**：点击部署后通过 SSH 写入板端，再检查 HTTP、manifest、服务、kiosk 几何和板端运行结果。
+8. **后台 Job Debug**：后台任务统一接入 Debug 恢复层。可修复失败会被转成错误签名，匹配经验库和 playbook 后自动重试；同一错误反复出现、达到重试上限，或属于 API Key、额度、数据库、资产、真机连接等用户侧问题时，会停止并把原因展示给用户。
+9. **LangGraph v2 工作流**：内部请求默认进入新图引擎，也可显式传 `workflow_version: "v1"` 回退。它会产生 `agentGraphV2` 证据链，同时保留兼容的 `agentGraph` 字段。`retrieve_context` 会把项目记忆、资产摘要、统一检索结果和 Debug 经验变成 `context_bundle` 摘要，后续构建节点可直接使用；`contract_firewall` 会在构建前阻止模型改写系统硬件文件；执行中发现更大范围或硬依赖时，会记录 `route_escalations`。
+10. **失败解释与并发保护**：如果模型、资产、快照或本地验证在部署设备前失败，API 会返回明确阶段、用户可读原因、下一步建议和技术详情；如果一个任务未结束又开启另一个，会返回 `generate_busy` 并提示等待当前任务完成。
+11. **部署确认**：本地验证完成后才显示部署按钮；如果用户直接输入“帮我部署吧”，前端会检测当前构建并直接给出部署确认按钮，不再重复追问。
+12. **真机 L4 Golden Loop**：点击部署后通过 SSH 写入板端，再检查 HTTP、manifest、服务、kiosk 几何和板端运行结果。
 
 ---
 

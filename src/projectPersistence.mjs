@@ -22,6 +22,9 @@ import {
 } from "./jobStore.mjs";
 
 const fileMutationLocks = new Map();
+const FILE_LOCK_RETRY_MS = 15;
+const FILE_LOCK_TIMEOUT_MS = 15000;
+const FILE_LOCK_STALE_MS = 60000;
 
 export function createProjectPersistence(options = {}) {
   const { pg = null, sqliteDb = null, saveSqlite = () => {}, env = process.env } = options;
@@ -1015,7 +1018,23 @@ export function createPostgresProjectPersistence({ pg } = {}) {
 }
 
 function createJsonProjectPersistence({ filePath }) {
-  async function readState() {
+  async function waitForUnlocked() {
+    const lockPath = `${filePath}.lock`;
+    const deadline = Date.now() + FILE_LOCK_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const stat = await fs.stat(lockPath).catch(() => null);
+      if (!stat) return;
+      if (Date.now() - stat.mtimeMs > FILE_LOCK_STALE_MS) {
+        await fs.rm(lockPath, { force: true }).catch(() => {});
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, FILE_LOCK_RETRY_MS));
+    }
+    throw new Error(`Timed out waiting for project persistence read lock: ${filePath}`);
+  }
+
+  async function readState({ waitForLock = true } = {}) {
+    if (waitForLock) await waitForUnlocked();
     const raw = await fs.readFile(filePath, "utf8").catch(() => "");
     if (!raw) {
       return { conversations: [], messages: [], conversation_files: [], project_memory: [], jobs: [] };
@@ -1031,7 +1050,41 @@ function createJsonProjectPersistence({ filePath }) {
   }
   async function writeState(next) {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.writeFile(filePath, JSON.stringify(next, null, 2));
+    const temporaryPath = `${filePath}.${process.pid}.${cryptoRandom()}.tmp`;
+    try {
+      await fs.writeFile(temporaryPath, JSON.stringify(next, null, 2));
+      await fs.rename(temporaryPath, filePath);
+    } finally {
+      await fs.rm(temporaryPath, { force: true }).catch(() => {});
+    }
+  }
+  async function acquireFileLock() {
+    const lockPath = `${filePath}.lock`;
+    const deadline = Date.now() + FILE_LOCK_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const handle = await fs.open(lockPath, "wx");
+        return { handle, lockPath };
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        const stat = await fs.stat(lockPath).catch(() => null);
+        if (stat && Date.now() - stat.mtimeMs > FILE_LOCK_STALE_MS) {
+          await fs.rm(lockPath, { force: true }).catch(() => {});
+          continue;
+        }
+        await new Promise(resolve => setTimeout(resolve, FILE_LOCK_RETRY_MS));
+      }
+    }
+    throw new Error(`Timed out waiting for project persistence lock: ${filePath}`);
+  }
+  async function withFileLock(task) {
+    const lock = await acquireFileLock();
+    try {
+      return await task();
+    } finally {
+      await lock.handle.close().catch(() => {});
+      await fs.rm(lock.lockPath, { force: true }).catch(() => {});
+    }
   }
   async function mutate(task) {
     const previous = fileMutationLocks.get(filePath) || Promise.resolve();
@@ -1041,10 +1094,12 @@ function createJsonProjectPersistence({ filePath }) {
     fileMutationLocks.set(filePath, chainedLock);
     await previous.catch(() => {});
     try {
-      const current = await readState();
-      const result = await task(current);
-      await writeState(current);
-      return result;
+      return await withFileLock(async () => {
+        const current = await readState({ waitForLock: false });
+        const result = await task(current);
+        await writeState(current);
+        return result;
+      });
     } finally {
       release();
       if (fileMutationLocks.get(filePath) === chainedLock) fileMutationLocks.delete(filePath);
@@ -1077,11 +1132,11 @@ function createJsonProjectPersistence({ filePath }) {
   };
   return {
     async initSchema() {
-      const state = await readState();
-      for (let index = 0; index < state.jobs.length; index += 1) {
-        state.jobs[index] = normalizeJobRow(state.jobs[index]);
-      }
-      await writeState(state);
+      await mutate(state => {
+        for (let index = 0; index < state.jobs.length; index += 1) {
+          state.jobs[index] = normalizeJobRow(state.jobs[index]);
+        }
+      });
     },
     async markInterruptedRunningJobs() {
       return mutate(state => {

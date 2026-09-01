@@ -340,6 +340,7 @@ export function createGenerateRuntime(deps = {}) {
       manifest,
       conversationId,
       routeProfile,
+      routeEscalations: Array.isArray(agentResult.route_escalations) ? agentResult.route_escalations : [],
       contextRetrieval: execution.contextRetrieval,
     });
     await writeGeneratedFiles(build.workspaceDir, agentFiles);
@@ -398,6 +399,7 @@ export function createGenerateRuntime(deps = {}) {
       modelTurns: agentResult.telemetry?.model_turns ?? null,
       repeatedActionBlocks: agentResult.telemetry?.repeated_action_blocks ?? 0,
       verificationAttempts: agentResult.telemetry?.verification_attempts ?? 0,
+      routeEscalationCount: Array.isArray(agentResult.route_escalations) ? agentResult.route_escalations.length : 0,
       durationMs: Date.now() - agentStartedAt,
       routeScore: routeProfile?.score ?? null,
       routeReasons: routeProfile?.reasons || [],
@@ -419,6 +421,7 @@ export function createGenerateRuntime(deps = {}) {
       verificationMode: isBoardPasswordConfigured() ? "real-ready" : "local-simulated",
       agentSummary: agentResult.summary,
       agentTelemetry: agentResult.telemetry || null,
+      route_escalations: Array.isArray(agentResult.route_escalations) ? agentResult.route_escalations : [],
       repairSummary: repairReport.summary || "",
       repairAttempts: repairReport.attempts || 0,
       routeProfile,
@@ -719,6 +722,7 @@ export function createGenerateRuntime(deps = {}) {
       workspaceDir: build.workspaceDir,
       verificationMode: isBoardPasswordConfigured() ? "real-ready" : "local-simulated",
       agentActions: [],
+      route_escalations: [],
       thinking: "",
     };
   }

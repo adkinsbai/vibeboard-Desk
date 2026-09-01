@@ -39,6 +39,7 @@ import { compactAgentMessages } from "./agentContextBudget.mjs";
 import { createAgentLoopGuard } from "./agentLoopGuard.mjs";
 import { createAgentRunTelemetry, publicAgentRunTelemetry } from "./agentRunTelemetry.mjs";
 import { AGENT_PROGRESS_TYPES, createAgentProgressEvent } from "./agentProgress.mjs";
+import { detectRouteEscalation } from "./routeEscalation.mjs";
 
 const DEFAULT_MAX_ITERATIONS = 30;
 const DEFAULT_MAX_VERIFICATION_ATTEMPTS = 3;
@@ -980,7 +981,9 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
   const { executeTool, actions, lessons: sessionLessons, getFileStore } = createToolExecutor(fileStore, hardware);
   const telemetry = createAgentRunTelemetry();
   const loopGuard = createAgentLoopGuard();
-  const routeProfile = normalizeRouteProfile(runOptions.routeProfile);
+  let routeProfile = normalizeRouteProfile(runOptions.routeProfile);
+  const routeEscalations = [];
+  const touchedFiles = new Set();
   const emitProgress = (type, detail = {}) => {
     if (typeof runOptions.onProgress !== "function") return;
     try {
@@ -997,7 +1000,12 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
       elapsedMs: publicTelemetry.duration_ms,
       message: reason,
     });
-    return { ...result, telemetry: publicTelemetry, route_profile: routeProfile };
+    return {
+      ...result,
+      telemetry: publicTelemetry,
+      route_profile: routeProfile,
+      route_escalations: routeEscalations,
+    };
   };
   const isEditing = Object.keys(fileStore).length > 0;
 
@@ -1044,7 +1052,7 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
   });
 
   const configuredMaxIterations = Number(settings.maxIterations || process.env.VIBEBOARD_AGENT_MAX_ITERATIONS || DEFAULT_MAX_ITERATIONS);
-  const maxIterations = Math.max(1, Math.min(
+  let maxIterations = Math.max(1, Math.min(
     configuredMaxIterations,
     taskContract.max_model_turns,
     routeProfile?.max_model_turns || Number.MAX_SAFE_INTEGER,
@@ -1054,7 +1062,7 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
     process.env.VIBEBOARD_AGENT_MAX_VERIFICATION_ATTEMPTS ??
     DEFAULT_MAX_VERIFICATION_ATTEMPTS,
   );
-  const maxVerificationAttempts = Math.max(0, Math.min(
+  let maxVerificationAttempts = Math.max(0, Math.min(
     configuredVerificationAttempts,
     routeProfile?.max_verification_attempts ?? Number.MAX_SAFE_INTEGER,
   ));
@@ -1283,6 +1291,9 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
         elapsedMs: toolDurationMs,
       });
       if (toolOk && ["create_file", "edit_file"].includes(fnName)) fileRevision += 1;
+      if (toolOk && ["create_file", "edit_file"].includes(fnName) && args.path) {
+        touchedFiles.add(normalizeRouteToolPath(args.path));
+      }
 
       if (onAction) {
         onAction({ tool: fnName, args, result });
@@ -1293,6 +1304,21 @@ export async function runAgent(settings, prompt, fileStore, history = [], onActi
         tool_call_id: tc.id,
         content: result,
       });
+
+      const routeEscalation = detectRouteEscalation({
+        routeProfile,
+        toolName: fnName,
+        args,
+        result,
+        touchedFileCount: touchedFiles.size,
+        fileRevision,
+      });
+      if (routeEscalation) {
+        routeProfile = routeEscalation.profile;
+        maxIterations = Math.max(maxIterations, Number(routeProfile.max_model_turns || 0) || 0);
+        maxVerificationAttempts = Math.max(maxVerificationAttempts, Number(routeProfile.max_verification_attempts || 0) || 0);
+        routeEscalations.push(routeEscalation.escalation);
+      }
 
       // 拦截 done，执行自动验证
       if (fnName === "done") {
@@ -1483,6 +1509,10 @@ function normalizeRouteProfile(value) {
     reasons: Array.isArray(value.reasons) ? value.reasons.map(String).slice(0, 12) : [],
     hard_gates: Array.isArray(value.hard_gates) ? value.hard_gates.map(String).slice(0, 12) : [],
   };
+}
+
+function normalizeRouteToolPath(value = "") {
+  return String(value || "").trim().replaceAll("\\", "/");
 }
 
 function ensureSystemHardwareApp(fileStore, prompt = "") {

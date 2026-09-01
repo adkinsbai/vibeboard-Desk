@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=480,height=360,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>MAKIVO One - Pixel Radio</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main id="radio-screen" aria-label="MAKIVO One 像素音乐台">
+    <canvas id="visualizer" width="480" height="360" aria-hidden="true"></canvas>
+    <header class="radio-head">
+      <span class="brand-mark">MAKIVO <b>ONE</b> / PIXEL RADIO</span>
+      <span id="libraryStatus">BUNDLED LIBRARY</span>
+    </header>
+    <section class="now-playing" aria-live="polite">
+      <p id="trackIndex" class="eyebrow">TRACK 01 / 06</p>
+      <h1 id="trackTitle">Neon Orbit</h1>
+      <p id="trackArtist">MAKIVO HOUSE BAND · LOCAL SESSION</p>
+      <p id="lyricLine">按下播放，让像素开始呼吸。</p>
+    </section>
+    <section class="radio-controls" aria-label="音乐控制">
+      <button id="previousButton" type="button" aria-label="上一首" title="上一首">PREV</button>
+      <button id="playButton" class="primary" type="button" aria-label="播放" title="播放">PLAY</button>
+      <button id="nextButton" type="button" aria-label="下一首" title="下一首">NEXT</button>
+      <span id="timeLabel">00:00</span>
+    </section>
+    <footer class="radio-foot"><span>预装曲库 · 本地播放</span><span id="modeLabel">SPEAKER READY</span></footer>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>

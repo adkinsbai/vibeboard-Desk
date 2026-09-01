@@ -15,6 +15,7 @@ import { createDeviceBindingStore } from "./src/deviceBindingStore.mjs";
 import { createTelemetryStore } from "./src/telemetryStore.mjs";
 import { creditsForTokens, estimateTokensFromPayload, tokensFromModelResponse } from "./src/creditMeter.mjs";
 import {
+  boardConfigForBoundDevice,
   boardEndpoints,
   createBoardConfig,
   deviceIdFrom,
@@ -38,11 +39,10 @@ import { createAssetLibraryStore } from "./src/assetLibrary.mjs";
 import { createAssetRelevanceIndex } from "./src/assetRelevanceIndex.mjs";
 import { createContextRetriever } from "./src/contextRetriever.mjs";
 import { createProjectWorkspace } from "./src/projectWorkspace.mjs";
-import { createDigitalLifeStore } from "./src/digitalLife.mjs";
-import { createDigitalLifeRoutes } from "./src/digitalLifeRoutes.mjs";
 import { createExperienceStore, makePlaybookCandidate } from "./src/experienceStore.mjs";
 import { createPlaybookStore } from "./src/playbookStore.mjs";
 import { createJobRuntime } from "./src/jobRuntime.mjs";
+import { createDebugRecovery } from "./src/debugRuntime.mjs";
 import { executionContextFromRequest } from "./src/executionContext.mjs";
 import { verifyAllLocal } from "./src/verifiers/index.mjs";
 import { classifyError } from "./src/errorClassifier.mjs";
@@ -274,10 +274,14 @@ if (cloudSqliteSnapshot) {
 const SQL = await initSqlJs();
 let db;
 try {
-  const dbBuffer = await cloudSqliteSnapshot?.load().catch((error) => {
+  const cloudDbBuffer = await cloudSqliteSnapshot?.load().catch((error) => {
     console.warn("[db] cloud sqlite snapshot load failed:", error.message);
     return null;
-  }) || await fs.readFile(DB_PATH).catch(() => null);
+  });
+  const localDbBuffer = cloudSqliteSnapshot
+    ? null
+    : await fs.readFile(DB_PATH).catch(() => null);
+  const dbBuffer = cloudDbBuffer || localDbBuffer;
   db = dbBuffer ? new SQL.Database(dbBuffer) : new SQL.Database();
 } catch {
   db = new SQL.Database();
@@ -316,7 +320,10 @@ sqliteDb.run(`
 let dbSaveQueue = Promise.resolve();
 let dbSaveError = null;
 let dbSnapshotHash = hashBuffer(db.export());
+let dbMutationSequence = 0;
+let dbSnapshotSequence = 0;
 let dbSyncQueue = Promise.resolve();
+let dbBootstrapComplete = false;
 
 function shouldSaveSqliteSnapshot() {
   if (!cloudSqliteSnapshot) return false;
@@ -325,6 +332,8 @@ function shouldSaveSqliteSnapshot() {
 }
 
 async function saveDb() {
+  const shouldSaveCloudSnapshot = dbBootstrapComplete && shouldSaveSqliteSnapshot();
+  const mutationSequence = shouldSaveCloudSnapshot ? ++dbMutationSequence : dbMutationSequence;
   dbSaveQueue = dbSaveQueue
     .catch(() => {})
     .then(async () => {
@@ -336,8 +345,9 @@ async function saveDb() {
       await fs.writeFile(DB_PATH, buffer).catch((error) => {
         console.warn("[db] local sqlite save failed:", error.message);
       });
-      if (shouldSaveSqliteSnapshot()) {
+      if (shouldSaveCloudSnapshot) {
         await cloudSqliteSnapshot.save(buffer);
+        dbSnapshotSequence = mutationSequence;
       }
     })
     .catch((error) => {
@@ -370,13 +380,25 @@ async function syncDbFromSnapshot() {
   dbSyncQueue = dbSyncQueue
     .catch(() => {})
     .then(async () => {
+      const mutationSequenceAtStart = dbMutationSequence;
       await flushDbSaves();
+      if (mutationSequenceAtStart !== dbMutationSequence) {
+        return;
+      }
       const buffer = await cloudSqliteSnapshot.load();
-      if (!buffer?.length) return;
+      if (!buffer?.length) {
+        return;
+      }
+      if (mutationSequenceAtStart !== dbMutationSequence) {
+        return;
+      }
       const nextHash = hashBuffer(buffer);
-      if (nextHash === dbSnapshotHash) return;
+      if (nextHash === dbSnapshotHash && dbSnapshotSequence >= mutationSequenceAtStart) {
+        return;
+      }
       db = new SQL.Database(buffer);
       dbSnapshotHash = nextHash;
+      dbSnapshotSequence = mutationSequenceAtStart;
     });
   await dbSyncQueue;
 }
@@ -424,9 +446,6 @@ const conversationStore = projectPersistence;
 const memoryStore = createMemoryStore(sqliteDb, saveDb);
 memoryStore.initSchema();
 
-const digitalLifeStore = createDigitalLifeStore(sqliteDb, saveDb);
-digitalLifeStore.initSchema();
-
 const experienceStore = createExperienceStore(sqliteDb, saveDb);
 experienceStore.initSchema();
 
@@ -460,6 +479,7 @@ const telemetryStore = createTelemetryStore({ sqliteDb, saveSqlite: saveDb, pg, 
 await telemetryStore.initSchema().catch((error) => {
   recordDatabaseStartupError("telemetry", error, { required: true });
 });
+dbBootstrapComplete = true;
 
 const projectWorkspace = createProjectWorkspace({
   root: ROOT,
@@ -865,18 +885,7 @@ async function resolveRequestBoard(input = {}, user = null) {
   const serial = input.device || input.serial || input.deviceSerial || "";
   if (serial) {
     const device = await deviceBindingStore.resolveForUser({ userId: user?.id || "", serial });
-    const board = createBoardConfig(device.board_id || "taishan-gray");
-    const connection = device.connection || {};
-    return {
-      ...board,
-      id: device.board_id || board.id,
-      label: device.label || board.label,
-      host: connection.host || board.host,
-      port: connection.port || board.port,
-      frpHost: connection.host || board.frpHost,
-      frpPort: connection.port || board.frpPort,
-      user: connection.user || board.user,
-    };
+    return boardConfigForBoundDevice(device);
   }
   const deviceId = deviceIdFrom(input, BOARD.id);
   return createBoardConfig(deviceId);
@@ -893,7 +902,7 @@ function staticCacheFor(filePath) {
   if (relative === "index.html" || relative === "market.html" || ext === ".html") {
     return "no-store";
   }
-  if (relative === "app.js" || relative === "portal.js" || relative === "telemetry.js" || relative === "styles.css" || relative.startsWith("digital-life.")) {
+  if (relative === "app.js" || relative === "portal.js" || relative === "telemetry.js" || relative === "styles.css") {
     return "no-store";
   }
   if (relative.startsWith("generated/current/")) {
@@ -1169,9 +1178,13 @@ async function ssh(remoteCommand, timeout = 30000) {
 }
 
 async function wslSshWithInput(remoteCommand, input, timeout = 30000) {
+  const endpoint = activeEndpoint || boardEndpoints(BOARD)[0];
+  if (!endpoint) {
+    throw new Error(`No deployable endpoint is configured for ${BOARD.label || BOARD.id || "board"}.`);
+  }
   return execWslSsh({
     execFile,
-    endpoint: { host: BOARD.frpHost, port: Number(BOARD.frpPort) },
+    endpoint,
     user: BOARD.user,
     password: boardPassword,
     remoteCommand,
@@ -1262,14 +1275,6 @@ async function readBody(req, { limitBytes = 64 * 1024 * 1024 } = {}) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-const digitalLifeRoutes = createDigitalLifeRoutes({
-  store: digitalLifeStore,
-  readBody,
-  json,
-  appendLog: appendServerLog,
-  env: process.env,
-});
-
 function htmlEscape(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -1302,8 +1307,9 @@ function extractJsonObject(text) {
   throw new Error("Model did not return valid JSON.");
 }
 
-function hasBoardCredentials() {
+function hasBoardCredentials(board = BOARD) {
   if (process.env.VIBEBOARD_FORCE_OFFLINE === "1") return false;
+  if (boardEndpoints(board).length === 0) return false;
   return Boolean(
     boardPassword ||
     process.env.VIBEBOARD_IDENTITY_FILE ||
@@ -1675,6 +1681,15 @@ function buildOfflineDeployResult(build = currentBuild) {
     skipped: true,
     mode: "offline-simulated",
     deployed: false,
+    errorType: "board_unreachable",
+    userMessage: "应用只完成了本地验证，还没有写入灰色小电脑。",
+    suggestion: "重新连接小电脑的 FRP/SSH 通道，并确认平台配置了板端用户名、端口和私钥或密码后再部署。",
+    nextActions: [
+      "确认小电脑已开机并联网",
+      "确认灰色版 FRP/SSH 端口可达",
+      "确认板端用户为 linaro",
+      "重新点击部署"
+    ],
     backup: "",
     output: "Hardware deploy skipped because no board credentials or reachable route are configured.",
     compileLog: buildEvidence?.ok ? "local L0-L3 verification passed" : "local verification not available",
@@ -2552,7 +2567,9 @@ async function verifyGoldenLoop(expectedId = currentBuild?.id) {
 
   const remote = buildGoldenLoopRemoteCommand({
     targetStatic: BOARD.targetStatic,
-    service: BOARD.service
+    service: BOARD.service,
+    kioskUrl: BOARD.kioskUrl,
+    statusUrl: BOARD.statusUrl
   });
   const raw = await ssh(remote, 30000);
   return buildGoldenLoopResult({
@@ -2645,7 +2662,7 @@ async function deployCurrent(build = null, context = null) {
 }
 
 async function boardStatus() {
-  const raw = await ssh("curl -fsS http://127.0.0.1:8765/api/status", 10000);
+  const raw = await ssh(`curl -fsS ${shQuote(BOARD.statusUrl)}`, 10000);
   const status = JSON.parse(raw);
   return {
     connected: true,
@@ -2763,17 +2780,12 @@ function fastRawBoardStatus() {
 }
 
 async function rawBoardStatus() {
-  const raw = await ssh("curl -fsS http://127.0.0.1:8765/api/status", 10000);
+  const raw = await ssh(`curl -fsS ${shQuote(BOARD.statusUrl)}`, 10000);
   return JSON.parse(raw);
 }
 
 async function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  if (PUBLIC_DEPLOYMENT && /\/digital-life(?:\.html|\.js|\.css)?$/i.test(url.pathname)) {
-    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("Not found");
-    return;
-  }
   const filePath = resolveStaticFilePath(url.pathname);
   if (!filePath) {
     res.writeHead(403);
@@ -3005,6 +3017,7 @@ const { runAgentRequest } = createAgentOrchestrator({
   contextRetriever,
   recordAgentLearning,
   runGenerateRequest,
+  agentWorkflowVersion: process.env.VIBEBOARD_AGENT_WORKFLOW || "langgraph-v2",
 });
 
 async function runDeployRequest(body = {}) {
@@ -3020,7 +3033,7 @@ async function runDeployRequest(body = {}) {
     error.statusCode = 404;
     throw error;
   }
-  if (!hasBoardCredentials()) {
+  if (!hasBoardCredentials(resolvedBoard)) {
     if (!targetBuild) targetBuild = await loadGeneratedBuild();
     if (targetBuild && (!targetBuild.built || !targetBuild.buildEvidence)) {
       await buildCurrent({ build: targetBuild });
@@ -3139,12 +3152,23 @@ function jobInputForRequest(req, user, type, body = {}) {
   };
 }
 
+const debugRecovery = createDebugRecovery({
+  classifyError,
+  playbookStore,
+  experienceStore,
+  maxAttempts: positiveInt(process.env.VIBEBOARD_DEBUG_MAX_ATTEMPTS, 2),
+  sameSignatureLimit: positiveInt(process.env.VIBEBOARD_DEBUG_SAME_SIGNATURE_LIMIT, 2),
+  retryDelayMs: positiveInt(process.env.VIBEBOARD_DEBUG_RETRY_DELAY_MS, 250),
+  enabled: process.env.VIBEBOARD_DEBUG_RECOVERY !== "0",
+});
+
 const jobRuntime = createJobRuntime({
   jobStore,
   classifyError,
   appendServerLog,
   timeoutMs: DEFAULT_JOB_TIMEOUT_MS,
   maxConcurrency: positiveInt(process.env.VIBEBOARD_JOB_CONCURRENCY, 2),
+  debugRecovery,
 });
 
 jobRuntime.register("agent", async (body = {}, ctx) => {
@@ -3233,13 +3257,13 @@ async function route(req, res) {
         return;
       }
     }
+    if (req.url.startsWith("/api/") && shouldSyncSqliteSnapshot(url.pathname)) {
+      await syncDbFromSnapshot();
+    }
     if (req.method === "GET" && PUBLIC_DEPLOYMENT && url.pathname === "/workbench" && !(await currentUser(req))) {
       res.writeHead(302, { Location: "/", "Cache-Control": "no-store" });
       res.end();
       return;
-    }
-    if (req.url.startsWith("/api/") && shouldSyncSqliteSnapshot(url.pathname)) {
-      await syncDbFromSnapshot();
     }
     if (req.method === "GET" && url.pathname === "/api/board-catalog") {
       json(res, 200, { ok: true, boards: buildBoardCatalog(process.env) });
@@ -3271,6 +3295,7 @@ async function route(req, res) {
         requireVerification: REQUIRE_PHONE_VERIFICATION,
       });
       const login = await authStore.login({ phone: body.phone, password: body.password });
+      await flushMutationSaves();
       jsonWithHeaders(res, 200, { ok: true, user: login.user }, {
         "Set-Cookie": sessionCookie(login.session.token, { maxAge: login.session.max_age_seconds, secure: secureCookie(req) }),
       });
@@ -3279,6 +3304,7 @@ async function route(req, res) {
     if (req.method === "POST" && url.pathname === "/api/auth/login") {
       const body = await readBody(req).catch(() => ({}));
       const login = await authStore.login({ phone: body.phone, password: body.password });
+      await flushMutationSaves();
       jsonWithHeaders(res, 200, { ok: true, user: login.user }, {
         "Set-Cookie": sessionCookie(login.session.token, { maxAge: login.session.max_age_seconds, secure: secureCookie(req) }),
       });
@@ -3286,6 +3312,7 @@ async function route(req, res) {
     }
     if (req.method === "POST" && url.pathname === "/api/auth/logout") {
       await authStore.logout(req);
+      await flushMutationSaves();
       jsonWithHeaders(res, 200, { ok: true }, { "Set-Cookie": clearSessionCookie() });
       return;
     }
@@ -3371,13 +3398,6 @@ async function route(req, res) {
         });
         return;
       }
-    }
-    if (PUBLIC_DEPLOYMENT && url.pathname.startsWith("/api/digital-life")) {
-      json(res, 404, { ok: false, error: "API not found" });
-      return;
-    }
-    if (await digitalLifeRoutes.handle(req, res, url)) {
-      return;
     }
     if (req.method === "GET" && url.pathname === "/api/board") {
       const params = Object.fromEntries(url.searchParams.entries());

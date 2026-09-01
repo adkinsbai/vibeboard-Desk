@@ -46,12 +46,16 @@ export function buildDeployUploadEntries({
 
 export function buildDeployRemoteCommand({ board, buildId }) {
   const { release, backup } = buildDeployPaths(board, buildId);
+  const kioskUrl = board.kioskUrl || "http://127.0.0.1:8765/";
+  const statusUrl = board.statusUrl || "http://127.0.0.1:8765/api/status";
   return [
     "set -u",
     `target=${shQuote(board.targetStatic)}`,
     `release=${shQuote(release)}`,
     `backup=${shQuote(backup)}`,
     `app_root=${shQuote(board.appRoot)}`,
+    `kiosk_url=${shQuote(kioskUrl)}`,
+    `status_url=${shQuote(statusUrl)}`,
     "compile_log=\"$release/compile.log\"",
     "program_result=\"$release/hardware-result.json\"",
     "mkdir -p \"$backup\" || exit 10",
@@ -76,11 +80,12 @@ export function buildDeployRemoteCommand({ board, buildId }) {
     "pkill -9 chromium-bin 2>/dev/null || true",
     "pkill -9 chromium 2>/dev/null || true",
     "sleep 1",
-    "nohup \"$app_root/start-kiosk.sh\" >/tmp/vibeboard-kiosk-reload-request.log 2>&1 </dev/null &",
+    "nohup env TAISHAN_SCREEN_URL=\"$kiosk_url\" \"$app_root/start-kiosk.sh\" >/tmp/vibeboard-kiosk-reload-request.log 2>&1 </dev/null &",
     "sleep 5",
     "kiosk=$( { ps -C chromium -o pid=,args= 2>/dev/null; ps -C chromium-bin -o pid=,args= 2>/dev/null; } | head -n 1 || true )",
-    "curl -fsS http://127.0.0.1:8765/ >/tmp/vibeboard-deploy-check.html || exit 30",
-    "printf 'service=%s\\nbackup=%s\\ncompile=%s\\nprogram=%s\\nkiosk=%s\\n' \"$state\" \"$backup\" \"$compile_log\" \"$program_result\" \"$kiosk\""
+    "curl -fsS \"$kiosk_url\" >/tmp/vibeboard-deploy-check.html || exit 30",
+    "curl -fsS \"$status_url\" >/tmp/vibeboard-deploy-status.json || exit 31",
+    "printf 'service=%s\\nbackup=%s\\ncompile=%s\\nprogram=%s\\nkiosk_url=%s\\nstatus_url=%s\\nkiosk=%s\\n' \"$state\" \"$backup\" \"$compile_log\" \"$program_result\" \"$kiosk_url\" \"$status_url\" \"$kiosk\""
   ].join("\n");
 }
 
